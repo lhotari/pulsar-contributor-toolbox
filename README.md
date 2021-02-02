@@ -27,7 +27,7 @@ Some highlights:
 
 ### ptbx_until_test_fails
 
-Runs a `mvn test` command until it fails.
+Runs a `mvn test` command until it fails. This is useful for reproducing flaky test failures.
 
 Example of running `TopicReaderTest`
 ```
