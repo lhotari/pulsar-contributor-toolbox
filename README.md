@@ -19,13 +19,28 @@ All shell script functions are in the [functions/pulsar-contributor-toolbox-func
 
 Some highlights:
 
-### ptbx_untilfail
+### ptbx_until_test_fails
 
-Runs a command until it fails.
+Runs a `mvn test` command until it fails.
+
+Example of running `TopicReaderTest`
+```
+ptbx_until_test_fails -Pcore-modules -pl pulsar-broker -Dtest=TopicReaderTest
+```
+
+### ptbx_until_test_fails_with_logs
+
+Similar as `ptbx_until_test_fails`, but logs the output to a file.
+
+Example of running `TopicReaderTest`
+```
+ptbx_until_test_fails_with_logs -Pcore-modules -pl pulsar-broker -Dtest=TopicReaderTest
+```
 
 ### ptbx_until_test_fails_in_docker
 
-Runs a `mvn test` command within docker to limit CPU and memory resources. This is supported only on a Linux host environment. 
+Runs a `mvn test` command until it fails. The command is run within docker to limit CPU and memory resources.
+This is supported only on a Linux host environment. 
 Some flaky tests fail only when running on limited CPU resources.
 Consider using [Multipass](https://multipass.run/) on Windows or macOS for running tests with limited resources.
 

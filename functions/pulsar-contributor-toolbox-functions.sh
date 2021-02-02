@@ -58,6 +58,22 @@ function ptbx_until_test_fails_in_docker_with_logs() {
   )
 }
 
+function ptbx_until_test_fails() {
+  (
+    bash -c "counter=0
+while mvn -DredirectTestOutputToFile=false -DtestRetryCount=0 test "\""\$@"\"";
+do echo "\""----------- LOOP \$counter ---------------"\""; ((counter++)); 
+done; 
+echo "\""Exited after loop #\$counter"\" "$@"
+  )
+}
+
+function ptbx_until_test_fails_with_logs() {
+  (
+    ptbx_until_test_fails "$@" | ptbx_tee_to_output_log
+  )
+}
+
 function ptbx_tee_to_output_log() {
   tee "output_$(ptbx_datetime).log"
 }
