@@ -6,7 +6,7 @@ A toolbox for a Pulsar Contributor.
 
 Clone this repository to some parent directory, for example in `$HOME/workspace-pulsar`.
 
-Include the functions in your ~/.zshrc or ~/.bashrc file:
+Include the functions in your `~/.zshrc` or `~/.bashrc` file:
 ```
 export PULSAR_CONTRIBUTOR_TOOLBOX=$HOME/workspace-pulsar/pulsar-contributor-toolbox
 . $PULSAR_CONTRIBUTOR_TOOLBOX/functions/pulsar-contributor-toolbox-functions.sh
