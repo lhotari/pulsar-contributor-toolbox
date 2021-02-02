@@ -11,8 +11,19 @@ if [ -z "$PULSAR_CONTRIBUTOR_TOOLBOX" ]; then
   PULSAR_CONTRIBUTOR_TOOLBOX=$(dirname $PULSAR_CONTRIBUTOR_TOOLBOX)
 fi
 
+# alias for refreshing changes
+if [ -n "$BASH_SOURCE" ]; then
+  alias ptbx_refresh="source $BASH_SOURCE"
+else
+  # zsh
+  alias ptbx_refresh="source ${0:a}"
+fi
+
 # add bin directory to path
 export PATH="$PULSAR_CONTRIBUTOR_TOOLBOX/bin:$PATH"
+
+
+
 
 # runs a command until it fails
 function ptbx_untilfail() {
@@ -21,9 +32,39 @@ function ptbx_untilfail() {
   )
 }
 
+# runs a command within docker to limit cpu and memory
+function ptbx_docker_2cores_run() {
+  docker run --cpus=2 --memory=6g -u $UID:$GID --net=host -it --rm -v $HOME:$HOME -w $PWD -v /etc/passwd:/etc/passwd:ro ubuntu "$@"
+}
+
+# runs tests with docker to limit cpu & memory, in a loop until it fails
+# it is assumed that sdkman is used for JDK management. the default JDK version will be used within docker.
+# example: ptbx_until_test_fails_in_docker -Pcore-modules -pl pulsar-broker -Dtest=TopicReaderTest
+function ptbx_until_test_fails_in_docker() {
+  (
+    ptbx_docker_2cores_run \
+    bash -c "source \$HOME/.sdkman/bin/sdkman-init.sh
+counter=0
+while mvn -DredirectTestOutputToFile=false -DtestRetryCount=0 test "\""\$@"\"";
+do echo "\""----------- LOOP \$counter ---------------"\""; ((counter++)); 
+done; 
+echo "\""Exited after loop #\$counter"\" "$@"
+  )
+}
+
+function ptbx_until_test_fails_in_docker_with_logs() {
+  (
+    ptbx_until_test_fails_in_docker "$@" | ptbx_tee_to_output_log
+  )
+}
+
+function ptbx_tee_to_output_log() {
+  tee "output_$(ptbx_datetime).log"
+}
+
 # prints a date & time up to second resolution
 function ptbx_datetime() {
-  date +%Y-%m-%d-%H:%M:%S
+  date +%Y-%m-%d-%H%M%S
 }
 
 # changes the working directory to the Pulsar source code directory set by PULSAR_DEV_DIR
