@@ -22,8 +22,13 @@ fi
 # add bin directory to path
 export PATH="$PULSAR_CONTRIBUTOR_TOOLBOX/bin:$PATH"
 
-
-
+# runs license checks
+function ptbx_run_license_check() {
+  (
+    ptbx_cd_git_root
+    mvn -ntp -DskipTests initialize license:check
+  )
+}
 
 # runs a command until it fails
 function ptbx_untilfail() {
@@ -88,13 +93,17 @@ function ptbx_datetime() {
 
 # changes the working directory to the Pulsar source code directory set by PULSAR_DEV_DIR
 function ptbx_cd_pulsar_dir {
-    if [ -n "$PULSAR_DEV_DIR" ]; then
-        cd "$PULSAR_DEV_DIR"
-    else
-        GITDIR=$(git rev-parse --show-toplevel)
-        [ ! -d "$GITDIR" ] && echo "Not a git directory" && return 1
-        cd $GITDIR
-    fi
+  if [ -n "$PULSAR_DEV_DIR" ]; then
+    cd "$PULSAR_DEV_DIR"
+  else
+    ptbx_cd_git_root
+  fi
+}
+
+function ptbx_cd_git_root {
+  local gitdir=$(git rev-parse --show-toplevel)
+  [ ! -d "$gitdir" ] && echo "Not a git directory" && return 1
+  cd "$gitdir"
 }
 
 # creates a local git working directory that can git pull from the actual working directory
