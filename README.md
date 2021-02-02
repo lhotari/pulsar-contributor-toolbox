@@ -13,6 +13,12 @@ export PULSAR_CONTRIBUTOR_TOOLBOX=$HOME/workspace-pulsar/pulsar-contributor-tool
 PULSAR_DEV_DIR=$HOME/workspace-pulsar/pulsar
 ```
 
+## Supported environment
+
+This toolbox is currently supported on Linux and zsh shell.
+The shell scripts have support for bash, but that is not actively tested and used.
+
+
 ## Shell script functions
 
 All shell script functions are in the [functions/pulsar-contributor-toolbox-functions.sh](functions/pulsar-contributor-toolbox-functions.sh) file.
