@@ -50,7 +50,7 @@ function ptbx_until_test_fails_in_docker() {
 
 function ptbx_until_test_fails_in_docker_with_logs() {
   (
-    ptbx_until_test_fails_in_docker "$@" | ptbx_tee_to_output_log
+    ptbx_until_test_fails_in_docker "$@" |& ptbx_tee_to_output_log
   )
 }
 
@@ -62,7 +62,7 @@ function ptbx_until_test_fails() {
 
 function ptbx_until_test_fails_with_logs() {
   (
-    ptbx_until_test_fails "$@" | ptbx_tee_to_output_log
+    ptbx_until_test_fails "$@" |& ptbx_tee_to_output_log
   )
 }
 
