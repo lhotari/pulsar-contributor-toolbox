@@ -207,3 +207,17 @@ function ptbx_multipass_update_sshconfig() {
   ) > ~/.ssh/multipass_ssh_config
   echo 'Updated ~/.ssh/sshconfig_multipass. use "Include ~/.ssh/multipass_ssh_config" to include it in ~/.ssh/config'
 }
+
+# creates a multipass vm and installs docker in it
+function ptbx_multipass_create_vm_with_docker() {
+  local vmname="$1"
+  [ -n "$vmname" ] || { echo "Pass VM name as argument"; return 1; }
+  ( 
+    multipass launch -d 20G -n $vmname
+echo 'export DEBIAN_FRONTEND=noninteractive
+sudo apt-get update
+sudo apt-get -y install docker.io
+sudo adduser ubuntu docker
+' | multipass shell $vmname
+  )
+}
