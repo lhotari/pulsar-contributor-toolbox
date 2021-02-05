@@ -180,3 +180,30 @@ function ptbx_gitpush_to_forked() {
     fi
   )
 }
+
+# generates ssh config file for connecting to running vms managed by https://multipass.run/
+# this is useful for using rsync to copy files to/from multipass vm
+# prerequisite: copy the multipass ssh key:
+# sudo cp /var/snap/multipass/common/data/multipassd/ssh-keys/id_rsa ~/.ssh/multipass_id_rsa
+# sudo chown $USER:$GROUP ~/.ssh/multipass_id_rsa
+# ssh-keygen -y -f ~/.ssh/multipass_id_rsa > ~/.ssh/multipass_id_rsa.pub
+function ptbx_multipass_update_sshconfig() {
+  (
+  echo 'Host *.multipass
+  User ubuntu
+  IdentityFile ~/.ssh/multipass_id_rsa
+  IdentitiesOnly yes
+  UserKnownHostsFile /dev/null
+  StrictHostKeyChecking no
+  PasswordAuthentication no
+'
+  IFS='
+'
+  for vm in $(multipass ls --format csv | grep Running); do
+      echo "Host $(echo $vm | awk -F , '{ print $1 }').multipass
+  Hostname $(echo $vm | awk -F , '{ print $3 }')
+"
+  done
+  ) > ~/.ssh/multipass_ssh_config
+  echo 'Updated ~/.ssh/sshconfig_multipass. use "Include ~/.ssh/multipass_ssh_config" to include it in ~/.ssh/config'
+}
