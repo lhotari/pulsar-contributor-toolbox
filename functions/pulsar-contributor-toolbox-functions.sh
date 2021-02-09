@@ -221,3 +221,21 @@ sudo adduser ubuntu docker
 ' | multipass shell $vmname
   )
 }
+
+function ptbx_multipass_copy_ssh_key() {
+  (
+    sudo cp /var/snap/multipass/common/data/multipassd/ssh-keys/id_rsa ~/.ssh/multipass_id_rsa
+    sudo chown $USER:$GROUP ~/.ssh/multipass_id_rsa
+    chmod 0600 ~/.ssh/multipass_id_rsa
+    ssh-keygen -y -f ~/.ssh/multipass_id_rsa > ~/.ssh/multipass_id_rsa.pub
+  )
+}
+
+# workaround for https://github.com/canonical/multipass/issues/1866
+function ptbx_multipass_fix_network() {
+  (
+    for table in filter nat mangle; do
+      sudo iptables-legacy -t $table -S | grep Multipass | xargs -L1 sudo iptables-nft -t $table
+    done
+  )
+}
