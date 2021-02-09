@@ -239,3 +239,10 @@ function ptbx_multipass_fix_network() {
     done
   )
 }
+
+function ptbx_multipass_delete() {
+  (
+    local name="$1"
+    multipass stop "$name" && multipass delete "$name" && multipass purge
+  )
+}
