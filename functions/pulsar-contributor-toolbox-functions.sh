@@ -30,6 +30,18 @@ function ptbx_run_license_check() {
   )
 }
 
+function ptbx_build_coremodules() {
+  (
+    ptbx_cd_git_root
+    ptbx_clean_snapshots
+    mvn -Pcore-modules clean install -DskipTests -Dspotbugs.skip=true
+  )
+}
+
+function ptbx_clean_snapshots() {
+  rm -rf ~/.m2/repository/org/apache/pulsar/**-SNAPSHOT
+}
+
 # runs a command until it fails
 function ptbx_untilfail() {
   (
