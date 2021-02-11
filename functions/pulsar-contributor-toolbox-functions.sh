@@ -39,7 +39,7 @@ function ptbx_build_coremodules() {
 }
 
 function ptbx_clean_snapshots() {
-  rm -rf ~/.m2/repository/org/apache/pulsar/**-SNAPSHOT
+  ls -d ~/.m2/repository/org/apache/pulsar/**/*-SNAPSHOT | xargs -r rm -rf
 }
 
 # runs a command until it fails
