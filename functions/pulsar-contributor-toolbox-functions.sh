@@ -39,7 +39,12 @@ function ptbx_build_coremodules() {
 }
 
 function ptbx_clean_snapshots() {
-  ls -d ~/.m2/repository/org/apache/pulsar/**/*-SNAPSHOT | xargs -r rm -rf
+  (
+    if [ -n "$ZSH_NAME" ]; then
+      setopt nonomatch
+    fi
+    ls -d ~/.m2/repository/org/apache/pulsar/**/*-SNAPSHOT 2> /dev/null | xargs -r rm -rf
+  )
 }
 
 # runs a command until it fails
