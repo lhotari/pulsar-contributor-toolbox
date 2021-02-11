@@ -193,6 +193,15 @@ function ptbx_gitpush_to_forked() {
   )
 }
 
+# synchronizes the forked/master remote branch with origin/master
+function ptbx_git_sync_forked_master_with_upstream() {
+  (
+    git fetch origin
+    git branch -f master origin/master
+    git push -f forked master
+  )
+}
+
 # generates ssh config file for connecting to running vms managed by https://multipass.run/
 # this is useful for using rsync to copy files to/from multipass vm
 # prerequisite: copy the multipass ssh key:
