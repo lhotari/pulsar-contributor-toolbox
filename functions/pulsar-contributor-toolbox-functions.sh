@@ -55,8 +55,23 @@ function ptbx_untilfail() {
 }
 
 # runs a command within docker to limit cpu and memory
-function ptbx_docker_2cores_run() {
-  docker run --cpus=2 --memory=6g -u $UID:$GID --net=host -it --rm -v $HOME:$HOME -w $PWD -v /etc/passwd:/etc/passwd:ro ubuntu "$@"
+function ptbx_docker_run() {
+  (
+    local cpus=2
+    local memory=6g
+    while [ true ]; do
+      if [[ "$1" =~ --cpus=.* ]]; then
+        cpus="${1#*=}"
+        shift
+      elif [[ "$1" =~ --memory=.* ]]; then
+        memory="${1#*=}"
+        shift
+      else
+        break
+      fi
+    done
+    docker run --cpus=$cpus --memory=$memory -u $UID:$GID --net=host -it --rm -v $HOME:$HOME -w $PWD -v /etc/passwd:/etc/passwd:ro ubuntu "$@"
+  )
 }
 
 # runs tests with docker to limit cpu & memory, in a loop until it fails
@@ -64,7 +79,20 @@ function ptbx_docker_2cores_run() {
 # example: ptbx_until_test_fails_in_docker -Pcore-modules -pl pulsar-broker -Dtest=TopicReaderTest
 function ptbx_until_test_fails_in_docker() {
   (
-    ptbx_docker_2cores_run \
+    local cpus=2
+    local memory=6g
+    while [ true ]; do
+      if [[ "$1" =~ --cpus=.* ]]; then
+        cpus="${1#*=}"
+        shift
+      elif [[ "$1" =~ --memory=.* ]]; then
+        memory="${1#*=}"
+        shift
+      else
+        break
+      fi
+    done
+    ptbx_docker_run --cpus=$cpus --memory=$memory \
     bash -c "source \$HOME/.sdkman/bin/sdkman-init.sh
     $(ptbx_until_test_fails_script)" "$@"
   )
