@@ -34,7 +34,7 @@ function ptbx_build_coremodules() {
   (
     ptbx_cd_git_root
     ptbx_clean_snapshots
-    mvn -Pcore-modules clean install -DskipTests -Dspotbugs.skip=true
+    mvn -Pcore-modules clean install -DskipTests -Dspotbugs.skip=true -Dassembly.skipAssembly=true
   )
 }
 
