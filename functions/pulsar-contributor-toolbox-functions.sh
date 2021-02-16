@@ -47,6 +47,17 @@ function ptbx_clean_snapshots() {
   )
 }
 
+function ptbx_clean_cppbuild() {
+  (
+    ptbx_cd_git_root
+    cd pulsar-client-cpp
+    if [ -n "$(find '!' -user $USER)" ]; then
+      sudo chown -R $USER:$GROUP .
+    fi
+    git clean -fdx
+  )
+}
+
 # runs a command until it fails
 function ptbx_untilfail() {
   (
