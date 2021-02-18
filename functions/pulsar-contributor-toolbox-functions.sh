@@ -241,7 +241,7 @@ function ptbx_gitpush_to_forked() {
 function ptbx_git_sync_forked_master_with_upstream() {
   (
     git fetch origin
-    git branch -f master origin/master
+    git update-ref refs/heads/master origin/master
     git push -f forked master
   )
 }
