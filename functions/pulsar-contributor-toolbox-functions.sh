@@ -30,6 +30,13 @@ function ptbx_run_license_check() {
   )
 }
 
+# runs license checks and checkstyle
+function ptbx_run_quick_check() {
+  (
+    mvn -ntp -T 1C -Dassembly.skipAssembly=true -DskipSourceReleaseAssembly=true -DskipBuildDistribution=true -Dspotbugs.skip=true verify -DskipTests "$@"
+  )
+}
+
 function ptbx_build_coremodules() {
   (
     ptbx_cd_git_root
