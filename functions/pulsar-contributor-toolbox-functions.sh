@@ -318,3 +318,18 @@ function ptbx_multipass_delete() {
     multipass stop "$name" && multipass delete "$name" && multipass purge
   )
 }
+
+# uploads a maven build log file as a gist, converting to plain text (remove ansi code)
+function ptbx_upload_log_to_gist() {
+  (
+    local filename="$1"
+    shift
+    if [ ! -f "$filename" ]; then
+      echo "File '${filename}' doesn't exist."
+      echo "usage: ptbx_upload_log_to_gist [filename] -d [description]"
+      exit 1
+    fi
+    cat "$filename" | ansi2txt > "${filename}.txt"
+    gh gist create "${filename}.txt" "$@"   
+  )
+}
