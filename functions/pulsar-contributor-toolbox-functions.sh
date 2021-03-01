@@ -145,6 +145,12 @@ echo "Exited after loop #$counter"
 EOF
 }
 
+function ptbx_run_test() {
+  (
+    mvn -DredirectTestOutputToFile=false -DtestRetryCount=0 test "$@"
+  )
+}
+
 function ptbx_tee_to_output_log() {
   tee "output_$(ptbx_datetime).log"
 }
