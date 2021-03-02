@@ -112,7 +112,7 @@ function ptbx_until_test_fails_in_docker() {
     done
     ptbx_docker_run --cpus=$cpus --memory=$memory \
     bash -c "source \$HOME/.sdkman/bin/sdkman-init.sh
-    $(ptbx_until_test_fails_script)" "$@"
+    $(ptbx_until_test_fails_script)" bash "$@"
   )
 }
 
@@ -124,7 +124,7 @@ function ptbx_until_test_fails_in_docker_with_logs() {
 
 function ptbx_until_test_fails() {
   (
-    bash -c "$(ptbx_until_test_fails_script)" "$@"
+    bash -c "$(ptbx_until_test_fails_script)" bash "$@"
   )
 }
 
