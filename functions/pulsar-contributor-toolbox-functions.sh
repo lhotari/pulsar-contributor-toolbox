@@ -92,6 +92,12 @@ function ptbx_docker_run() {
   )
 }
 
+# runs a command with sdkman initialized in the docker container
+function ptbx_docker_run_with_sdkman {
+   ptbx_docker_run bash -c 'source $HOME/.sdkman/bin/sdkman-init.sh; "$@"' bash "$@"
+}
+
+
 # runs tests with docker to limit cpu & memory, in a loop until it fails
 # it is assumed that sdkman is used for JDK management. the default JDK version will be used within docker.
 # example: ptbx_until_test_fails_in_docker -Pcore-modules -pl pulsar-broker -Dtest=TopicReaderTest
