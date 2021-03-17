@@ -345,3 +345,31 @@ function ptbx_upload_log_to_gist() {
     gh gist create "${filename}.txt" "$@"   
   )
 }
+
+function ptbx_project_version() {
+  # prints out the project version and nothing else
+  # https://maven.apache.org/plugins/maven-help-plugin/evaluate-mojo.html#forceStdout
+  mvn initialize help:evaluate -Dexpression=project.version -pl . -q -DforceStdout
+}
+
+function ptbx_build_docker_pulsar_all_image() {
+  (
+  ptbx_clean_cppbuild
+  mvn package -Pdocker -am -pl docker/pulsar-all
+  )
+}
+
+function ptbx_build_and_push_pulsar_images() {
+  (
+  ptbx_build_docker_pulsar_all_image || return 1
+  docker_repo_prefix=${1:-lhotari}
+  gitrev=$(git rev-parse HEAD | colrm 10)
+  project_version=$(ptbx_project_version)
+  docker_tag="${project_version}-$gitrev"
+  set -xe  
+  docker tag apachepulsar/pulsar-all:latest ${docker_repo_prefix}/pulsar-all:${docker_tag}
+  docker tag apachepulsar/pulsar:latest ${docker_repo_prefix}/pulsar:${docker_tag}
+  docker push ${docker_repo_prefix}/pulsar-all:${docker_tag}
+  docker push ${docker_repo_prefix}/pulsar:${docker_tag}
+  )
+}
