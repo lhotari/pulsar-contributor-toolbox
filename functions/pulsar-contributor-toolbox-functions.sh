@@ -355,7 +355,14 @@ function ptbx_project_version() {
 function ptbx_build_docker_pulsar_all_image() {
   (
   ptbx_clean_cppbuild
+  mvn clean install -DskipTests
   mvn package -Pdocker -am -pl docker/pulsar-all
+  )
+}
+
+function ptbx_build_pulsar_all_and_push_to_microk8s() {
+  (
+  ptbx_build_and_push_pulsar_images localhost:32000/apachepulsar
   )
 }
 
