@@ -382,12 +382,22 @@ function ptbx_build_and_push_pulsar_images() {
 }
 
 function ptbx_forked_repo() {
-  local repo="$(git remote get-url forked)"
+  ptbx_gh_slug forked
+}
+
+function ptbx_gh_slug() {
+  local repo="$(git remote get-url "$1")"
   repo="${repo##*github.com/}"
   repo="${repo%.*}"
   echo "$repo"
 }
 
+
 function ptbx_github_open_pr_to_own_fork() {
   gh pr create "--repo=$(ptbx_forked_repo)" --base master --head "$(git branch --show-current)" -f
 }
+
+function ptbx_github_open_pr() {
+  gh pr create "--repo=$(ptbx_gh_slug origin)" --base master --head "$(git branch --show-current)" -w
+}
+
