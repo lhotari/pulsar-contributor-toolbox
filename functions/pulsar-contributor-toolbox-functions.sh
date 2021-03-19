@@ -380,3 +380,14 @@ function ptbx_build_and_push_pulsar_images() {
   docker push ${docker_repo_prefix}/pulsar:${docker_tag}
   )
 }
+
+function ptbx_forked_repo() {
+  local repo="$(git remote get-url forked)"
+  repo="${repo##*github.com/}"
+  repo="${repo%.*}"
+  echo "$repo"
+}
+
+function ptbx_github_open_pr_to_own_fork() {
+  gh pr create "--repo=$(ptbx_forked_repo)" --base master --head "$(git branch --show-current)" -f
+}
