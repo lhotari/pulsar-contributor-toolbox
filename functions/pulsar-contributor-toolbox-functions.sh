@@ -398,6 +398,8 @@ function ptbx_github_open_pr_to_own_fork() {
 }
 
 function ptbx_github_open_pr() {
-  gh pr create "--repo=$(ptbx_gh_slug origin)" --base master --head "$(git branch --show-current)" -w
+  local github_user="$(ptbx_forked_repo)"
+  github_user="${github_user%/*}"
+  gh pr create "--repo=$(ptbx_gh_slug origin)" --base master --head "$github_user:$(git branch --show-current)" -w
 }
 
