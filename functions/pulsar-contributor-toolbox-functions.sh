@@ -194,7 +194,7 @@ function ptbx_local_clone_create() {
     parentdir=$(dirname $GITDIR)
     CLONEDIR="$parentdir/$REPONAME.testclone"
     [ -d "$CLONEDIR" ] && echo "Clone already exists" && exit 1
-    git worktree add -f $CLONEDIR $CURRENTBRANCH
+    git worktree add --detach $CLONEDIR $CURRENTBRANCH
     cd "$CLONEDIR"
     echo "Clone created in $(pwd)"
   )
