@@ -189,28 +189,14 @@ function ptbx_local_clone_create() {
     echo "setup local clone"
     GITDIR=$(git rev-parse --show-toplevel)
     [ ! -d "$GITDIR" ] && echo "Not a git directory" && exit 1
-    local UPSTREAM=$(git rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null || true)
-    UPSTREAM="${UPSTREAM:-origin/master}"
     CURRENTBRANCH=$(git rev-parse --abbrev-ref --symbolic-full-name HEAD)
-    ORIGINNAME=$(dirname $UPSTREAM)
-    ORIGINURL=$(git config --get remote.$ORIGINNAME.url)
     REPONAME=$(basename $GITDIR)
     parentdir=$(dirname $GITDIR)
     CLONEDIR="$parentdir/$REPONAME.testclone"
-    cd $parentdir
-    [ -d "$REPONAME.testclone" ] && echo "Clone already exists" && exit 1
-    git clone -b $CURRENTBRANCH $GITDIR/.git $REPONAME.testclone
-    cd $REPONAME.testclone
-    git remote rename origin local
-    git remote add $ORIGINNAME "$ORIGINURL"
-    git fetch local
-    git fetch $ORIGINNAME
-    git branch --set-upstream-to $UPSTREAM
-    git config receive.denyCurrentBranch ignore
-    git config gc.auto 0
+    [ -d "$CLONEDIR" ] && echo "Clone already exists" && exit 1
+    git worktree add -f $CLONEDIR $CURRENTBRANCH
+    cd "$CLONEDIR"
     echo "Clone created in $(pwd)"
-    cd "$GITDIR"
-    git remote add testclone "$CLONEDIR/.git"
   )
 }
 
@@ -223,26 +209,6 @@ function ptbx_local_clone_cd() {
   CLONEDIR="$parentdir/$REPONAME.testclone"
   [ ! -d "$CLONEDIR" ] && ptbx_local_clone_create
   cd $CLONEDIR
-}
-
-# updates the testclone
-function ptbx_local_clone_update() {
-  (
-    [[ "$1" == "1" ]] || ptbx_local_clone_cd
-    local UPSTREAM="$2"
-    git fetch local
-    local update_needed=0
-    git rev-parse --verify -q $CURRENTBRANCH >/dev/null || update_needed=1
-    git diff --quiet $CURRENTBRANCH local/$CURRENTBRANCH || update_needed=1
-    if [ $update_needed -eq 1 ]; then
-      git checkout -B $CURRENTBRANCH local/$CURRENTBRANCH
-      [ -z "$UPSTREAM" ] || git branch --set-upstream-to $UPSTREAM
-      exit 0
-    else
-      echo "No changes."
-      exit 1
-    fi
-  )
 }
 
 # pushes all changes to repository named "forked"
