@@ -376,3 +376,20 @@ function ptbx_github_open_pr() {
   gh pr create "--repo=$(ptbx_gh_slug origin)" --base master --head "$github_user:$(git branch --show-current)" -w
 }
 
+function ptbx_reset_iptables() {
+  (
+  sudo su << 'EOF'
+  for iptables_bin in iptables iptables-legacy; do
+    $iptables_bin -F
+    $iptables_bin -X
+    $iptables_bin -t nat -F
+    $iptables_bin -t nat -X
+    $iptables_bin -t mangle -F
+    $iptables_bin -t mangle -X
+    $iptables_bin -P INPUT ACCEPT
+    $iptables_bin -P FORWARD ACCEPT
+    $iptables_bin -P OUTPUT ACCEPT
+  done
+EOF
+  )
+}
