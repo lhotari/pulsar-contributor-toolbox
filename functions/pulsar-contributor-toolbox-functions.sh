@@ -354,6 +354,26 @@ function ptbx_build_and_push_pulsar_images() {
   )
 }
 
+function ptbx_build_and_push_java_test_image_to_microk8s() {
+  (
+  ptbx_build_and_push_java_test_image localhost:32000/apachepulsar
+  )
+}
+
+function ptbx_build_and_push_java_test_image() {
+  (
+  ptbx_cd_git_root
+  ./build/build_java_test_image.sh || return 1
+  docker_repo_prefix=${1:-lhotari}
+  gitrev=$(git rev-parse HEAD | colrm 10)
+  project_version=$(ptbx_project_version)
+  docker_tag="${project_version}-$gitrev"
+  set -xe  
+  docker tag apachepulsar/java-test-image:latest ${docker_repo_prefix}/java-test-image:${docker_tag}
+  docker push ${docker_repo_prefix}/java-test-image:${docker_tag}
+  )
+}
+
 function ptbx_forked_repo() {
   ptbx_gh_slug forked
 }
