@@ -413,3 +413,24 @@ function ptbx_reset_iptables() {
 EOF
   )
 }
+
+# shows the tracking branch name, usually origin/master
+function ptbx_git_upstream_branch() {
+  git rev-parse --abbrev-ref master@{upstream}
+}
+
+# soft resets all changes to the upstream, useful for re-committing changes in a branch
+function ptbx_reset_to_merge_base_in_upstream() {
+  git reset "$(git merge-base $(ptbx_git_upstream_branch) HEAD)" "$@"
+}
+
+# helper for re-committing changes in a branch
+# this is an alternative way for squashing commits
+# prerequisite is to first reset all commits in the branch with ptbx_reset_to_merge_base
+function ptbx_commit_based_on_reference() {
+  local sha=$1
+  # add same files
+  git log --format="" -n 1 --stat --name-only $sha | xargs git add -f
+  # copy commit message
+  git commit --no-edit --reuse-message=$sha "$@"
+}
