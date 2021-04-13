@@ -45,6 +45,14 @@ function ptbx_build_coremodules() {
   )
 }
 
+function ptbx_build_all() {
+  (
+    ptbx_cd_git_root
+    ptbx_clean_snapshots
+    mvn -T 1C clean install -DskipTests -Dspotbugs.skip=true -Dassembly.skipAssembly=true -DShadeTests -DintegrationTests -DBackwardsCompatTests -Dtest=NoneTest -DfailIfNoTests=false "$@"
+  )
+}
+
 function ptbx_clean_snapshots() {
   (
     if [ -n "$ZSH_NAME" ]; then
