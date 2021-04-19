@@ -61,6 +61,22 @@ function ptbx_build_inttests() {
   )
 }
 
+function ptbx_build_server_distribution() {
+  (
+    ptbx_cd_git_root
+    ptbx_clean_snapshots
+    mvn -Pcore-modules -T 1C clean install -DskipTests -Dspotbugs.skip=true -pl distribution/server -am "$@"
+  )
+}
+
+function ptbx_server_distribution_license_check() {
+  (
+  ptbx_build_server_distribution
+  ptbx_cd_git_root
+  src/check-binary-license --no-presto ./distribution/server/target/apache-pulsar-*-bin.tar.gz
+  )
+}
+
 function ptbx_clean_snapshots() {
   (
     if [ -n "$ZSH_NAME" ]; then
@@ -450,3 +466,4 @@ function ptbx_commit_based_on_reference() {
   # copy commit message
   git commit --no-edit --reuse-message=$sha "$@"
 }
+
