@@ -77,6 +77,22 @@ function ptbx_server_distribution_license_check() {
   )
 }
 
+function ptbx_build_server_distribution_full() {
+  (
+    ptbx_cd_git_root
+    ptbx_clean_snapshots
+    mvn -T 1C clean install -DskipTests -Dspotbugs.skip=true -pl distribution/server -am "$@"
+  )
+}
+
+function ptbx_server_distribution_license_check_full() {
+  (
+  ptbx_build_server_distribution_full
+  ptbx_cd_git_root
+  src/check-binary-license ./distribution/server/target/apache-pulsar-*-bin.tar.gz
+  )
+}
+
 function ptbx_clean_snapshots() {
   (
     if [ -n "$ZSH_NAME" ]; then
