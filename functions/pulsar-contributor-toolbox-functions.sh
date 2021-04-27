@@ -1,5 +1,6 @@
 # shell functions for working with Pulsar development
 # zsh and bash are supported
+
 if [ -z "$PULSAR_CONTRIBUTOR_TOOLBOX" ]; then
   if [ -n "$BASH_SOURCE" ]; then
     PULSAR_CONTRIBUTOR_TOOLBOX=$(dirname $BASH_SOURCE)
@@ -25,29 +26,14 @@ export PATH="$PULSAR_CONTRIBUTOR_TOOLBOX/bin:$PATH"
 function ptbx_run_license_check() {
   (
     ptbx_cd_git_root
-    mvn -ntp -DskipTests -DmainModules initialize license:check
+    mvn -ntp -DskipTests initialize license:check
   )
-}
-
-function _ptbx_add_mainModules() {
-  local setsProfile=0
-  for arg in $additional_args; do
-    case "$arg" in
-      -P*) setsProfile=1 ;;
-      *)
-    esac
-  done
-  if [ $setsProfile -eq 0 ]; then
-    additional_args+=("-DmainModules")
-  fi
 }
 
 # runs license checks and checkstyle
 function ptbx_run_quick_check() {
   (
-    local additional_args=("$@")
-    _ptbx_add_mainModules
-    mvn -ntp -T 1C -Dassembly.skipAssembly=true -DskipSourceReleaseAssembly=true -DskipBuildDistribution=true -Dspotbugs.skip=true verify -DskipTests "${additional_args[@]}"
+    mvn -ntp -T 1C -Dassembly.skipAssembly=true -DskipSourceReleaseAssembly=true -DskipBuildDistribution=true -Dspotbugs.skip=true verify -DskipTests "$@"
   )
 }
 
@@ -63,8 +49,7 @@ function ptbx_build_all() {
   (
     ptbx_cd_git_root
     ptbx_clean_snapshots
-    mvn -T 1C clean install -DskipTests -Dspotbugs.skip=true -Dassembly.skipAssembly=true -DmainModules \
-      -DShadeTests -DintegrationTests -DBackwardsCompatTests -Dtest=NoneTest -DfailIfNoTests=false "$@"
+    mvn -T 1C clean install -DskipTests -Dspotbugs.skip=true -Dassembly.skipAssembly=true -DShadeTests -DintegrationTests -DBackwardsCompatTests -Dtest=NoneTest -DfailIfNoTests=false "$@"
   )
 }
 
@@ -72,8 +57,7 @@ function ptbx_build_inttests() {
   (
     ptbx_cd_git_root
     ptbx_clean_snapshots
-    mvn -T 1C clean install -DskipTests -Dspotbugs.skip=true -Dassembly.skipAssembly=true \
-      -DmainModules -DintegrationTests -Dtest=NoneTest -DfailIfNoTests=false -am -pl tests/integration "$@"
+    mvn -T 1C clean install -DskipTests -Dspotbugs.skip=true -Dassembly.skipAssembly=true -DintegrationTests -Dtest=NoneTest -DfailIfNoTests=false -am -pl tests/integration "$@"
   )
 }
 
@@ -81,7 +65,7 @@ function ptbx_build_server_distribution() {
   (
     ptbx_cd_git_root
     ptbx_clean_snapshots
-    mvn -Pcore-modules -T 1C clean install -DmainModules -DskipTests -Dspotbugs.skip=true -pl distribution/server -am "$@"
+    mvn -Pcore-modules -T 1C clean install -DskipTests -Dspotbugs.skip=true -pl distribution/server -am "$@"
   )
 }
 
@@ -97,7 +81,7 @@ function ptbx_build_server_distribution_full() {
   (
     ptbx_cd_git_root
     ptbx_clean_snapshots
-    mvn -T 1C clean install -DmainModules -DskipTests -Dspotbugs.skip=true -pl distribution/server -am "$@"
+    mvn -T 1C clean install -DskipTests -Dspotbugs.skip=true -pl distribution/server -am "$@"
   )
 }
 
@@ -167,8 +151,6 @@ function ptbx_docker_run_with_sdkman {
 # example: ptbx_until_test_fails_in_docker -Pcore-modules -pl pulsar-broker -Dtest=TopicReaderTest
 function ptbx_until_test_fails_in_docker() {
   (
-    local additional_args=("$@")
-    _ptbx_add_mainModules
     local cpus=2
     local memory=6g
     while [ true ]; do
@@ -184,7 +166,7 @@ function ptbx_until_test_fails_in_docker() {
     done
     ptbx_docker_run --cpus=$cpus --memory=$memory \
     bash -c "source \$HOME/.sdkman/bin/sdkman-init.sh
-    $(ptbx_until_test_fails_script)" bash "${additional_args[@]}"
+    $(ptbx_until_test_fails_script)" bash "$@"
   )
 }
 
@@ -196,9 +178,7 @@ function ptbx_until_test_fails_in_docker_with_logs() {
 
 function ptbx_until_test_fails() {
   (
-    local additional_args=("$@")
-    _ptbx_add_mainModules
-    bash -c "$(ptbx_until_test_fails_script)" bash "${additional_args[@]}"
+    bash -c "$(ptbx_until_test_fails_script)" bash "$@"
   )
 }
 
@@ -221,9 +201,7 @@ EOF
 
 function ptbx_run_test() {
   (
-    local additional_args=("$@")
-    _ptbx_add_mainModules
-    mvn -DredirectTestOutputToFile=false -DtestRetryCount=0 test "${additional_args[@]}"
+    mvn -DredirectTestOutputToFile=false -DtestRetryCount=0 test "$@"
   )
 }
 
@@ -391,7 +369,7 @@ function ptbx_project_version() {
 function ptbx_build_docker_pulsar_all_image() {
   (
   ptbx_clean_cppbuild
-  mvn clean install -Dspotbugs.skip=true -DskipTests -DmainModules
+  mvn clean install -Dspotbugs.skip=true -DskipTests
   mvn package -Pdocker -am -pl docker/pulsar-all
   )
 }
