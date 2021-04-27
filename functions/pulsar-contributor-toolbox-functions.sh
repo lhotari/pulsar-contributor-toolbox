@@ -41,7 +41,7 @@ function ptbx_build_coremodules() {
   (
     ptbx_cd_git_root
     ptbx_clean_snapshots
-    mvn -Pcore-modules -T 1C clean install -DskipTests -Dspotbugs.skip=true -Dassembly.skipAssembly=true "$@"
+    mvn -Pcore-modules,-main -T 1C clean install -DskipTests -Dspotbugs.skip=true -Dassembly.skipAssembly=true "$@"
   )
 }
 
@@ -65,7 +65,7 @@ function ptbx_build_server_distribution() {
   (
     ptbx_cd_git_root
     ptbx_clean_snapshots
-    mvn -Pcore-modules -T 1C clean install -DskipTests -Dspotbugs.skip=true -pl distribution/server -am "$@"
+    mvn -Pcore-modules,-main -T 1C clean install -DskipTests -Dspotbugs.skip=true -pl distribution/server -am "$@"
   )
 }
 
@@ -148,7 +148,7 @@ function ptbx_docker_run_with_sdkman {
 
 # runs tests with docker to limit cpu & memory, in a loop until it fails
 # it is assumed that sdkman is used for JDK management. the default JDK version will be used within docker.
-# example: ptbx_until_test_fails_in_docker -Pcore-modules -pl pulsar-broker -Dtest=TopicReaderTest
+# example: ptbx_until_test_fails_in_docker -Pcore-modules,-main -pl pulsar-broker -Dtest=TopicReaderTest
 function ptbx_until_test_fails_in_docker() {
   (
     local cpus=2
@@ -370,14 +370,14 @@ function ptbx_build_docker_pulsar_all_image() {
   (
   ptbx_clean_cppbuild
   mvn clean install -Dspotbugs.skip=true -DskipTests
-  mvn package -Pdocker -am -pl docker/pulsar-all
+  mvn package -Pdocker,-main -am -pl docker/pulsar-all
   )
 }
 
 function ptbx_build_test_latest_version_image() {
   (
   ptbx_build_docker_pulsar_all_image
-  mvn -B -f tests/docker-images/pom.xml install -am -Pdocker -Dspotbugs.skip=true -DskipTests
+  mvn -B -f tests/docker-images/pom.xml install -am -Pdocker,-main -Dspotbugs.skip=true -DskipTests
   )
 }
 
