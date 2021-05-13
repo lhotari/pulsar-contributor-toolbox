@@ -483,3 +483,6 @@ function ptbx_commit_based_on_reference() {
   git commit --no-edit --reuse-message=$sha "$@"
 }
 
+function ptbx_extract_threaddumps() {
+  cat unit-tests/*_print\ JVM\ thread\ dumps\ when\ cancelled.txt | ansi2txt | colrm 1 29 | csplit - -f threadump`date -I`_ -b %02d.txt --suppress-matched -z '/----------------------- pid/' '{*}'
+}
