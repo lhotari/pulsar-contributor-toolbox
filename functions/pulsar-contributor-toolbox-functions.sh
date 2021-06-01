@@ -71,9 +71,9 @@ function ptbx_build_server_distribution() {
 
 function ptbx_server_distribution_license_check() {
   (
-  ptbx_build_server_distribution
-  ptbx_cd_git_root
-  src/check-binary-license --no-presto ./distribution/server/target/apache-pulsar-*-bin.tar.gz
+    ptbx_build_server_distribution
+    ptbx_cd_git_root
+    src/check-binary-license --no-presto ./distribution/server/target/apache-pulsar-*-bin.tar.gz
   )
 }
 
@@ -87,9 +87,9 @@ function ptbx_build_server_distribution_full() {
 
 function ptbx_server_distribution_license_check_full() {
   (
-  ptbx_build_server_distribution_full
-  ptbx_cd_git_root
-  src/check-binary-license ./distribution/server/target/apache-pulsar-*-bin.tar.gz
+    ptbx_build_server_distribution_full
+    ptbx_cd_git_root
+    src/check-binary-license ./distribution/server/target/apache-pulsar-*-bin.tar.gz
   )
 }
 
@@ -98,7 +98,7 @@ function ptbx_clean_snapshots() {
     if [ -n "$ZSH_NAME" ]; then
       setopt nonomatch
     fi
-    ls -d ~/.m2/repository/org/apache/pulsar/**/*-SNAPSHOT 2> /dev/null | xargs -r rm -rf
+    ls -d ~/.m2/repository/org/apache/pulsar/**/*-SNAPSHOT 2>/dev/null | xargs -r rm -rf
   )
 }
 
@@ -142,9 +142,8 @@ function ptbx_docker_run() {
 
 # runs a command with sdkman initialized in the docker container
 function ptbx_docker_run_with_sdkman {
-   ptbx_docker_run bash -c 'source $HOME/.sdkman/bin/sdkman-init.sh; "$@"' bash "$@"
+  ptbx_docker_run bash -c 'source $HOME/.sdkman/bin/sdkman-init.sh; "$@"' bash "$@"
 }
-
 
 # runs tests with docker to limit cpu & memory, in a loop until it fails
 # it is assumed that sdkman is used for JDK management. the default JDK version will be used within docker.
@@ -165,7 +164,7 @@ function ptbx_until_test_fails_in_docker() {
       fi
     done
     ptbx_docker_run --cpus=$cpus --memory=$memory \
-    bash -c "source \$HOME/.sdkman/bin/sdkman-init.sh
+      bash -c "source \$HOME/.sdkman/bin/sdkman-init.sh
     $(ptbx_until_test_fails_script)" bash "$@"
   )
 }
@@ -189,7 +188,7 @@ function ptbx_until_test_fails_with_logs() {
 }
 
 function ptbx_until_test_fails_script() {
-  cat << 'EOF'
+  cat <<'EOF'
 counter=1
 while mvn -DredirectTestOutputToFile=false -DtestRetryCount=0 test "$@"; do
   echo "----------- LOOP $counter ---------------"
@@ -287,7 +286,7 @@ function ptbx_git_sync_forked_master_with_upstream() {
 # ssh-keygen -y -f ~/.ssh/multipass_id_rsa > ~/.ssh/multipass_id_rsa.pub
 function ptbx_multipass_update_sshconfig() {
   (
-  echo 'Host *.multipass
+    echo 'Host *.multipass
   User ubuntu
   IdentityFile ~/.ssh/multipass_id_rsa
   IdentitiesOnly yes
@@ -295,24 +294,27 @@ function ptbx_multipass_update_sshconfig() {
   StrictHostKeyChecking no
   PasswordAuthentication no
 '
-  IFS='
+    IFS='
 '
-  for vm in $(multipass ls --format csv | grep Running); do
+    for vm in $(multipass ls --format csv | grep Running); do
       echo "Host $(echo $vm | awk -F , '{ print $1 }').multipass
   Hostname $(echo $vm | awk -F , '{ print $3 }')
 "
-  done
-  ) > ~/.ssh/multipass_ssh_config
+    done
+  ) >~/.ssh/multipass_ssh_config
   echo 'Updated ~/.ssh/sshconfig_multipass. use "Include ~/.ssh/multipass_ssh_config" to include it in ~/.ssh/config'
 }
 
 # creates a multipass vm and installs docker in it
 function ptbx_multipass_create_vm_with_docker() {
   local vmname="$1"
-  [ -n "$vmname" ] || { echo "Pass VM name as argument"; return 1; }
-  ( 
+  [ -n "$vmname" ] || {
+    echo "Pass VM name as argument"
+    return 1
+  }
+  (
     multipass launch -d 20G -n $vmname
-echo 'export DEBIAN_FRONTEND=noninteractive
+    echo 'export DEBIAN_FRONTEND=noninteractive
 sudo apt-get update
 sudo apt-get -y install docker.io
 sudo adduser ubuntu docker
@@ -325,7 +327,7 @@ function ptbx_multipass_copy_ssh_key() {
     sudo cp /var/snap/multipass/common/data/multipassd/ssh-keys/id_rsa ~/.ssh/multipass_id_rsa
     sudo chown $USER:$GROUP ~/.ssh/multipass_id_rsa
     chmod 0600 ~/.ssh/multipass_id_rsa
-    ssh-keygen -y -f ~/.ssh/multipass_id_rsa > ~/.ssh/multipass_id_rsa.pub
+    ssh-keygen -y -f ~/.ssh/multipass_id_rsa >~/.ssh/multipass_id_rsa.pub
   )
 }
 
@@ -355,8 +357,8 @@ function ptbx_upload_log_to_gist() {
       echo "usage: ptbx_upload_log_to_gist [filename] -d [description]"
       exit 1
     fi
-    cat "$filename" | ansi2txt > "${filename}.txt"
-    gh gist create "${filename}.txt" "$@"   
+    cat "$filename" | ansi2txt >"${filename}.txt"
+    gh gist create "${filename}.txt" "$@"
   )
 }
 
@@ -368,58 +370,58 @@ function ptbx_project_version() {
 
 function ptbx_build_docker_pulsar_all_image() {
   (
-  ptbx_clean_cppbuild
-  mvn clean install -Dspotbugs.skip=true -DskipTests
-  mvn package -Pdocker,-main -am -pl docker/pulsar-all
+    ptbx_clean_cppbuild
+    mvn clean install -Dspotbugs.skip=true -DskipTests
+    mvn package -Pdocker,-main -am -pl docker/pulsar-all
   )
 }
 
 function ptbx_build_test_latest_version_image() {
   (
-  ptbx_build_docker_pulsar_all_image
-  mvn -B -f tests/docker-images/pom.xml install -am -Pdocker,-main -Dspotbugs.skip=true -DskipTests
+    ptbx_build_docker_pulsar_all_image
+    mvn -B -f tests/docker-images/pom.xml install -am -Pdocker,-main -Dspotbugs.skip=true -DskipTests
   )
 }
 
 function ptbx_build_pulsar_all_and_push_to_microk8s() {
   (
-  ptbx_build_and_push_pulsar_images localhost:32000/apachepulsar
+    ptbx_build_and_push_pulsar_images localhost:32000/apachepulsar
   )
 }
 
 function ptbx_build_and_push_pulsar_images() {
   (
-  ptbx_build_docker_pulsar_all_image || return 1
-  docker_repo_prefix=${1:-lhotari}
-  gitrev=$(git rev-parse HEAD | colrm 10)
-  project_version=$(ptbx_project_version)
-  docker_tag="${project_version}-$gitrev"
-  set -xe  
-  docker tag apachepulsar/pulsar-all:latest ${docker_repo_prefix}/pulsar-all:${docker_tag}
-  docker tag apachepulsar/pulsar:latest ${docker_repo_prefix}/pulsar:${docker_tag}
-  docker push ${docker_repo_prefix}/pulsar-all:${docker_tag}
-  docker push ${docker_repo_prefix}/pulsar:${docker_tag}
+    ptbx_build_docker_pulsar_all_image || return 1
+    docker_repo_prefix=${1:-lhotari}
+    gitrev=$(git rev-parse HEAD | colrm 10)
+    project_version=$(ptbx_project_version)
+    docker_tag="${project_version}-$gitrev"
+    set -xe
+    docker tag apachepulsar/pulsar-all:latest ${docker_repo_prefix}/pulsar-all:${docker_tag}
+    docker tag apachepulsar/pulsar:latest ${docker_repo_prefix}/pulsar:${docker_tag}
+    docker push ${docker_repo_prefix}/pulsar-all:${docker_tag}
+    docker push ${docker_repo_prefix}/pulsar:${docker_tag}
   )
 }
 
 function ptbx_build_and_push_java_test_image_to_microk8s() {
   (
-  ptbx_build_and_push_java_test_image localhost:32000/apachepulsar
+    ptbx_build_and_push_java_test_image localhost:32000/apachepulsar
   )
 }
 
 function ptbx_build_and_push_java_test_image() {
   (
-  ptbx_clean_snapshots
-  ptbx_cd_git_root
-  ./build/build_java_test_image.sh || return 1
-  docker_repo_prefix=${1:-lhotari}
-  gitrev=$(git rev-parse HEAD | colrm 10)
-  project_version=$(ptbx_project_version)
-  docker_tag="${project_version}-$gitrev"
-  set -xe  
-  docker tag apachepulsar/java-test-image:latest ${docker_repo_prefix}/java-test-image:${docker_tag}
-  docker push ${docker_repo_prefix}/java-test-image:${docker_tag}
+    ptbx_clean_snapshots
+    ptbx_cd_git_root
+    ./build/build_java_test_image.sh clean || return 1
+    docker_repo_prefix=${1:-lhotari}
+    gitrev=$(git rev-parse HEAD | colrm 10)
+    project_version=$(ptbx_project_version)
+    docker_tag="${project_version}-$gitrev"
+    set -xe
+    docker tag apachepulsar/java-test-image:latest ${docker_repo_prefix}/java-test-image:${docker_tag}
+    docker push ${docker_repo_prefix}/java-test-image:${docker_tag}
   )
 }
 
@@ -434,7 +436,6 @@ function ptbx_gh_slug() {
   echo "$repo"
 }
 
-
 function ptbx_github_open_pr_to_own_fork() {
   gh pr create "--repo=$(ptbx_forked_repo)" --base master --head "$(git branch --show-current)" -f
 }
@@ -447,7 +448,7 @@ function ptbx_github_open_pr() {
 
 function ptbx_reset_iptables() {
   (
-  sudo su << 'EOF'
+    sudo su <<'EOF'
   for iptables_bin in iptables iptables-legacy; do
     $iptables_bin -F
     $iptables_bin -X
@@ -485,5 +486,22 @@ function ptbx_commit_based_on_reference() {
 }
 
 function ptbx_extract_threaddumps() {
-  cat unit-tests/*_print\ JVM\ thread\ dumps\ when\ cancelled.txt | ansi2txt | colrm 1 29 | csplit - -f threadump`date -I`_ -b %02d.txt --suppress-matched -z '/----------------------- pid/' '{*}'
+  cat unit-tests/*_print\ JVM\ thread\ dumps\ when\ cancelled.txt | ansi2txt | colrm 1 29 | csplit - -f threadump$(date -I)_ -b %02d.txt --suppress-matched -z '/----------------------- pid/' '{*}'
+}
+
+function ptbx_search_jars() {
+  (
+    if [ $ZSH_VERSION ]; then
+      setopt sh_word_split
+    fi
+    IFS=$'\n'
+    JARFILES=$(find -name "*.jar")
+    for i in $JARFILES; do
+      RESULTS=$(unzip -Z -1 -C "$i" "$1" 2>/dev/null)
+      if [ -n "$RESULTS" ]; then
+        echo Results in $i
+        echo "${RESULTS}"
+      fi
+    done
+  )
 }
