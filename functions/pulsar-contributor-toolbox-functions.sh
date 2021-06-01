@@ -410,6 +410,7 @@ function ptbx_build_and_push_java_test_image_to_microk8s() {
 
 function ptbx_build_and_push_java_test_image() {
   (
+  ptbx_clean_snapshots
   ptbx_cd_git_root
   ./build/build_java_test_image.sh || return 1
   docker_repo_prefix=${1:-lhotari}
