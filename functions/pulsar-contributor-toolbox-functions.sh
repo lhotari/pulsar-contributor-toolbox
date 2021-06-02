@@ -63,9 +63,7 @@ function ptbx_build_inttests() {
 
 function ptbx_build_server_distribution() {
   (
-    ptbx_cd_git_root
-    ptbx_clean_snapshots
-    mvn -Pcore-modules,-main -T 1C clean install -DskipTests -Dspotbugs.skip=true -pl distribution/server -am "$@"
+    ptbx_build_server_distribution_full -Pcore-modules,-main "$@"
   )
 }
 
@@ -81,7 +79,7 @@ function ptbx_build_server_distribution_full() {
   (
     ptbx_cd_git_root
     ptbx_clean_snapshots
-    mvn -T 1C clean install -DskipTests -Dspotbugs.skip=true -pl pulsar-sql/presto-distribution,distribution/server -am "$@"
+    mvn -T 1C clean install -Dmaven.test.skip=true -DskipSourceReleaseAssembly=true -Dspotbugs.skip=true -Dlicense.skip=true -pl distribution/server -am "$@"
   )
 }
 
