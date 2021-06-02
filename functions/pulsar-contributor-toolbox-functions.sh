@@ -81,7 +81,7 @@ function ptbx_build_server_distribution_full() {
   (
     ptbx_cd_git_root
     ptbx_clean_snapshots
-    mvn -T 1C clean install -DskipTests -Dspotbugs.skip=true -pl distribution/server -am "$@"
+    mvn -T 1C clean install -DskipTests -Dspotbugs.skip=true -pl pulsar-sql/presto-distribution,distribution/server -am "$@"
   )
 }
 
