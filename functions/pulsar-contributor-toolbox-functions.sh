@@ -345,6 +345,12 @@ function ptbx_multipass_delete() {
   )
 }
 
+# changing cpus or memory for multipass vm
+# https://github.com/canonical/multipass/issues/1158#issuecomment-577315005
+function ptbx_multipass_edit_config() {
+  sudo bash -c 'systemctl stop snap.multipass.multipassd.service;vi /var/snap/multipass/common/data/multipassd/multipassd-vm-instances.json;systemctl start snap.multipass.multipassd.service'
+}
+
 # uploads a maven build log file as a gist, converting to plain text (remove ansi code)
 function ptbx_upload_log_to_gist() {
   (
