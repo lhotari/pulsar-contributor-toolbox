@@ -33,7 +33,7 @@ function ptbx_run_license_check() {
 # runs license checks and checkstyle
 function ptbx_run_quick_check() {
   (
-    mvn -ntp -T 1C -Dassembly.skipAssembly=true -DskipSourceReleaseAssembly=true -DskipBuildDistribution=true -Dspotbugs.skip=true verify -DskipTests "$@"
+    mvn -ntp -T 1C -DskipSourceReleaseAssembly=true -DskipBuildDistribution=true -Dspotbugs.skip=true verify -DskipTests "$@"
   )
 }
 
@@ -41,7 +41,7 @@ function ptbx_build_coremodules() {
   (
     ptbx_cd_git_root
     ptbx_clean_snapshots
-    mvn -Pcore-modules,-main -T 1C clean install -DskipTests -Dspotbugs.skip=true -Dassembly.skipAssembly=true "$@"
+    mvn -Pcore-modules,-main -T 1C clean install -DskipTests -Dspotbugs.skip=true "$@"
   )
 }
 
@@ -49,7 +49,7 @@ function ptbx_build_all() {
   (
     ptbx_cd_git_root
     ptbx_clean_snapshots
-    mvn -T 1C clean install -DskipTests -Dspotbugs.skip=true -Dassembly.skipAssembly=true -DShadeTests -DintegrationTests -DBackwardsCompatTests -Dtest=NoneTest -DfailIfNoTests=false "$@"
+    mvn -T 1C clean install -DskipTests -Dspotbugs.skip=true -DShadeTests -DintegrationTests -DBackwardsCompatTests -Dtest=NoneTest -DfailIfNoTests=false "$@"
   )
 }
 
@@ -57,7 +57,7 @@ function ptbx_build_inttests() {
   (
     ptbx_cd_git_root
     ptbx_clean_snapshots
-    mvn -T 1C clean install -DskipTests -Dspotbugs.skip=true -Dassembly.skipAssembly=true -DintegrationTests -Dtest=NoneTest -DfailIfNoTests=false -am -pl tests/integration "$@"
+    mvn -T 1C clean install -DskipTests -Dspotbugs.skip=true -DintegrationTests -Dtest=NoneTest -DfailIfNoTests=false -am -pl tests/integration "$@"
   )
 }
 
