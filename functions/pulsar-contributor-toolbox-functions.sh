@@ -509,3 +509,18 @@ function ptbx_search_jars() {
     done
   )
 }
+
+function ptbx_cherrypick_branch() {
+  (
+    set -xe
+    branch="$1"
+    target_branch="$2"
+    source_trunk="${3:-master}"
+    temp_branch="tempbranch$$"
+    git branch "$temp_branch" "$branch"
+    git rebase --onto "${target_branch}" "$(git merge-base "${source_trunk}" "${branch}")" "${temp_branch}"
+    git checkout "${target_branch}"
+    git merge --squash "$temp_branch"
+    git branch -D "$temp_branch"
+  )
+}
