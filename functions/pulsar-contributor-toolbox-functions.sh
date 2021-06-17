@@ -524,3 +524,18 @@ function ptbx_cherrypick_branch() {
     git branch -D "$temp_branch"
   )
 }
+
+function ptbx_mvn_publish_to_apache_repository() {
+  (
+    [ -f ~/.m2/apache-settings.xml ] || curl -o ~/.m2/apache-settings.xml https://raw.githubusercontent.com/apache/pulsar/master/src/settings.xml
+    export APACHE_USER="${APACHE_USER:-$USER}"
+    stty -echo
+    printf "Password: "
+    read APACHE_PASSWORD
+    stty echo
+    printf "\n"
+    export APACHE_PASSWORD
+    export GPG_TTY=$(tty)
+    mvn deploy -DskipTests --settings ~/.m2/apache-settings.xml
+  )
+}
