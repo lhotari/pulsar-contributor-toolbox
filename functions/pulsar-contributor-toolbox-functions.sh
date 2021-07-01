@@ -539,3 +539,14 @@ function ptbx_mvn_publish_to_apache_repository() {
     mvn deploy -DskipTests --settings ~/.m2/apache-settings.xml
   )
 }
+
+function ptbx_copy_docker_image_to_microk8s() {
+  (
+    source_image=$1
+    target_image=localhost:32000/$1
+    docker tag $source_image $target_image
+    docker push $target_image
+    CTR="ctr -a /var/snap/microk8s/common/run/containerd.sock -n k8s.io"
+    sudo bash -c "$CTR images pull --plain-http $target_image && $CTR images tag $target_image $source_image"
+  )
+}
