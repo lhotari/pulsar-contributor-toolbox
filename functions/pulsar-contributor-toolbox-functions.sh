@@ -547,7 +547,7 @@ function ptbx_copy_docker_image_to_microk8s() {
     docker tag $source_image $target_image
     docker push $target_image
     CTR="ctr -a /var/snap/microk8s/common/run/containerd.sock -n k8s.io"
-    sudo bash -c "$CTR images pull --plain-http $target_image && $CTR images tag $target_image $source_image && $CTR images tag $target_image docker.io/$source_image"
+    sudo bash -c "$CTR images pull --plain-http $target_image && $CTR images tag $target_image $source_image docker.io/$source_image"
   )
 }
 
