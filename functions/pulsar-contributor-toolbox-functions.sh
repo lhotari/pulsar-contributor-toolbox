@@ -560,3 +560,37 @@ function ptbx_kubectl_check_auth() {
     done
   )
 }
+
+
+function ptbx_list_images_in_ds_pulsar_values() {
+  (
+    values_file="$HOME/workspace-datastax/datastax-pulsar-helm-chart/helm-chart-sources/pulsar/values.yaml"
+    yq e '.image | .[] |= ([.repository, .tag] | join(":")) | to_entries | .[] | .value' "$values_file" | sort | uniq
+  )
+}
+
+function ptbx_crc_ssh() {
+  ssh -i "$HOME/.crc/machines/crc/id_ecdsa" core@192.168.130.11 "$@"
+}
+
+function ptbx_copy_docker_image_to_crc() {
+  (
+    source_image="$1"
+    target_image="default-route-openshift-image-registry.apps-crc.testing/$(oc project -q)/${source_image#*/}"
+    docker tag "$source_image" "$target_image"
+    docker login -u kubeadmin -p "$(oc whoami -t)" default-route-openshift-image-registry.apps-crc.testing
+    docker push "$target_image"
+    ptbx_crc_ssh sudo podman login -u kubeadmin -p "$(oc whoami -t)" default-route-openshift-image-registry.apps-crc.testing --tls-verify=false
+    ptbx_crc_ssh sudo podman image pull --tls-verify=false "$target_image"
+    ptbx_crc_ssh sudo podman image tag "$target_image" "$source_image"
+    ptbx_crc_ssh sudo podman image tag "$target_image" "docker.io/$source_image"
+  )
+}
+
+function ptbx_copy_ds_helm_chart_images_to_crc() {
+  (
+    for image in $(ptbx_list_images_in_ds_pulsar_values); do
+      ptbx_copy_docker_image_to_crc "$image"
+    done
+  )
+}
