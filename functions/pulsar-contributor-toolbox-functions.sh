@@ -550,3 +550,13 @@ function ptbx_copy_docker_image_to_microk8s() {
     sudo bash -c "$CTR images pull --plain-http $target_image && $CTR images tag $target_image $source_image"
   )
 }
+
+function ptbx_kubectl_check_auth() {
+  (
+    for resource in "$@"; do
+      for verb in create get list watch update patch delete deletecollection; do
+        echo "$resource $verb $(kubectl auth can-i $verb $resource)"
+      done
+    done
+  )
+}
