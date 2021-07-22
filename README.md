@@ -48,7 +48,7 @@ ptbx_until_test_fails_with_logs -Pcore-modules -pl pulsar-broker -Dtest=TopicRea
 Runs a `mvn test` command until it fails. The command is run within docker to limit CPU and memory resources.
 This is supported only on a Linux host environment. 
 Some flaky tests fail only when running on limited CPU resources.
-Consider using [Multipass](https://multipass.run/) on Windows or macOS for running tests with limited resources.
+Consider using [Multipass](https://multipass.run/) or [Vagrant](https://www.vagrantup.com/) on Windows or macOS for running tests with limited resources.
 
 Example of running `TopicReaderTest`
 ```
