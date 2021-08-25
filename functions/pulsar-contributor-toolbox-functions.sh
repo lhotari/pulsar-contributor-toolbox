@@ -593,3 +593,67 @@ function ptbx_copy_ds_helm_chart_images_to_crc() {
     done
   )
 }
+
+function _ptbx_upload_encrypted() {
+  local file_name="$1"
+  local recipient="$2"
+  gpg -k "$recipient" &> /dev/null || gpg --recv-key "$recipient" &> /dev/null || { echo "Searching for key for $recipient"; gpg --search-keys "$recipient"; }
+  local transfer_url=$(gpg --encrypt --recipient "$recipient" --trust-model always \
+    |curl --progress-bar --upload-file "-" "https://transfer.sh/${file_name}.gpg" \
+    |tee /dev/null)
+  echo ""
+  echo "command for receiving: curl $transfer_url | gpg --decrypt > ${file_name}"
+}
+
+function ptbx_transfer(){
+    if [ "$1" == "--desc" ]; then
+    echo "Transfers files with gpg encryption over transfer.sh"
+    return 0
+  fi
+  if [ $# -lt 2 ]; then
+      echo "No arguments specified.\nUsage:\n ptbx_transfer <file|directory> recipient\n ... | ptbx_transfer <file_name> recipient">&2
+      return 1
+  fi
+  if tty -s; then
+    local file="$1"
+    local recipient="$2"
+    local file_name=$(basename "$file")
+    if [ ! -e "$file" ]; then
+      echo "$file: No such file or directory">&2
+      return 1
+    fi
+    if [ -d "$file" ]; then
+        file_name="${file_name}.tar.gz"
+        tar zcf - "$file" | _ptbx_upload_encrypted $file_name $recipient
+    else
+        cat "$file" | _ptbx_upload_encrypted $file_name $recipient
+    fi
+  else
+    local file_name=$1
+    local recipient="$2"
+    _ptbx_upload_encrypted $file_name $recipient
+  fi
+}
+
+function ptbx_transfer_unencrypted() { 
+  if [ $# -eq 0 ];then
+    echo "No arguments specified.\nUsage:\n ptbx_transfer_unencrypted <file|directory>\n ... | ptbx_transfer_unencrypted <file_name>">&2
+    return 1
+  fi
+  if tty -s; then
+    file="$1"
+    file_name=$(basename "$file")
+    if [ ! -e "$file" ];then
+      echo "$file: No such file or directory">&2
+      return 1
+    fi
+    if [ -d "$file" ]; then
+      file_name="$file_name.zip"
+      (cd "$file" && zip -r -q - .)|curl --progress-bar --upload-file "-" "https://transfer.sh/$file_name"|tee /dev/null
+    else 
+      cat "$file"|curl --progress-bar --upload-file "-" "https://transfer.sh/$file_name"|tee /dev/null
+    fi
+  else 
+    file_name=$1;curl --progress-bar --upload-file "-" "https://transfer.sh/$file_name"|tee /dev/null
+  fi
+}
