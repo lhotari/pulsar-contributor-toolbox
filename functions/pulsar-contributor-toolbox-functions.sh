@@ -376,7 +376,8 @@ function ptbx_build_docker_pulsar_all_image() {
   (
     ptbx_clean_cppbuild
     mvn clean install -Dspotbugs.skip=true -DskipTests
-    mvn package -Pdocker -am -pl docker/pulsar-all -DskipTests
+    mvn -f docker/pulsar/pom.xml install -am -Pdocker,-main -DskipTests
+    mvn -f docker/pulsar-all/pom.xml install -am -Pdocker,-main -DskipTests
   )
 }
 
