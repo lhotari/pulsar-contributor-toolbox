@@ -397,10 +397,19 @@ function ptbx_build_pulsar_all_and_push_to_microk8s() {
 function ptbx_build_and_push_pulsar_images() {
   (
     ptbx_build_docker_pulsar_all_image || return 1
+    ptbx_push_pulsar_images "$@"
+  )
+}
+
+function ptbx_push_pulsar_images() {
+  (
     docker_repo_prefix=${1:-lhotari}
-    gitrev=$(git rev-parse HEAD | colrm 10)
-    project_version=$(ptbx_project_version)
-    docker_tag="${project_version}-$gitrev"
+    docker_tag="$2"
+    if [[ -z "$docker_tag" ]]; then
+      gitrev=$(git rev-parse HEAD | colrm 10)
+      project_version=$(ptbx_project_version)
+      docker_tag="${project_version}-$gitrev"
+    fi
     set -xe
     docker tag apachepulsar/pulsar-all:latest ${docker_repo_prefix}/pulsar-all:${docker_tag}
     docker tag apachepulsar/pulsar:latest ${docker_repo_prefix}/pulsar:${docker_tag}
