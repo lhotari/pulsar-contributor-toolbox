@@ -422,6 +422,7 @@ function ptbx_push_pulsar_all_with_openid_connect_plugin() {
   (
     docker_repo_prefix=${1:-lhotari}
     docker_tag="$2"
+    docker_repo_image=${3:-pulsar-all}
     TEMP_DIR="$(mktemp -d)"
     mkdir "$TEMP_DIR/extra-jars"
     cd "$TEMP_DIR/extra-jars"
@@ -433,8 +434,8 @@ FROM apachepulsar/pulsar-all:latest
 # COPY extra jars
 COPY --chown=pulsar:0 extra-jars/*.jar /pulsar/lib/
 EOF
-    docker build -t ${docker_repo_prefix}/pulsar-all:${docker_tag} .
-    docker push ${docker_repo_prefix}/pulsar-all:${docker_tag}
+    docker build -t ${docker_repo_prefix}/${docker_repo_image}:${docker_tag} .
+    docker push ${docker_repo_prefix}/${docker_repo_image}:${docker_tag}
   )
 }
 
