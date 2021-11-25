@@ -688,3 +688,10 @@ function ptbx_transfer_unencrypted() {
     file_name=$1;curl --progress-bar --upload-file "-" "https://transfer.sh/$file_name"|tee /dev/null
   fi
 }
+
+function ptbx_show_latest_chart() {
+  : "${2?' usage: ptbx_show_latest_chart [charturl] [chart]'}"
+  local charturl=$1
+  local chart=$2
+  curl -s "${charturl}/index.yaml" | yq -o json eval |jq --arg chart "$chart" -r '.entries[$chart] | .[] | .version' | sort -n | tail -1
+}
