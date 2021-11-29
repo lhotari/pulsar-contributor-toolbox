@@ -713,7 +713,7 @@ function ptbx_use_latest_snapshot_bin (){
         echo "Run the following to use the binary in the latest snapshot"
         echo $latest_generated_ss
         export PULSAR_BIN="${PWD}/${latest_generated_ss}/bin"
-        echo -e "\t\texport PATH="\${PATH}:${PULSAR_BIN}""
+        echo -e "\t\texport PATH=\${PATH}:${PULSAR_BIN}"
     }
 }
 
