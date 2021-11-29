@@ -695,3 +695,35 @@ function ptbx_show_latest_chart() {
   local chart=$2
   curl -s "${charturl}/index.yaml" | yq -o json eval |jq --arg chart "$chart" -r '.entries[$chart] | .[] | .version' | sort -n | tail -1
 }
+
+function ptbx_untar_latest_snapshot (){
+    (
+        ptbx_cd_git_root
+        local TARGET_DIR="./distribution/server/target"
+        local latest_generated_ss="$(ls -dt ${TARGET_DIR}/apache-pulsar-*-SNAPSHOT-bin.tar.gz | head -1)"
+        tar -xvf "$latest_generated_ss" -C "${TARGET_DIR}"
+    )
+}
+
+function ptbx_use_latest_snapshot_bin (){
+    {
+        ptbx_cd_git_root
+        local TARGET_DIR="distribution/server/target"
+        local latest_generated_ss="$(ls -dt ${TARGET_DIR}/apache-pulsar-*-SNAPSHOT | head -1)"
+        echo "Run the following to use the binary in the latest snapshot"
+        echo $latest_generated_ss
+        export PULSAR_BIN="${PWD}/${latest_generated_ss}/bin"
+        echo -e "\t\texport PATH=\${PATH}:${PULSAR_BIN}"
+    }
+}
+
+# assumes there is only one path to a snapshot bin in PATH
+function ptbx_remove_latest_snapshot_bin (){
+    if [[ ! -z $PULSAR_BIN ]]; then
+        echo "To remove latest pulsar bin from PATH, run:"
+        echo "export PATH=${PATH%%:${PULSAR_BIN}*}${PATH##*${PULSAR_BIN}}"
+        unset PULSAR_BIN
+    else
+        echo "PULSAR_BIN not set, nothing to remove"
+    fi
+}
