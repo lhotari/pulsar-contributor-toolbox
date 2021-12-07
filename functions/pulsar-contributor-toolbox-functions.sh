@@ -727,3 +727,17 @@ function ptbx_remove_latest_snapshot_bin (){
         echo "PULSAR_BIN not set, nothing to remove"
     fi
 }
+
+
+function ptbx_add_debug_opts_to_configmap() {
+  (
+    local component="${1:-broker}"
+    set -e
+    local configmap=$(kubectl get -l "component=${component}" configmap -o=name)
+    local cmjson="$(kubectl get -o json $configmap)"
+    local current_opts=$(printf '%s' "$cmjson" | jq -r .data.PULSAR_EXTRA_OPTS)
+    printf '%s' "$cmjson" |
+        jq --arg newcontent "$current_opts -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005" '.data.PULSAR_EXTRA_OPTS |= $newcontent' |
+        kubectl replace -f -
+  )
+}
