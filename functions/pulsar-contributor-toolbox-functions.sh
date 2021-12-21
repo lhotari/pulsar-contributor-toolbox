@@ -405,16 +405,17 @@ function ptbx_push_pulsar_images() {
   (
     docker_repo_prefix=${1:-lhotari}
     docker_tag="$2"
+    docker_repo_image_prefix=${3:-pulsar}
     if [[ -z "$docker_tag" ]]; then
       gitrev=$(git rev-parse HEAD | colrm 10)
       project_version=$(ptbx_project_version)
       docker_tag="${project_version}-$gitrev"
     fi
     set -xe
-    docker tag apachepulsar/pulsar-all:latest ${docker_repo_prefix}/pulsar-all:${docker_tag}
-    docker tag apachepulsar/pulsar:latest ${docker_repo_prefix}/pulsar:${docker_tag}
-    docker push ${docker_repo_prefix}/pulsar-all:${docker_tag}
-    docker push ${docker_repo_prefix}/pulsar:${docker_tag}
+    docker tag apachepulsar/pulsar-all:latest ${docker_repo_prefix}/${docker_repo_image_prefix}-all:${docker_tag}
+    docker tag apachepulsar/pulsar:latest ${docker_repo_prefix}/${docker_repo_image_prefix}:${docker_tag}
+    docker push ${docker_repo_prefix}/${docker_repo_image_prefix}-all:${docker_tag}
+    docker push ${docker_repo_prefix}/${docker_repo_image_prefix}:${docker_tag}
   )
 }
 
@@ -422,7 +423,7 @@ function ptbx_push_pulsar_all_with_openid_connect_plugin() {
   (
     docker_repo_prefix=${1:-lhotari}
     docker_tag="$2"
-    docker_repo_image=${3:-pulsar-all}
+    docker_repo_image=${3:-lunastreaming-all}
     TEMP_DIR="$(mktemp -d)"
     mkdir "$TEMP_DIR/extra-jars"
     cd "$TEMP_DIR/extra-jars"
