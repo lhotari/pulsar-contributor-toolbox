@@ -751,3 +751,13 @@ function ptbx_add_debug_opts_to_configmap() {
         kubectl replace -f -
   )
 }
+
+# tails logs on all pods that match the kubectl get "query"
+# example usage: ptbx_k_logs -n cluster-a -l component=broker | grep ERROR
+function ptbx_k_logs() {
+  {
+    while read -r namespace name; do
+      printf "kubectl logs -f -n %s pod/%s | ts '[%s]'\0" "$namespace" "$name" "$name"
+    done < <(kubectl get "$@" pods --no-headers -o custom-columns=":metadata.namespace,:metadata.name")
+  } | xargs -0 parallel --
+}
