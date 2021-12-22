@@ -757,7 +757,7 @@ function ptbx_add_debug_opts_to_configmap() {
 function ptbx_k_logs() {
   {
     while read -r namespace name; do
-      printf "kubectl logs -f -n %s pod/%s | ts '[%s]'\0" "$namespace" "$name" "$name"
+      printf "kubectl logs -f -n %s pod/%s | sed -e 's/^/[%s] /'\0" "$namespace" "$name" "$name"
     done < <(kubectl get "$@" pods --no-headers -o custom-columns=":metadata.namespace,:metadata.name")
   } | xargs -0 parallel --
 }
