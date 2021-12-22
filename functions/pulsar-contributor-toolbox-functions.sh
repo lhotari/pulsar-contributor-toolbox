@@ -11,6 +11,14 @@ if [ -z "$PULSAR_CONTRIBUTOR_TOOLBOX" ]; then
   PULSAR_CONTRIBUTOR_TOOLBOX=$(dirname $PULSAR_CONTRIBUTOR_TOOLBOX)
 fi
 
+PTBX_DEFAULT_DOCKER_REPO_PREFIX="lhotari"
+PTBX_DEFAULT_DOCKER_IMAGE_PREFIX="pulsar"
+PTBX_DEFAULT_JAVA_TEST_IMAGE_NAME="java-test-image"
+
+if [ -f "$HOME/.pulsar_contributor_toolbox" ]; then
+  source "$HOME/.pulsar_contributor_toolbox"
+fi
+
 # alias for refreshing changes
 if [ -n "$BASH_SOURCE" ]; then
   alias ptbx_refresh="source $BASH_SOURCE"
@@ -403,9 +411,9 @@ function ptbx_build_and_push_pulsar_images() {
 
 function ptbx_push_pulsar_images() {
   (
-    docker_repo_prefix=${1:-lhotari}
+    docker_repo_prefix=${1:-"$PTBX_DEFAULT_DOCKER_REPO_PREFIX"}
     docker_tag="$2"
-    docker_repo_image_prefix=${3:-pulsar}
+    docker_repo_image_prefix=${3:-"$PTBX_DEFAULT_DOCKER_IMAGE_PREFIX"}
     if [[ -z "$docker_tag" ]]; then
       gitrev=$(git rev-parse HEAD | colrm 10)
       project_version=$(ptbx_project_version)
@@ -421,9 +429,9 @@ function ptbx_push_pulsar_images() {
 
 function ptbx_push_pulsar_all_with_openid_connect_plugin() {
   (
-    docker_repo_prefix=${1:-lhotari}
+    docker_repo_prefix=${1:-"$PTBX_DEFAULT_DOCKER_REPO_PREFIX"}
     docker_tag="$2"
-    docker_repo_image=${3:-lunastreaming-all}
+    docker_repo_image_prefix=${3:-"$PTBX_DEFAULT_DOCKER_IMAGE_PREFIX"}
     TEMP_DIR="$(mktemp -d)"
     mkdir "$TEMP_DIR/extra-jars"
     cd "$TEMP_DIR/extra-jars"
@@ -450,13 +458,13 @@ function ptbx_build_and_push_java_test_image() {
   (
     ptbx_cd_git_root
     ./build/build_java_test_image.sh || return 1
-    docker_repo_prefix=${1:-lhotari}
+    docker_repo_prefix=${1:-"$PTBX_DEFAULT_DOCKER_REPO_PREFIX"}
     gitrev=$(git rev-parse HEAD | colrm 10)
     project_version=$(ptbx_project_version)
     docker_tag="${project_version}-$gitrev"
     set -xe
-    docker tag apachepulsar/java-test-image:latest ${docker_repo_prefix}/java-test-image:${docker_tag}
-    docker push ${docker_repo_prefix}/java-test-image:${docker_tag}
+    docker tag apachepulsar/java-test-image:latest ${docker_repo_prefix}/${PTBX_DEFAULT_JAVA_TEST_IMAGE_NAME}:${docker_tag}
+    docker push ${docker_repo_prefix}/${PTBX_DEFAULT_JAVA_TEST_IMAGE_NAME}:${docker_tag}
   )
 }
 
