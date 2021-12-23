@@ -761,3 +761,14 @@ function ptbx_k_logs() {
     done < <(kubectl get "$@" pods --no-headers -o custom-columns=":metadata.namespace,:metadata.name")
   } | xargs -0 parallel --
 }
+
+function ptbx_k_debug_portfw() {
+  {
+    local port=5005
+    while read -r namespace name; do
+      printf "kubectl port-forward -n %s pod/%s %s:5005\0" "$namespace" "$name" "$port"
+      >&2 echo "Forwarding local port $port to ns $namespace pod/$name port 5005"
+      ((port++))
+    done < <(kubectl get "$@" pods --no-headers -o custom-columns=":metadata.namespace,:metadata.name")
+  } | xargs -0 parallel --
+}
