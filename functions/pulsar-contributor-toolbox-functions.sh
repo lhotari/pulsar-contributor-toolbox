@@ -740,15 +740,22 @@ function ptbx_remove_latest_snapshot_bin (){
 
 function ptbx_add_debug_opts_to_configmap() {
   (
+    local ns=pulsar
+    # namespace can be defined with "-n" parameter, for example "-n cluster-a"
+    if [[ $1 == "-n" ]]; then
+      shift
+      ns=$1
+      shift
+    fi
     local component="${1:-broker}"
     local suspend="${2:-n}"
     set -e
-    local configmap=$(kubectl get -l "component=${component}" configmap -o=name)
-    local cmjson="$(kubectl get -o json $configmap)"
+    local configmap=$(kubectl get -n $ns -l "component=${component}" configmap -o=name)
+    local cmjson="$(kubectl get -n $ns -o json $configmap)"
     local current_opts=$(printf '%s' "$cmjson" | jq -r '.data.PULSAR_EXTRA_OPTS // ""' | perl -p -e 's/-agentlib.*?(\s|$)//')
     printf '%s' "$cmjson" |
         jq --arg newcontent "$current_opts -agentlib:jdwp=transport=dt_socket,server=y,suspend=${suspend},address=*:5005" '.data.PULSAR_EXTRA_OPTS |= $newcontent' |
-        kubectl replace -f -
+        kubectl replace -n $ns -f -
   )
 }
 
