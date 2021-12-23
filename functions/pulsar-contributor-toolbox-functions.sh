@@ -765,6 +765,12 @@ function ptbx_k_logs() {
 function ptbx_k_debug_portfw() {
   {
     local port=5005
+    # starting port can be defined with "-p" parameter, for example "-p 5010"
+    if [[ $1 == "-p" ]]; then
+      shift
+      port=$1
+      shift
+    fi
     while read -r namespace name; do
       printf "kubectl port-forward -n %s pod/%s %s:5005\0" "$namespace" "$name" "$port"
       >&2 echo "Forwarding local port $port to ns $namespace pod/$name port 5005"
