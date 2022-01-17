@@ -785,3 +785,10 @@ function ptbx_k_debug_portfw() {
     done < <(kubectl get "$@" pods --no-headers -o custom-columns=":metadata.namespace,:metadata.name")
   } | xargs -0 parallel --
 }
+
+if type mvnd > /dev/null; then
+  # delegate all mvn commands to mvnd
+  function mvn() {
+    mvnd "$@"
+  }
+fi
