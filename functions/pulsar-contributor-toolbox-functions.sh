@@ -377,7 +377,7 @@ function ptbx_upload_log_to_gist() {
 function ptbx_project_version() {
   # prints out the project version and nothing else
   # https://maven.apache.org/plugins/maven-help-plugin/evaluate-mojo.html#forceStdout
-  mvn initialize help:evaluate -Dexpression=project.version -pl . -q -DforceStdout
+  mvn initialize help:evaluate -Dexpression=project.version -pl . -q -DforceStdout | sed 's/\[INFO\] \[stdout\] //'
 }
 
 function ptbx_build_docker_pulsar_all_image() {
