@@ -382,6 +382,7 @@ function ptbx_project_version() {
 
 function ptbx_build_docker_pulsar_all_image() {
   (
+    docker pull ubuntu:20.04
     ptbx_clean_cppbuild
     mvn clean install -Dspotbugs.skip=true -DskipTests
     mvn -f docker/pulsar/pom.xml install -am -Pdocker,-main -DskipTests
@@ -456,6 +457,7 @@ function ptbx_build_and_push_java_test_image_to_microk8s() {
 
 function ptbx_build_and_push_java_test_image() {
   (
+    docker pull ubuntu:20.04
     ptbx_cd_git_root
     ./build/build_java_test_image.sh || return 1
     docker_repo_prefix=${1:-"$PTBX_DEFAULT_DOCKER_REPO_PREFIX"}
