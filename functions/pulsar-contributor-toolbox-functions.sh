@@ -142,7 +142,11 @@ function ptbx_docker_run() {
         break
       fi
     done
-    docker run --cpus=$cpus --memory=$memory -u $UID:$GID --net=host -it --rm -v $HOME:$HOME -w $PWD -v /etc/passwd:/etc/passwd:ro ubuntu "$@"
+    additional_groups=()
+    for gid in $(id -G); do
+      additional_groups+=("--group-add=$gid")
+    done
+    docker run --cpus=$cpus --memory=$memory -u $UID:$GID "${additional_groups[@]}" --net=host -it --rm -v $HOME:$HOME -v /var/run/docker.sock:/var/run/docker.sock -w $PWD -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro ubuntu "$@"
   )
 }
 
