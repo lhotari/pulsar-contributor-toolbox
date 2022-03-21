@@ -798,3 +798,9 @@ if type mvnd > /dev/null; then
     mvnd "$@"
   }
 fi
+
+function ptbx_cancel_own_fork_runs() {
+  for id in $(gh run list -R lhotari/pulsar -L 100 --json databaseId,status -q '.[] | select(.status=="in_progress" or .status=="queued") | .databaseId'); do
+    gh run cancel $id -R lhotari/pulsar
+  done
+}
