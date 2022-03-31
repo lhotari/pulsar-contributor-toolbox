@@ -486,7 +486,7 @@ function ptbx_gh_slug() {
 }
 
 function ptbx_github_open_pr_to_own_fork() {
-  gh pr create "--repo=$(ptbx_forked_repo)" --base master --head "$(git branch --show-current)" -f
+  gh pr create "--repo=$(ptbx_forked_repo)" --base master --head "$(git branch --show-current)" -f "$@"
 }
 
 function ptbx_github_open_pr() {
