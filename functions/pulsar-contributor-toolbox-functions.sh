@@ -805,3 +805,13 @@ function ptbx_cancel_own_fork_runs() {
     gh run cancel $id -R lhotari/pulsar
   done
 }
+
+function ptbx_collect_internal_stats() {
+  (
+    export PATH="$PATH:/pulsar/bin"
+    for topic in $(pulsar-admin topics list-partitioned-topics public/default|xargs echo); do
+      file="stats_internal_$(basename "$topic")_$(date +%s).json"
+      pulsar-admin topics partitioned-stats-internal "$topic" > "$file"
+    done
+  )
+}
