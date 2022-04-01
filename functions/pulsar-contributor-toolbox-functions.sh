@@ -702,6 +702,7 @@ function ptbx_transfer_unencrypted() {
   else 
     file_name=$1;curl --progress-bar --upload-file "-" "https://transfer.sh/$file_name"|tee /dev/null
   fi
+  echo ""
 }
 
 function ptbx_show_latest_chart() {
