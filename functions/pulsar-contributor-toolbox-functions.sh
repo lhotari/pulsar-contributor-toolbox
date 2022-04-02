@@ -861,5 +861,19 @@ function ptbx_delete_old_logs() {
   done
 }
 
+function ptbx_cancel_old_runs() {
+  local page=1
+  while true; do  
+    urls="$(_github_get "/actions/runs?page=$page&status=queued&created=<$(date -I --date="5 days ago")&per_page=100" | jq -r '.workflow_runs[] | .cancel_url')"
+    if [ -z "$urls" ]; then
+      break
+    fi
+    for url in $urls; do
+      echo "cancelling $url"
+      _github_client -X DELETE "${url}"
+    done
+    ((page++))
+  done
+}
 
 
