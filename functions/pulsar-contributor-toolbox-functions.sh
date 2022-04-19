@@ -819,7 +819,7 @@ function ptbx_collect_internal_stats() {
 
 function _github_get() {
   urlpath="$1"
-  _github_client "https://api.github.com/repos/apache/pulsar${urlpath}"
+  _github_client "https://api.github.com/repos/$(ptbx_gh_slug origin)${urlpath}"
 }
 
 function _github_client() {
@@ -848,6 +848,10 @@ function ptbx_cancel_pr_runs() {
 }
 
 function ptbx_delete_old_logs() {
+  (
+  if [ -n "$ZSH_NAME" ]; then
+    set -y
+  fi
   local page=1
   while true; do  
     urls="$(_github_get "/actions/runs?page=$page&created=$(date -I --date="90 days ago")..$(date -I --date="14 days ago")&per_page=100" | jq -r '.workflow_runs[] | .logs_url')"
@@ -860,9 +864,14 @@ function ptbx_delete_old_logs() {
     done
     ((page++))
   done
+  )
 }
 
 function ptbx_cancel_old_runs() {
+  (
+  if [ -n "$ZSH_NAME" ]; then
+    set -y
+  fi
   local page=1
   while true; do  
     urls="$(_github_get "/actions/runs?page=$page&status=queued&created=<$(date -I --date="5 days ago")&per_page=100" | jq -r '.workflow_runs[] | .cancel_url')"
@@ -875,6 +884,27 @@ function ptbx_cancel_old_runs() {
     done
     ((page++))
   done
+  )
 }
 
-
+function ptbx_delete_old_runs() {
+  (
+  if [ -n "$ZSH_NAME" ]; then
+    set -y
+  fi
+  daysago=90
+  while true; do
+    local page=1
+    while true; do  
+      urls="$(_github_get "/actions/runs?page=$page&created=<$(date -I --date="${daysago} days ago")&per_page=100" | jq -r '.workflow_runs[] | .url' | xargs echo)"
+      if [ -z "$urls" ]; then
+        break
+      fi
+      echo "Deleting $daysago days ago, page ${page}..."
+      _github_client -X DELETE --parallel-max 10 -Z $urls
+      ((page++))
+    done
+    ((daysago=daysago+10))
+  done
+  )
+}
