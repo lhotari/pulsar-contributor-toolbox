@@ -894,15 +894,27 @@ function ptbx_delete_old_runs() {
   fi
   daysago=90
   while true; do
+    echo "Days ago ${daysago}"
     local page=1
     while true; do  
       urls="$(_github_get "/actions/runs?page=$page&created=<$(date -I --date="${daysago} days ago")&per_page=100" | jq -r '.workflow_runs[] | .url' | xargs echo)"
       if [ -z "$urls" ]; then
+        echo "Empty page."
         break
       fi
       echo "Deleting $daysago days ago, page ${page}..."
       _github_client -X DELETE --parallel-max 10 -Z $urls
       ((page++))
+      while true; do
+        remaining_limit=$(_github_client -I https://api.github.com/user |grep x-ratelimit-remaining | sed 's/\r$//' | awk '{ print $2 }')
+        echo "Remaining limits: ${remaining_limit}"
+        if [[ $remaining_limit -lt 100 ]]; then
+          echo "Wait 30 seconds..."
+          sleep 30
+        else
+          break
+        fi
+      done
     done
     ((daysago=daysago+10))
   done
