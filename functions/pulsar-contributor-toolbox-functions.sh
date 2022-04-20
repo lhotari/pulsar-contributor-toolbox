@@ -887,6 +887,20 @@ function ptbx_cancel_old_runs() {
   )
 }
 
+function _ptbx_wait_gh_ratelimit() {
+  local limits=${1:-100}
+  while true; do
+    remaining_limit=$(_github_client -I https://api.github.com/user |grep x-ratelimit-remaining | sed 's/\r$//' | awk '{ print $2 }')
+    echo "Remaining limits: ${remaining_limit}"
+    if [[ $remaining_limit -lt $limits ]]; then
+      echo "Wait 30 seconds..."
+      sleep 30
+    else
+      break
+    fi
+  done
+}
+
 function ptbx_delete_old_runs() {
   (
   if [ -n "$ZSH_NAME" ]; then
@@ -897,6 +911,7 @@ function ptbx_delete_old_runs() {
     echo "Days ago ${daysago}"
     local page=1
     while true; do  
+      _ptbx_wait_gh_ratelimit 101
       urls="$(_github_get "/actions/runs?page=$page&created=<$(date -I --date="${daysago} days ago")&per_page=100" | jq -r '.workflow_runs[] | .url' | xargs echo)"
       if [ -z "$urls" ]; then
         echo "Empty page."
@@ -905,16 +920,6 @@ function ptbx_delete_old_runs() {
       echo "Deleting $daysago days ago, page ${page}..."
       _github_client -X DELETE --parallel-max 10 -Z $urls
       ((page++))
-      while true; do
-        remaining_limit=$(_github_client -I https://api.github.com/user |grep x-ratelimit-remaining | sed 's/\r$//' | awk '{ print $2 }')
-        echo "Remaining limits: ${remaining_limit}"
-        if [[ $remaining_limit -lt 100 ]]; then
-          echo "Wait 30 seconds..."
-          sleep 30
-        else
-          break
-        fi
-      done
     done
     ((daysago=daysago+10))
   done
