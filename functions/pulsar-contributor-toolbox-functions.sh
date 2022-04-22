@@ -906,22 +906,34 @@ function ptbx_delete_old_runs() {
   if [ -n "$ZSH_NAME" ]; then
     set -y
   fi
-  daysago=90
+  local daysago_start=91
+  local daysago=$daysago_start
   while true; do
     echo "Days ago ${daysago}"
     local page=1
+    local reset_days=0
     while true; do  
       _ptbx_wait_gh_ratelimit 101
       urls="$(_github_get "/actions/runs?page=$page&created=<$(date -I --date="${daysago} days ago")&per_page=100" | jq -r '.workflow_runs[] | .url' | xargs echo)"
       if [ -z "$urls" ]; then
         echo "Empty page."
+        if [[ $page == 1 ]]; then
+          reset_days=1
+        fi
         break
       fi
       echo "Deleting $daysago days ago, page ${page}..."
       _github_client -X DELETE --parallel-max 10 -Z $urls
       ((page++))
     done
-    ((daysago=daysago+10))
+    ((daysago=daysago+5))
+    if [[ $reset_days == 1 ]]; then
+      reset_days=0
+      if [[ $daysago -gt $((3*365)) ]]; then
+        ((daysago_start++))
+        daysago=$daysago_start
+      fi
+    fi
   done
   )
 }
