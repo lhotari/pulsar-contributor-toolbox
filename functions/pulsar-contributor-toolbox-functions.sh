@@ -104,7 +104,7 @@ function ptbx_clean_snapshots() {
     if [ -n "$ZSH_NAME" ]; then
       setopt nonomatch
     fi
-    ls -d ~/.m2/repository/{org/apache,com/datastax/oss}/pulsar/**/*-SNAPSHOT 2>/dev/null | xargs -r rm -rf
+    ls -d ~/.m2/repository/{org/apache,com/datastax/oss}/pulsar/**/"$(ptbx_project_version)" 2>/dev/null | xargs -r rm -rf
   )
 }
 
