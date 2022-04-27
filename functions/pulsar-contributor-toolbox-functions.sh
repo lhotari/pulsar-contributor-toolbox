@@ -288,6 +288,37 @@ function ptbx_git_sync_forked_master_with_upstream() {
   )
 }
 
+function _ptbx_git_sync_branches() {
+  (
+    local remote=$1
+    shift
+    local -a branches=("${@}")
+    git fetch $remote
+    for branch in "${branches[@]}"; do
+      local current_branch="$(git branch --show-current)"
+      if [[ $branch == $current_branch ]]; then
+        git checkout --detach HEAD
+      fi
+      git update-ref refs/heads/$branch $remote/$branch
+      if [[ $branch == $current_branch ]]; then
+        git checkout $branch
+      fi
+    done
+  )
+}
+
+
+function ptbx_git_sync_pulsar_maintenance_branches_with_upstream() {
+  (
+    cd ~/workspace-pulsar/pulsar
+    _ptbx_git_sync_branches origin master branch-2.7 branch-2.8 branch-2.9 branch-2.10
+    cd ~/workspace-pulsar/pulsar.datastax
+    _ptbx_git_sync_branches datastax 2.7.2_ds 2.8.0_ds 2.8.3_ds
+  )
+}
+
+
+
 # generates ssh config file for connecting to running vms managed by https://multipass.run/
 # this is useful for using rsync to copy files to/from multipass vm
 # prerequisite: copy the multipass ssh key:
