@@ -33,6 +33,9 @@ for i in 1 2 3; do
         fi
     done
 done
+if type -P netstat &>/dev/null; then
+    netstat -tapn > $diagdir/netstat.txt
+fi
 EOF
 
 # run the script and provide the target directory inside the pod
