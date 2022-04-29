@@ -57,7 +57,7 @@ function ptbx_build_all() {
   (
     ptbx_cd_git_root
     ptbx_clean_snapshots
-    mvn -T 1C clean install -DskipTests -Dspotbugs.skip=true -DShadeTests -DintegrationTests -DBackwardsCompatTests -Dtest=NoneTest -DfailIfNoTests=false "$@"
+    command mvn -T 1C clean install -DskipTests -Dspotbugs.skip=true -DShadeTests -DintegrationTests -DBackwardsCompatTests -Dtest=NoneTest -DfailIfNoTests=false "$@"
   )
 }
 
@@ -65,7 +65,7 @@ function ptbx_build_inttests() {
   (
     ptbx_cd_git_root
     ptbx_clean_snapshots
-    mvn -T 1C clean install -DskipTests -Dspotbugs.skip=true -DintegrationTests -Dtest=NoneTest -DfailIfNoTests=false -am -pl tests/integration "$@"
+    command mvn -T 1C clean install -DskipTests -Dspotbugs.skip=true -DintegrationTests -Dtest=NoneTest -DfailIfNoTests=false -am -pl tests/integration "$@"
   )
 }
 
@@ -87,7 +87,7 @@ function ptbx_build_server_distribution_full() {
   (
     ptbx_cd_git_root
     ptbx_clean_snapshots
-    mvn -T 1C clean install -Dmaven.test.skip=true -DskipSourceReleaseAssembly=true -Dspotbugs.skip=true -Dlicense.skip=true -pl distribution/server -am "$@"
+    command mvn -T 1C clean install -Dmaven.test.skip=true -DskipSourceReleaseAssembly=true -Dspotbugs.skip=true -Dlicense.skip=true -pl distribution/server -am "$@"
   )
 }
 
@@ -419,16 +419,16 @@ function ptbx_build_docker_pulsar_all_image() {
   (
     docker pull ubuntu:20.04
     ptbx_clean_cppbuild
-    mvn clean install -Dspotbugs.skip=true -DskipTests
-    mvn -f docker/pulsar/pom.xml install -am -Pdocker,-main -DskipTests
-    mvn -f docker/pulsar-all/pom.xml install -am -Pdocker,-main -DskipTests
+    command mvn clean install -Dspotbugs.skip=true -DskipTests
+    command mvn -f docker/pulsar/pom.xml install -am -Pdocker,-main -DskipTests
+    command mvn -f docker/pulsar-all/pom.xml install -am -Pdocker,-main -DskipTests
   )
 }
 
 function ptbx_build_test_latest_version_image() {
   (
     ptbx_build_docker_pulsar_all_image
-    mvn -B -f tests/docker-images/pom.xml install -am -Pdocker -Dspotbugs.skip=true -DskipTests
+    command mvn -B -f tests/docker-images/pom.xml install -am -Pdocker -Dspotbugs.skip=true -DskipTests
   )
 }
 
