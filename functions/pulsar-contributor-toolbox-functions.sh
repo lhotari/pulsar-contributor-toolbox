@@ -924,8 +924,10 @@ function _ptbx_wait_gh_ratelimit() {
     remaining_limit=$(_github_client -I https://api.github.com/user |grep x-ratelimit-remaining | sed 's/\r$//' | awk '{ print $2 }')
     echo "Remaining limits: ${remaining_limit}"
     if [[ $remaining_limit -lt $limits ]]; then
-      echo "Wait 30 seconds..."
-      sleep 30
+      ratelimit_reset=$(_github_client -I https://api.github.com/user |grep x-ratelimit-reset | sed 's/\r$//' | awk '{ print $2 }')
+      wait_seconds=$((ratelimit_reset - $(date +%s)))
+      echo "Wait ${wait_seconds} seconds, until $(LC_TIME=C date --date="@${ratelimit_reset}")..."
+      sleep $wait_seconds
     else
       break
     fi
