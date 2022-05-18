@@ -860,7 +860,14 @@ function _github_client() {
 function _get_cancel_urls() {
     run_status="${1:-failure}"
     # API reference https://docs.github.com/en/rest/reference/actions#list-workflow-runs-for-a-repository
-    _github_get "/actions/runs?actor=${PR_USER}&branch=${PR_BRANCH}&status=${run_status}&per_page=100" | jq -r --arg head_sha "${HEAD_SHA}" '.workflow_runs[] | select(.head_sha==$head_sha) | .cancel_url'
+    _github_get "/actions/runs?actor=${PR_USER}&branch=${PR_BRANCH}&status=${run_status}&per_page=100" | \
+      {
+        if [ -n "$HEAD_SHA" ]; then
+          jq -r --arg head_sha "${HEAD_SHA}" '.workflow_runs[] | select(.head_sha==$head_sha) | .cancel_url'
+        else
+          jq -r '.workflow_runs[] | .cancel_url'
+        fi
+      }
 }
 
 function ptbx_cancel_pr_runs() {
@@ -872,6 +879,15 @@ function ptbx_cancel_pr_runs() {
   PR_BRANCH=$(printf "%s" "${PR_JSON}" | jq -r .head.ref)
   PR_USER=$(printf "%s" "${PR_JSON}" | jq -r .head.user.login)
 
+  for url in $(_get_cancel_urls in_progress) $(_get_cancel_urls queued); do
+    echo "cancelling $url"
+    _github_client -X POST "${url}"
+  done
+}
+
+function ptbx_cancel_branch_runs() {
+  PR_BRANCH=${1:-master}
+  PR_USER=${2:-lhotari}
   for url in $(_get_cancel_urls in_progress) $(_get_cancel_urls queued); do
     echo "cancelling $url"
     _github_client -X POST "${url}"
