@@ -565,9 +565,18 @@ function ptbx_commit_based_on_reference() {
   git commit --no-edit --reuse-message=$sha "$@"
 }
 
+function _ptbx_extract_threaddumps() {
+  ansi2txt | colrm 1 29 | csplit - -f threadump$(date -I)_ -b %02d.txt --suppress-matched -z '/----------------------- pid/' '{*}'
+}
+
 function ptbx_extract_threaddumps() {
   local FILE="${1:-"$(find -name "*_print\ JVM\ thread\ dumps\ when\ cancelled.txt" -print -quit)"}"
-  cat "$FILE" | ansi2txt | colrm 1 29 | csplit - -f threadump$(date -I)_ -b %02d.txt --suppress-matched -z '/----------------------- pid/' '{*}'
+  cat "$FILE" | _ptbx_extract_threaddumps
+}
+
+function ptbx_extract_threaddumps_from_zip() {
+  local ZIPFILE=$1
+  unzip -p $ZIPFILE "*print JVM thread dumps*" | _ptbx_extract_threaddumps
 }
 
 function ptbx_search_jars() {
