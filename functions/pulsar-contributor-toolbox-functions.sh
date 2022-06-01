@@ -146,7 +146,7 @@ function ptbx_docker_run() {
     for gid in $(id -G); do
       additional_groups+=("--group-add=$gid")
     done
-    docker run --cpus=$cpus --memory=$memory -u $UID:$GID "${additional_groups[@]}" --net=host -it --rm -v $HOME:$HOME -v /var/run/docker.sock:/var/run/docker.sock -w $PWD -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro ubuntu "$@"
+    docker run --cpus=$cpus --memory=$memory -u "$UID:${GID:-"$(id -g)"}" "${additional_groups[@]}" --net=host -it --rm -v $HOME:$HOME -v /var/run/docker.sock:/var/run/docker.sock -w $PWD -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro ubuntu "$@"
   )
 }
 
