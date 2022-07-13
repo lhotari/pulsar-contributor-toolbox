@@ -964,7 +964,7 @@ function ptbx_delete_old_runs() {
   if [ -n "$ZSH_NAME" ]; then
     set -y
   fi
-  local daysago_start=91
+  local daysago_start=${1:-91}
   local daysago=$daysago_start
   while true; do
     echo "Days ago ${daysago}"
@@ -987,7 +987,7 @@ function ptbx_delete_old_runs() {
     ((daysago=daysago+5))
     if [[ $reset_days == 1 ]]; then
       reset_days=0
-      if [[ $daysago -gt $((3*365)) ]]; then
+      if [[ $daysago -gt $((4*365)) ]]; then
         ((daysago_start++))
         daysago=$daysago_start
       fi
