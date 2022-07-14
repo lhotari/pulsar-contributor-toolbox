@@ -859,7 +859,7 @@ function ptbx_collect_internal_stats() {
 
 function _github_get() {
   urlpath="$1"
-  _github_client "https://api.github.com/repos/$(ptbx_gh_slug origin)${urlpath}"
+  _github_client -f "https://api.github.com/repos/$(ptbx_gh_slug origin)${urlpath}"
 }
 
 function _github_client() {
@@ -965,33 +965,22 @@ function ptbx_delete_old_runs() {
     set -y
   fi
   local daysago_start=${1:-91}
-  local daysago=$daysago_start
+  local before="$(date -I --date="${daysago_start} days ago")"
+  local runs_json
   while true; do
-    echo "Days ago ${daysago}"
-    local page=1
-    local reset_days=0
-    while true; do  
-      _ptbx_wait_gh_ratelimit 101
-      urls="$(_github_get "/actions/runs?page=$page&created=<$(date -I --date="${daysago} days ago")&per_page=100" | jq -r '.workflow_runs[] | .url' | xargs echo)"
-      if [ -z "$urls" ]; then
-        echo "Empty page."
-        if [[ $page == 1 ]]; then
-          reset_days=1
-        fi
-        break
-      fi
-      echo "Deleting $daysago days ago, page ${page}..."
-      _github_client -X DELETE --parallel-max 10 -Z $urls
-      ((page++))
-    done
-    ((daysago=daysago+5))
-    if [[ $reset_days == 1 ]]; then
-      reset_days=0
-      if [[ $daysago -gt $((4*365)) ]]; then
-        ((daysago_start++))
-        daysago=$daysago_start
-      fi
+    echo "Before ${before}"
+    runs_json="$(_github_get "/actions/runs?created=<=${before}&per_page=100")" || { _ptbx_wait_gh_ratelimit 101; continue; }
+    local urls="$(printf "%s" "$runs_json" | jq -r '.workflow_runs[] | .url' | xargs echo)"
+    if [ -z "$urls" ]; then
+      echo "Empty page. Finishing..."
+      break
     fi
+    echo "Deleting $(printf "%s" "$urls" | wc -w)/$(printf "%s" "$runs_json" | jq -r '.total_count') runs... "
+    { 
+      _github_client --fail-early -f -X DELETE --parallel-max 10 -Z $urls && { 
+        before="$(printf "%s" "$runs_json" | jq -r '.workflow_runs[-1] | .created_at')" || { echo "No created_at found."; break; } 
+      }
+    } || _ptbx_wait_gh_ratelimit 101
   done
   )
 }
