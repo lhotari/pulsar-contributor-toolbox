@@ -984,3 +984,25 @@ function ptbx_delete_old_runs() {
   done
   )
 }
+
+function ptbx_video_extract_audio() {
+  local input="$1"
+  local target="${input%.*}_new.aac"
+  echo "Extracting to ${target}"
+  ffmpeg -i "$input" -acodec copy "${target}"
+}
+
+function ptbx_video_replace_audio() {
+  local video="$1"
+  local audio="$2"
+  local video_new="${video%.*}_replaced_audio.${video##*.}"
+  ffmpeg -i "$video" -i "$audio" -vcodec copy -acodec aac -map 0:0 -map 1:0 "${video_new}"
+}
+
+function ptbx_video_speedup() {
+  local video="$1"
+  local video_new="${video%.*}_speedup.${video##*.}"
+  local speedup="${2:-"1.25"}"
+  local speedup_inverted="$(echo "scale=3; 1/${speedup}" | bc | sed 's/^\./0./')"
+  ffmpeg -i "$video" -filter_complex "[0:v]setpts=${speedup_inverted}*PTS[v];[0:a]atempo=${speedup}[a]" -map "[v]" -map "[a]" "${video_new}"
+}
