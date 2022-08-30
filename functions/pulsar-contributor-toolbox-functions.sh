@@ -869,7 +869,11 @@ function _github_client() {
 function _get_cancel_urls() {
     run_status="${1:-failure}"
     # API reference https://docs.github.com/en/rest/reference/actions#list-workflow-runs-for-a-repository
-    _github_get "/actions/runs?actor=${PR_USER}&branch=${PR_BRANCH}&status=${run_status}&per_page=100" | \
+    local actionsurl="/actions/runs?branch=${PR_BRANCH}&status=${run_status}&per_page=100"
+    if [[ -n "${PR_USER}" && "${PR_USER}" != "any" ]]; then
+      actionsurl="${actionsurl}&actor=${PR_USER}"
+    fi
+    _github_get "$actionsurl" | \
       {
         if [ -n "$HEAD_SHA" ]; then
           jq -r --arg head_sha "${HEAD_SHA}" '.workflow_runs[] | select(.head_sha==$head_sha) | .cancel_url'
