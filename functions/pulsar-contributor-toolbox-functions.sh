@@ -947,6 +947,21 @@ function ptbx_cancel_old_runs() {
   )
 }
 
+function ptbx_enable_all_workflows() {
+  (
+  local action=${1:-"enable"}
+  if [ -n "$ZSH_NAME" ]; then
+    set -y
+  fi
+  exec {results_fd}< <(_github_get "/actions/workflows?per_page=100" | jq -r '.workflows[] | [.name,.url,.html_url] | @tsv')
+  while IFS=$'\t' read -r name url html_url <&${results_fd}; do
+    echo "${name} ${html_url}"
+    _github_client -X PUT "${url}/${action}"
+  done
+  )
+}
+
+
 function ptbx_cancel_pending_runs() {
   (
   local skip=${1:-0}
