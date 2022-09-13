@@ -6,18 +6,6 @@ const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
 const owner = "apache"
 const repo = "pulsar"
 
-function rerunIfPending(run) {
-    if (run.status === "in_progress" && run.conclusion === "failure") {
-        octokit.rest.actions.reRunWorkflowFailedJobs({
-            owner,
-            repo,
-            run_id: run.id,
-          });
-          console.log("triggered re-run for", run.id, "https://github.com/apache/pulsar/actions/runs/"+run.id)
-    }
-    
-}
-
 function cancelIfInStatus(run, statuses) {
     if (statuses.includes(run.status)) {
         octokit.rest.actions.cancelWorkflowRun({
@@ -25,7 +13,7 @@ function cancelIfInStatus(run, statuses) {
             repo,
             run_id: run.id,
           });
-        console.log("cancelled run for", run.id, "https://github.com/apache/pulsar/actions/runs/"+run.id)
+        console.log("cancelled run for", run.id, run.html_url)
     }
     
 }
@@ -35,6 +23,7 @@ async function downloadRuns(status) {
     let page = 0
     const maxPage = 5
     let all = []
+    console.log("searching", status)
     do {
         const data = await octokit.rest.actions.listWorkflowRunsForRepo({
             owner,
@@ -48,25 +37,32 @@ async function downloadRuns(status) {
         runs = data.data.workflow_runs
         
         for (let r of runs) {
-            if (r.actor.login === "nicoloboschi" || r.actor.login === "lhotari") {
-                continue
+            if (r.head_commit.message.includes("[branch-2")) {
+                cancelIfInStatus(r, [status])
             }
-            cancelIfInStatus(r, [status])
         }
         if (page === maxPage) {
             break
         }
-        
     } while (runs.length !== 0)
     return all
 }
+
+function doIt() {
+    downloadRuns("queued")
+    downloadRuns("in_progress")
+}
+
 function schedule() {
     setTimeout(function () {
-        downloadRuns("queued")
-        downloadRuns("in_progress")
+        doIt()
+        console.log("Done.")
         schedule()
     }, 60 * 1000);
 }
+
+doIt()
+console.log("Done.")
 schedule()
 
 
