@@ -526,6 +526,22 @@ function ptbx_github_open_pr() {
   gh pr create "--repo=$(ptbx_gh_slug origin)" --base master --head "$github_user:$(git branch --show-current)" -w
 }
 
+function ptbx_github_test_pr_in_own_fork() {
+  local github_user="$(ptbx_forked_repo)"
+  github_user="${github_user%/*}"
+  local pr_json=$(curl -s "https://api.github.com/repos/apache/pulsar/pulls?head=${github_user}:$(git branch --show-current)" |jq '.[0]')
+  if printf "%s" "${pr_json}" | jq --arg github_user "${github_user}" -e 'select(.user.login == $github_user)' &> /dev/null; then
+    local fork_pr_title=$(printf "%s" "${pr_json}" | jq -r '"[run-tests] " + .title')
+    local pr_url=$(printf "%s" "${pr_json}" | jq -r '.html_url')
+    local fork_pr_body="This PR is for running tests for upstream PR ${pr_url}."
+    ptbx_git_sync_forked_master_with_upstream
+    ptbx_github_open_pr_to_own_fork -b "${fork_pr_body}" -t "${fork_pr_title}"
+  else
+    echo "Cannot find PR for current branch."
+  fi
+}
+
+
 function ptbx_reset_iptables() {
   (
     sudo su <<'EOF'
