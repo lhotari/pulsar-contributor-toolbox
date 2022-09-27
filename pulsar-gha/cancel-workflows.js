@@ -1,6 +1,7 @@
 const { Octokit } = require("@octokit/rest");
-
-const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
+const { retry } = require("@octokit/plugin-retry")
+const RetryingOctokit = Octokit.plugin(retry);    
+const octokit = new RetryingOctokit({ auth: process.env.GITHUB_TOKEN });
 
 
 const owner = "apache"
@@ -32,14 +33,21 @@ async function downloadRuns(status) {
             status: status,
             page:page++
         });
+
         
+
         console.log("download page #", page)
         runs = data.data.workflow_runs
         
         for (let r of runs) {
-            if (r.head_commit.message.includes("[branch-2")) {
+            /*if (r.head_commit.message.includes("[branch-2") || r.head_branch.includes("branch-2")) {
                 cancelIfInStatus(r, [status])
             }
+            */
+           if (!r.head_sha.startsWith("96420b26d")) {
+                console.log("Not matching", r.html_url)
+                cancelIfInStatus(r, [status])
+           }
         }
         if (page === maxPage) {
             break
@@ -48,22 +56,13 @@ async function downloadRuns(status) {
     return all
 }
 
-function doIt() {
-    downloadRuns("queued")
-    downloadRuns("in_progress")
-}
-
-function schedule() {
-    setTimeout(function () {
-        doIt()
-        console.log("Done.")
-        schedule()
-    }, 60 * 1000);
+async function doIt() {
+    await downloadRuns("in_progress")
+    await downloadRuns("queued")
 }
 
 doIt()
 console.log("Done.")
-schedule()
 
 
 
