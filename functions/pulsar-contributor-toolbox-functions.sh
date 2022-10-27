@@ -283,8 +283,9 @@ function ptbx_gitpush_to_forked() {
 function ptbx_git_sync_forked_master_with_upstream() {
   (
     git fetch origin
-    git update-ref refs/heads/master origin/master
-    git push -f forked master
+    local default_branch=$(ptbx_detect_default_branch)
+    git update-ref refs/heads/${default_branch} origin/${default_branch}
+    git push -f forked ${default_branch}
   )
 }
 
@@ -517,13 +518,24 @@ function ptbx_gh_slug() {
 }
 
 function ptbx_github_open_pr_to_own_fork() {
-  gh pr create "--repo=$(ptbx_forked_repo)" --base master --head "$(git branch --show-current)" -f "$@"
+  local default_branch=$(ptbx_detect_default_branch)
+  gh pr create "--repo=$(ptbx_forked_repo)" --base "${default_branch}" --head "$(git branch --show-current)" -f "$@"
 }
+
+function ptbx_detect_default_branch() {
+  if [[ "$(git branch --list -r origin/main | wc -l)" == "1" ]]; then
+    echo main
+  else
+    echo master
+  fi
+}
+
 
 function ptbx_github_open_pr() {
   local github_user="$(ptbx_forked_repo)"
   github_user="${github_user%/*}"
-  gh pr create "--repo=$(ptbx_gh_slug origin)" --base master --head "$github_user:$(git branch --show-current)" -w
+  local default_branch=$(ptbx_detect_default_branch)
+  gh pr create "--repo=$(ptbx_gh_slug origin)" --base "${default_branch}" --head "$github_user:$(git branch --show-current)" -w
 }
 
 function ptbx_github_test_pr_in_own_fork() {
@@ -570,7 +582,8 @@ EOF
 
 # shows the tracking branch name, usually origin/master
 function ptbx_git_upstream_branch() {
-  git rev-parse --abbrev-ref master@{upstream}
+  local default_branch=$(ptbx_detect_default_branch)
+  git rev-parse --abbrev-ref "${default_branch}@{upstream}"
 }
 
 # soft resets all changes to the upstream, useful for re-committing changes in a branch
