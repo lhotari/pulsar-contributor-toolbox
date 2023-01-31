@@ -1087,3 +1087,8 @@ function ptbx_video_speedup() {
   local speedup_inverted="$(echo "scale=3; 1/${speedup}" | bc | sed 's/^\./0./')"
   ffmpeg -i "$video" -filter_complex "[0:v]setpts=${speedup_inverted}*PTS[v];[0:a]atempo=${speedup}[a]" -map "[v]" -map "[a]" "${video_new}"
 }
+
+function ptbx_split_splunk_threaddumps() {
+  local jsonfile="$1"
+  jq  '.result._raw | fromjson | {"message": .message | join("\n")} | select(.message | contains("Full thread dump"))' "$jsonfile" |jq -s . |mlr --ijson --opprint --ho put -q 'begin { @ts=systimeint(); }; emit >"/tmp/threaddump".@ts."_".NR.".txt", $message;'
+}
