@@ -48,8 +48,14 @@ function ptbx_run_quick_check() {
 function ptbx_build_coremodules() {
   (
     ptbx_cd_git_root
-    ptbx_clean_snapshots
-    mvn -Pcore-modules,-main -T 1C clean install -DskipTests -Dspotbugs.skip=true "$@"
+    local clean_param="clean"
+    if [[ "$1" == "--noclean" || "$1" == "-nc" ]]; then
+      clean_param=""
+      shift
+    else
+      ptbx_clean_snapshots
+    fi
+    mvn -Pcore-modules,-main -T 1C $clean_param install -DskipTests -Dspotbugs.skip=true "$@"
   )
 }
 
