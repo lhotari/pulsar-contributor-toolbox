@@ -417,9 +417,14 @@ function ptbx_upload_log_to_gist() {
 }
 
 function ptbx_project_version() {
-  # prints out the project version and nothing else
-  # https://maven.apache.org/plugins/maven-help-plugin/evaluate-mojo.html#forceStdout
-  mvn initialize help:evaluate -Dexpression=project.version -pl . -q -DforceStdout | sed 's/\[INFO\] \[stdout\] //' | grep -F -v '[WARN]' | tail -1
+  if command -v xmlstarlet &>/dev/null; then
+    # fast way to extract project version
+    xmlstarlet sel -t -m _:project -v _:version -n pom.xml
+  else
+    # prints out the project version and nothing else
+    # https://maven.apache.org/plugins/maven-help-plugin/evaluate-mojo.html#forceStdout
+    mvn initialize help:evaluate -Dexpression=project.version -pl . -q -DforceStdout | sed 's/\[INFO\] \[stdout\] //' | grep -F -v '[WARN]' | tail -1
+  fi
 }
 
 function ptbx_build_docker_pulsar_all_image() {
