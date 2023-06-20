@@ -79,7 +79,7 @@ function ptbx_run_inttest() {
   (
     ptbx_cd_git_root
     export PULSAR_TEST_IMAGE_NAME=apachepulsar/java-test-image:latest
-    command mvn -T 1C test -Dspotbugs.skip=true -DintegrationTests -pl tests/integration "$@"
+    command mvn -T 1C test -DredirectTestOutputToFile=false -DtestRetryCount=0 -Dspotbugs.skip=true -DintegrationTests -pl tests/integration "$@"
   )
 }
 
