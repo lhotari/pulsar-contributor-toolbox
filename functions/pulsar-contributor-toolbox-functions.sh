@@ -75,6 +75,14 @@ function ptbx_build_inttests() {
   )
 }
 
+function ptbx_run_inttest() {
+  (
+    ptbx_cd_git_root
+    export PULSAR_TEST_IMAGE_NAME=apachepulsar/java-test-image:latest
+    command mvn -T 1C test -Dspotbugs.skip=true -DintegrationTests -pl tests/integration "$@"
+  )
+}
+
 function ptbx_build_server_distribution() {
   (
     ptbx_build_server_distribution_full -Pcore-modules,-main "$@"
