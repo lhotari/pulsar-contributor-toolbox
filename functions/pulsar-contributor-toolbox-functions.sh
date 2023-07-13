@@ -643,6 +643,21 @@ function ptbx_extract_threaddumps_from_zip() {
   unzip -p $ZIPFILE "*print JVM thread dumps*" | _ptbx_extract_threaddumps
 }
 
+function ptbx_extract_threaddumps_from_file() {
+  local prefix="threaddump${RANDOM}_$(date -I)_"
+  cat $1 | grep -vE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T' | awk 'BEGIN {emptyCount=0}
+    /^$/ { if (emptyCount==2) { print "DUMPSEPARATOR"; emptyCount=0; } else { emptyCount++; }; next }
+    emptyCount > 0 { for (i=0; i<emptyCount; i++) print ""; emptyCount=0; }
+    /Full thread dump OpenJDK/ { print "DUMPSEPARATOR\n"; print; next; }
+    /^.+/ { print }' | csplit - -f $prefix -b %02d.txt -z --suppress-matched '/DUMPSEPARATOR/' '{*}'
+  for file in ${prefix}*; do
+    if ! grep -q "Full thread dump OpenJDK" $file; then
+      rm $file
+    fi
+  done
+}
+
+
 function ptbx_search_jars() {
   (
     if [ $ZSH_VERSION ]; then
