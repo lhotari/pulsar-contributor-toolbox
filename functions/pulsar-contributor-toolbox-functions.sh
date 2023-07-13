@@ -657,6 +657,9 @@ function ptbx_extract_threaddumps_from_file() {
   done
 }
 
+function ptbx_find_created_threads_in_test_logs() {
+  grep -shEr "created [0-9]+ new threads" * | awk -F "Summary: " '{ print $2 }' | awk '{ print $(NF-2), $0}' |sort -rn | cut -f2- -d' '
+}
 
 function ptbx_search_jars() {
   (
