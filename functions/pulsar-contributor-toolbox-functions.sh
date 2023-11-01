@@ -228,6 +228,26 @@ function ptbx_run_test() {
   )
 }
 
+function ptbx_run_test_in_docker() {
+  (
+    local cpus=2
+    local memory=6g
+    while [ true ]; do
+      if [[ "$1" =~ --cpus=.* ]]; then
+        cpus="${1#*=}"
+        shift
+      elif [[ "$1" =~ --memory=.* ]]; then
+        memory="${1#*=}"
+        shift
+      else
+        break
+      fi
+    done
+    ptbx_docker_run --cpus=$cpus --memory=$memory \
+      bash -c 'source $HOME/.sdkman/bin/sdkman-init.sh; mvn -DredirectTestOutputToFile=false -DtestRetryCount=0 test "$@"' bash "$@"
+  )
+}
+
 function ptbx_tee_to_output_log() {
   tee "output_$(ptbx_datetime).log"
 }
