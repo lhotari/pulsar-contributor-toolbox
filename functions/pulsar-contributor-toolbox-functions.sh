@@ -313,6 +313,27 @@ function ptbx_gitpush_to_forked() {
   )
 }
 
+# pushes changes to a PR branch to the forked repository
+# use this when you have a PR branch checked out with
+# command "gh pr checkout <pr-number>" and want to push changes to it
+function ptbx_gitpush_to_pr_branch() {
+  (
+    PR_NUMBER="$1"
+    if [ -z "$PR_NUMBER" ]; then
+      echo "Pass PR number as argument"
+      return 1
+    fi
+    CURRENTBRANCH=$(git rev-parse --abbrev-ref --symbolic-full-name HEAD)
+    SLUG=$(ptbx_gh_slug origin)
+    FORK_REPO=$(curl https://api.github.com/repos/$SLUG/pulls/$PR_NUMBER | jq -r '.head.repo.html_url')
+    if [ -z "$FORK_REPO" ]; then
+      echo "Cannot find forked repo for PR $PR_NUMBER"
+      return 1
+    fi
+    git push "$FORK_REPO" "$CURRENTBRANCH:$CURRENTBRANCH"
+  )
+}
+
 # synchronizes the forked/master remote branch with origin/master
 function ptbx_git_sync_forked_master_with_upstream() {
   (
