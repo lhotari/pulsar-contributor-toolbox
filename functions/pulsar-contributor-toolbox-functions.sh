@@ -156,11 +156,35 @@ function ptbx_docker_run() {
         break
       fi
     done
-    additional_groups=()
-    for gid in $(id -G); do
-      additional_groups+=("--group-add=$gid")
-    done
-    docker run --env-file=<(printenv) --security-opt seccomp=unconfined --cap-add SYS_ADMIN --cpus=$cpus --memory=$memory -u "$UID:${GID:-"$(id -g)"}" "${additional_groups[@]}" --net=host -it --rm -v $HOME:$HOME -v /var/run/docker.sock:/var/run/docker.sock -w $PWD -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro ubuntu "$@"
+    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+      additional_groups=()
+      for gid in $(id -G); do
+        additional_groups+=("--group-add=$gid")
+      done
+      docker run --env-file=<(printenv) --security-opt seccomp=unconfined --cap-add SYS_ADMIN --cpus=$cpus --memory=$memory -u "$UID:${GID:-"$(id -g)"}" "${additional_groups[@]}" --net=host -it --rm -v $HOME:$HOME -v /var/run/docker.sock:/var/run/docker.sock -w $PWD -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro ubuntu "$@"
+    elif [[ "$OSTYPE" == "darwin"* ]]; then
+      if [[ "$(docker images -q ubuntu_sdkman 2> /dev/null)" == "" ]]; then
+        docker build --tag ubuntu_sdkman - <<EOT
+FROM ubuntu:latest
+ARG DEBIAN_FRONTEND=noninteractive
+RUN <<'EOS' /bin/bash
+set -eux
+set -o pipefail
+apt-get update
+apt-get dist-upgrade -y
+apt-get install -y curl zip unzip wget ca-certificates
+groupadd -g $GID mygroup || true
+useradd -M -d $HOME -u $UID -g $GID -s /bin/bash $USER
+EOS
+EOT
+        touch $HOME/.bashrc_docker
+        docker run -e HOME=$HOME -e SDKMAN_DIR=$HOME/.sdkman_docker --net=host -it --rm -v $HOME:$HOME -u "$UID:${GID:-"$(id -g)"}" -v /var/run/docker.sock:/var/run/docker.sock -v $HOME/.bashrc_docker:$HOME/.bashrc -w $PWD ubuntu_sdkman bash -c 'curl -s "https://get.sdkman.io" | bash; source $HOME/.sdkman/bin/sdkman-init.sh; sdk install java 17.0.9-tem; sdk install maven; sdk install gradle'
+      fi   
+      docker run --env-file=<(printenv |egrep -v 'SDKMAN|HOME|MANPATH|INFOPATH|PATH') -e HOME=$HOME -e SDKMAN_DIR=$HOME/.sdkman_docker --security-opt seccomp=unconfined --cap-add SYS_ADMIN --cpus=$cpus --memory=$memory --net=host -it --rm -u "$UID:${GID:-"$(id -g)"}" -v $HOME:$HOME -v /var/run/docker.sock:/var/run/docker.sock -v $HOME/.bashrc_docker:$HOME/.bashrc -w $PWD ubuntu_sdkman "$@"
+    else
+      echo "Unsupported OS: $OSTYPE"
+      return 1
+    fi
   )
 }
 
