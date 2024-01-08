@@ -5,4 +5,4 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 while read -r namespace name; do
     "$SCRIPT_DIR"/collect_pulsar_gc_logs_from_pod.sh -n "$namespace" "--field-selector=metadata.name=$name"
-done < <(kubectl get "$@" pods --no-headers -o custom-columns=":metadata.namespace,:metadata.name")
+done < <(kubectl get pods "$@" --no-headers -o custom-columns=":metadata.namespace,:metadata.name")
