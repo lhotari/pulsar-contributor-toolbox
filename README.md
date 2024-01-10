@@ -15,7 +15,7 @@ PULSAR_DEV_DIR=$HOME/workspace-pulsar/pulsar
 
 ## Supported environment
 
-This toolbox is currently supported on Linux and zsh shell.
+This toolbox is currently supported on Linux and MacOS and zsh shell.
 The shell scripts have support for bash, but that is not actively tested and used.
 
 
