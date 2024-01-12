@@ -272,6 +272,38 @@ function ptbx_run_test_in_docker() {
   )
 }
 
+function ptbx_run_changed_tests() {
+  (
+    ptbx_cd_git_root
+    local root_dir=$(pwd)
+    local last_module=""
+    local -a test_classes=()
+    while read -r file; do
+      local module=$(echo "$file" | sed 's#/src/.*##g')      
+      if [[ "$module" != "$last_module" && "$last_module" != "" && -n ${test_classes[*]} ]]; then
+        cd "$root_dir/$last_module"
+        test_classes=($(printf "%s\n" "${test_classes[@]}" | sort -u))
+        ptbx_run_test -Dtest="$(IFS=, ; echo "${test_classes[*]}")" || { echo "Failed to run tests in $last_module"; return 1; }
+        test_classes=()
+      fi
+      if [[ "$file" =~ src/test/java/.*Test\.java$ ]]; then
+        local test_class=$(echo "$file" | sed 's#.*src/test/java/##;s#\.java$##;s#/#.#g')
+        test_classes+=("$test_class")
+      elif [[ "$file" =~ src/main/java/.*\.java$ ]]; then
+        local test_class="$(echo "$file" | sed 's#.*src/main/java/##;s#\.java$##;s#/#.#g')Test"
+        test_classes+=("$test_class")
+      fi
+      last_module="$module"      
+    done < <(git diff --name-only "origin/$(ptbx_detect_default_branch)")
+    # if test_classes isn't empty
+    if [[ "$last_module" != "" && -n ${test_classes[*]} ]]; then
+      cd "$root_dir/$last_module"
+      test_classes=($(printf "%s\n" "${test_classes[@]}" | sort -u))
+      ptbx_run_test -Dtest="$(IFS=, ; echo "${test_classes[*]}")"  || { echo "Failed to run tests in $last_module"; return 1; }
+    fi
+  )
+}
+
 function ptbx_tee_to_output_log() {
   tee "output_$(ptbx_datetime).log"
 }
