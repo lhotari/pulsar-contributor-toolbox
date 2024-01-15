@@ -392,14 +392,14 @@ function ptbx_gitpush_to_pr_branch() {
       echo "Pass PR number as argument"
       return 1
     fi
-    CURRENTBRANCH=$(git rev-parse --abbrev-ref --symbolic-full-name HEAD)
     SLUG=$(ptbx_gh_slug origin)
-    FORK_REPO=$(curl https://api.github.com/repos/$SLUG/pulls/$PR_NUMBER | jq -r '.head.repo.html_url')
+    FORK_REPO=$(curl -s https://api.github.com/repos/$SLUG/pulls/$PR_NUMBER | jq -r '.head.repo.html_url')
+    FORK_BRANCH=$(curl -s https://api.github.com/repos/$SLUG/pulls/$PR_NUMBER | jq -r '.head.ref')
     if [ -z "$FORK_REPO" ]; then
       echo "Cannot find forked repo for PR $PR_NUMBER"
       return 1
     fi
-    git push "$FORK_REPO" "$CURRENTBRANCH:$CURRENTBRANCH"
+    git push "$FORK_REPO" "HEAD:$FORK_BRANCH"
   )
 }
 
