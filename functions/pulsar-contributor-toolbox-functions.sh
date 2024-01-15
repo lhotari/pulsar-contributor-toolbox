@@ -304,6 +304,19 @@ function ptbx_run_changed_tests() {
   )
 }
 
+function ptbx_build_changed_modules() {
+  (
+    ptbx_cd_git_root
+    changed_modules=$(git diff --name-only "origin/$(ptbx_detect_default_branch)" | grep '/src/' | sed 's#/src/.*##g' | sort -u | tr '\n' ',' | sed 's/,$/\n/')
+    if [[ -n "$changed_modules" ]]; then
+      set -x
+      mvn -pl "$changed_modules" install -DskipTests -Dspotbugs.skip=true
+    else
+      echo "No changed modules."
+    fi
+  )
+}
+
 function ptbx_tee_to_output_log() {
   tee "output_$(ptbx_datetime).log"
 }
