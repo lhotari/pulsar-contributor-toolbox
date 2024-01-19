@@ -274,6 +274,7 @@ function ptbx_run_test_in_docker() {
 
 function ptbx_run_changed_tests() {
   (
+    local compare_to_branch="${1-:"origin/$(ptbx_detect_default_branch)"}"
     ptbx_cd_git_root
     local root_dir=$(pwd)
     local last_module=""
@@ -294,7 +295,7 @@ function ptbx_run_changed_tests() {
         test_classes+=("$test_class")
       fi
       last_module="$module"      
-    done < <(git diff --name-only "origin/$(ptbx_detect_default_branch)")
+    done < <(git diff --name-only "${compare_to_branch}")
     # if test_classes isn't empty
     if [[ "$last_module" != "" && -n ${test_classes[*]} ]]; then
       cd "$root_dir/$last_module"
@@ -306,8 +307,9 @@ function ptbx_run_changed_tests() {
 
 function ptbx_build_changed_modules() {
   (
+    local compare_to_branch="${1-:"origin/$(ptbx_detect_default_branch)"}"
     ptbx_cd_git_root
-    changed_modules=$(git diff --name-only "origin/$(ptbx_detect_default_branch)" | grep '/src/' | sed 's#/src/.*##g' | sort -u | tr '\n' ',' | sed 's/,$/\n/')
+    changed_modules=$(git diff --name-only "${compare_to_branch}" | grep '/src/' | sed 's#/src/.*##g' | sort -u | tr '\n' ',' | sed 's/,$/\n/')
     if [[ -n "$changed_modules" ]]; then
       set -x
       mvn -pl "$changed_modules" install -DskipTests -Dspotbugs.skip=true
