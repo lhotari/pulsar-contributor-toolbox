@@ -284,6 +284,8 @@ function ptbx_run_changed_tests() {
       if [[ "$module" != "$last_module" && "$last_module" != "" && -n ${test_classes[*]} ]]; then
         cd "$root_dir/$last_module"
         test_classes=($(printf "%s\n" "${test_classes[@]}" | sort -u))
+        printf "Running tests in %s for classes:\n" "$last_module"
+        printf "\t%s\n" "${test_classes[@]}"
         ptbx_run_test -Dtest="$(IFS=, ; echo "${test_classes[*]}")" || { echo "Failed to run tests in $last_module"; return 1; }
         test_classes=()
       fi
@@ -300,6 +302,8 @@ function ptbx_run_changed_tests() {
     if [[ "$last_module" != "" && -n ${test_classes[*]} ]]; then
       cd "$root_dir/$last_module"
       test_classes=($(printf "%s\n" "${test_classes[@]}" | sort -u))
+      printf "Running tests in %s for classes:\n" "$last_module"
+      printf "\t%s\n" "${test_classes[@]}"
       ptbx_run_test -Dtest="$(IFS=, ; echo "${test_classes[*]}")"  || { echo "Failed to run tests in $last_module"; return 1; }
     fi
   )
