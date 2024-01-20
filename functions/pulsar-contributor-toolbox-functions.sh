@@ -274,7 +274,7 @@ function ptbx_run_test_in_docker() {
 
 function ptbx_run_changed_tests() {
   (
-    local compare_to_branch="${1-:"origin/$(ptbx_detect_default_branch)"}"
+    local compare_to_branch="${1:-"origin/$(ptbx_detect_default_branch)"}"
     ptbx_cd_git_root
     local root_dir=$(pwd)
     local last_module=""
@@ -311,7 +311,7 @@ function ptbx_run_changed_tests() {
 
 function ptbx_build_changed_modules() {
   (
-    local compare_to_branch="${1-:"origin/$(ptbx_detect_default_branch)"}"
+    local compare_to_branch="${1:-"origin/$(ptbx_detect_default_branch)"}"
     ptbx_cd_git_root
     changed_modules=$(git diff --name-only "${compare_to_branch}" | grep '/src/' | sed 's#/src/.*##g' | sort -u | tr '\n' ',' | sed 's/,$/\n/')
     if [[ -n "$changed_modules" ]]; then
@@ -1082,7 +1082,7 @@ function _get_cancel_urls() {
 }
 
 function ptbx_cancel_pr_runs() {
-  PR_NUM=${1-:1}
+  PR_NUM=${1:-1}
 
   # get head sha
   PR_JSON="$(_github_get "/pulls/${PR_NUM}")"
