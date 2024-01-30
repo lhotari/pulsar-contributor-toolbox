@@ -145,6 +145,7 @@ function ptbx_docker_run() {
   (
     local cpus=2
     local memory=6g
+    local platform=""
     while [ true ]; do
       if [[ "$1" =~ --cpus=.* ]]; then
         cpus="${1#*=}"
@@ -152,19 +153,38 @@ function ptbx_docker_run() {
       elif [[ "$1" =~ --memory=.* ]]; then
         memory="${1#*=}"
         shift
+      elif [[ "$1" =~ --platform=.* ]]; then
+        platform="$1"
+        shift
       else
         break
       fi
     done
+    if [[ -z "$platform" ]]; then
+      if uname -m | grep -q x86_64; then
+        platform="--platform=linux/amd64"
+      else
+        platform="--platform=linux/arm64"
+      fi
+    fi
+    local arch="${platform#*=}"
+    arch="${arch#*/}"
     if [[ "$OSTYPE" == "linux-gnu"* ]]; then
       additional_groups=()
       for gid in $(id -G); do
         additional_groups+=("--group-add=$gid")
       done
-      docker run --env-file=<(printenv) --security-opt seccomp=unconfined --cap-add SYS_ADMIN --cpus=$cpus --memory=$memory -u "$UID:${GID:-"$(id -g)"}" "${additional_groups[@]}" --net=host -it --rm -v $HOME:$HOME -v /var/run/docker.sock:/var/run/docker.sock -w $PWD -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro ubuntu "$@"
+      docker run $platform --env-file=<(printenv) --security-opt seccomp=unconfined --cap-add SYS_ADMIN --cpus=$cpus --memory=$memory -u "$UID:${GID:-"$(id -g)"}" "${additional_groups[@]}" --net=host -it --rm -v $HOME:$HOME -v /var/run/docker.sock:/var/run/docker.sock -w $PWD -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro ubuntu "$@"
     elif [[ "$OSTYPE" == "darwin"* ]]; then
-      if [[ "$(docker images -q ubuntu_sdkman 2> /dev/null)" == "" ]]; then
-        docker build --tag ubuntu_sdkman - <<EOT
+      local imagename="ubuntu_sdkman_${arch}"
+      local imageid=$(docker images -q $imagename 2> /dev/null)
+      if [[ -n "$imageid" && -n "$platform" ]]; then
+        if ! docker image inspect --format "{{.Os}}/{{.Architecture}}" $imageid | grep -i -q -- "${platform#*=}"; then
+          imageid=""
+        fi
+      fi
+      if [[ -z "$imageid" ]]; then
+        docker build $platform --tag $imagename - <<EOT
 FROM ubuntu:latest
 ARG DEBIAN_FRONTEND=noninteractive
 RUN <<'EOS' /bin/bash
@@ -178,9 +198,9 @@ useradd -M -d $HOME -u $UID -g $GID -s /bin/bash $USER
 EOS
 EOT
         touch $HOME/.bashrc_docker
-        docker run -e HOME=$HOME -e SDKMAN_DIR=$HOME/.sdkman_docker --net=host -it --rm -v $HOME:$HOME -u "$UID:${GID:-"$(id -g)"}" -v /var/run/docker.sock:/var/run/docker.sock -v $HOME/.bashrc_docker:$HOME/.bashrc -w $PWD ubuntu_sdkman bash -c 'curl -s "https://get.sdkman.io" | bash; source $HOME/.sdkman/bin/sdkman-init.sh; sdk install java 17.0.9-tem; sdk install maven; sdk install gradle'
+        docker run $platform -e HOME=$HOME -e SDKMAN_DIR=$HOME/.sdkman_docker_${arch} --net=host -it --rm -v $HOME:$HOME -u "$UID:${GID:-"$(id -g)"}" -v /var/run/docker.sock:/var/run/docker.sock -v $HOME/.bashrc_docker:$HOME/.bashrc -w $PWD $imagename bash -c 'curl -s "https://get.sdkman.io" | bash; source $HOME/.sdkman/bin/sdkman-init.sh; sdk install java 17.0.9-tem; sdk install maven; sdk install gradle'
       fi   
-      docker run --env-file=<(printenv |egrep -v 'SDKMAN|HOME|MANPATH|INFOPATH|PATH') -e HOME=$HOME -e SDKMAN_DIR=$HOME/.sdkman_docker --security-opt seccomp=unconfined --cap-add SYS_ADMIN --cpus=$cpus --memory=$memory --net=host -it --rm -u "$UID:${GID:-"$(id -g)"}" -v $HOME:$HOME -v /var/run/docker.sock:/var/run/docker.sock -v $HOME/.bashrc_docker:$HOME/.bashrc -w $PWD ubuntu_sdkman "$@"
+      docker run $platform --env-file=<(printenv |egrep -v 'SDKMAN|HOME|MANPATH|INFOPATH|PATH') -e HOME=$HOME -e SDKMAN_DIR=$HOME/.sdkman_docker_${arch} --security-opt seccomp=unconfined --cap-add SYS_ADMIN --cpus=$cpus --memory=$memory --net=host -it --rm -u "$UID:${GID:-"$(id -g)"}" -v $HOME:$HOME -v /var/run/docker.sock:/var/run/docker.sock -v $HOME/.bashrc_docker:$HOME/.bashrc -w $PWD $imagename "$@"
     else
       echo "Unsupported OS: $OSTYPE"
       return 1
@@ -256,6 +276,7 @@ function ptbx_run_test_in_docker() {
   (
     local cpus=2
     local memory=6g
+    local platform=""
     while [ true ]; do
       if [[ "$1" =~ --cpus=.* ]]; then
         cpus="${1#*=}"
@@ -263,11 +284,14 @@ function ptbx_run_test_in_docker() {
       elif [[ "$1" =~ --memory=.* ]]; then
         memory="${1#*=}"
         shift
+      elif [[ "$1" =~ --platform=.* ]]; then
+        platform="$1"
+        shift
       else
         break
       fi
     done
-    ptbx_docker_run --cpus=$cpus --memory=$memory \
+    ptbx_docker_run --cpus=$cpus --memory=$memory $platform \
       bash -c 'source $HOME/.sdkman/bin/sdkman-init.sh; mvn -DredirectTestOutputToFile=false -DtestRetryCount=0 test "$@"' bash "$@"
   )
 }
