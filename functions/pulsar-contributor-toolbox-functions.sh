@@ -209,6 +209,14 @@ EOT
   )
 }
 
+function ptbx_docker_run_arm64() {
+  ptbx_docker_run --platform=linux/arm64 "$@"
+}
+
+function ptbx_docker_run_amd64() {
+  ptbx_docker_run --platform=linux/amd64 "$@"
+}
+
 # runs a command with sdkman initialized in the docker container
 function ptbx_docker_run_with_sdkman {
   local docker_args=()
