@@ -211,7 +211,27 @@ EOT
 
 # runs a command with sdkman initialized in the docker container
 function ptbx_docker_run_with_sdkman {
-  ptbx_docker_run bash -c 'source $HOME/.sdkman/bin/sdkman-init.sh; "$@"' bash "$@"
+  local docker_args=()
+  while [ true ]; do
+    case "$1" in
+      --cpus=*)
+        docker_args+=("$1")
+        shift
+        ;;
+      --memory=*)
+        docker_args+=("$1")
+        shift
+        ;;
+      --platform=*)
+        docker_args+=("$1")
+        shift
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+  ptbx_docker_run "${docker_args[@]}" bash -i -c 'source $SDKMAN_DIR/bin/sdkman-init.sh; "$@"' bash "$@"
 }
 
 # runs tests with docker to limit cpu & memory, in a loop until it fails
