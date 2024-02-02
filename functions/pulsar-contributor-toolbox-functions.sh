@@ -1306,3 +1306,15 @@ function ptbx_split_splunk_threaddumps() {
   local jsonfile="$1"
   jq  '.result._raw | fromjson | {"message": .message | join("\n")} | select(.message | contains("Full thread dump"))' "$jsonfile" |jq -s . |mlr --ijson --opprint --ho put -q 'begin { @ts=systimeint(); }; emit >"/tmp/threaddump".@ts."_".NR.".txt", $message;'
 }
+
+function ptbx_mvn_list_modules() {
+  (
+    mvn -B -ntp -Dscan=false "$@" initialize \
+      | grep -- "-< .* >-" \
+      | sed -E 's/.*-< (.*) >-.*/\1/'
+  )
+}
+
+function ptbx_join_lines() {
+  tr '\n' ',' | sed 's/,$/\n/'
+}
