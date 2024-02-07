@@ -1323,8 +1323,8 @@ function ptbx_docker_socket_proxy() {
   local port=2375
   socat /dev/null TCP4:127.0.0.1:$port,connect-timeout=2 &> /dev/null
   if [ $? -ne 0 ]; then
-    echo "Starting socat tcp proxy on port $port for docker socket..."
-    socat TCP-LISTEN:$port,reuseaddr,fork UNIX-CLIENT:/var/run/docker.sock &> /dev/null &
+    echo "Starting socat tcp proxy on port $port for docker socket /var/run/docker.sock"
+    socat TCP-LISTEN:$port,bind=127.0.0.1,reuseaddr,fork UNIX-CLIENT:/var/run/docker.sock &> /dev/null &
     echo "Stop the proxy with 'kill $!'"
   fi
   export DOCKER_HOST=tcp://127.0.0.1:$port
