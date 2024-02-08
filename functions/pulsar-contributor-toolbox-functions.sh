@@ -1330,3 +1330,46 @@ function ptbx_docker_socket_proxy() {
   export DOCKER_HOST=tcp://127.0.0.1:$port
   echo "Added DOCKER_HOST=$DOCKER_HOST to environment"
 }
+
+function ptbx_bk_build() {
+  (
+    ptbx_cd_git_root
+    local clean_param="clean"
+    if [[ "$1" == "--noclean" || "$1" == "-nc" ]]; then
+      clean_param=""
+      shift
+    else
+      ptbx_bk_clean_snapshots
+    fi
+    mvn -T 1C $clean_param install -DskipTests -Dspotbugs.skip=true -Ddistributedlog "$@"
+  )
+}
+
+function ptbx_bk_docker_build() {
+  (
+    ptbx_bk_build -Pdocker "$@" 
+  )
+}
+
+function ptbx_bk_clean_snapshots() {
+  (
+    if [ -n "$ZSH_NAME" ]; then
+      setopt nonomatch
+    fi
+    ls -d ~/.m2/repository/org/apache/{bookkeeper,distributedlog}/**/"$(ptbx_project_version)" 2>/dev/null | xargs -r rm -rf
+  )
+}
+
+function ptbx_bk_checks() {
+  (
+    ptbx_cd_git_root
+    mvn -T 1C apache-rat:check checkstyle:check spotbugs:check package -Ddistributedlog -DskipTests
+  )
+}
+
+function ptbx_bk_license_check() {
+  (
+    ptbx_cd_git_root
+    dev/check-all-licenses
+  )
+}
