@@ -83,6 +83,14 @@ function ptbx_run_inttest() {
   )
 }
 
+function ptbx_run_systest() {
+  (
+    ptbx_cd_git_root
+    export PULSAR_TEST_IMAGE_NAME=apachepulsar/pulsar-test-latest-version:latest
+    command mvn -T 1C test -DredirectTestOutputToFile=false -DtestRetryCount=0 -Dspotbugs.skip=true -DintegrationTests -pl tests/integration "$@"
+  )
+}
+
 function ptbx_build_server_distribution() {
   (
     ptbx_build_server_distribution_full -Pcore-modules,-main "$@"
