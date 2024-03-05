@@ -1380,3 +1380,21 @@ function ptbx_bk_license_check() {
     dev/check-all-licenses
   )
 }
+
+function ptbx_cherry_pick_check() {
+  (
+    local UPSTREAM=origin
+    local RELEASE_NUMBER=$(ptbx_project_version | sed 's/-SNAPSHOT//')
+    local CURRENTBRANCH=$(git rev-parse --abbrev-ref --symbolic-full-name HEAD)
+    local RELEASE_BRANCH=$CURRENTBRANCH
+    local PR_QUERY="is:merged label:release/$RELEASE_NUMBER -label:cherry-picked/$RELEASE_BRANCH"
+    local PR_NUMBERS=$(gh pr list --search "$PR_QUERY" --json number --jq '["#"+(.[].number|tostring)] | join("|")')
+    local ALREADY_PICKED=$(git log --oneline -P --grep="$PR_NUMBERS" --reverse $RELEASE_BRANCH | gawk 'match($0, /\(#([0-9]+)\)/, a) {print substr(a[0], 2, length(a[0])-2)}' | tr '\n' '|' | sed 's/|$//')
+    if [[ -n "$ALREADY_PICKED" ]]; then
+      echo -e "\033[31m** Already picked but not tagged as cherry-picked **\033[0m"
+      git log --color --oneline -P --grep="$PR_NUMBERS" --reverse $RELEASE_BRANCH | gawk 'match($0, /\(#([0-9]+)\)/, a) {print $0 " https://github.com/apache/pulsar/pull/" substr(a[0], 3, length(a[0])-3)}'
+    fi
+    echo -e "\033[31m** Not cherry-picked from $UPSTREAM/master **\033[0m"
+    git log --color --oneline -P --grep="$PR_NUMBERS" --reverse $UPSTREAM/master | grep --color -v -E "$ALREADY_PICKED" | gawk 'match($0, /\(#([0-9]+)\)/, a) {print $0 " https://github.com/apache/pulsar/pull/" substr(a[0], 3, length(a[0])-3)}'
+  )
+}
