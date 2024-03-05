@@ -1393,13 +1393,17 @@ function ptbx_cherry_pick_check() {
     local RELEASE_BRANCH=$CURRENTBRANCH
     local PR_QUERY="is:merged label:release/$RELEASE_NUMBER -label:cherry-picked/$RELEASE_BRANCH"
     local PR_NUMBERS=$(gh pr list -L 100 --search "$PR_QUERY" --json number --jq '["#"+(.[].number|tostring)] | join("|")')
-    local ALREADY_PICKED=$(git log --oneline -P --grep="$PR_NUMBERS" --reverse $RELEASE_BRANCH | gawk 'match($0, /\(#([0-9]+)\)/, a) {print substr(a[0], 2, length(a[0])-2)}' | tr '\n' '|' | sed 's/|$//')
-    if [[ -n "$ALREADY_PICKED" ]]; then
-      echo -e "\033[31m** Already picked but not tagged as cherry-picked **\033[0m"
-      git log --color --oneline -P --grep="$PR_NUMBERS" --reverse $RELEASE_BRANCH | gawk 'match($0, /\(#([0-9]+)\)/, a) {print $0 " https://github.com/apache/pulsar/pull/" substr(a[0], 3, length(a[0])-3)}' | awk '{ print $0 " https://github.com/apache/pulsar/commit/" $1 }'
+    if [[ -z "$PR_NUMBERS" ]]; then
+      echo "No PRs found for query: '$PR_QUERY'"
+    else
+      local ALREADY_PICKED=$(git log --oneline -P --grep="$PR_NUMBERS" --reverse $RELEASE_BRANCH | gawk 'match($0, /\(#([0-9]+)\)/, a) {print substr(a[0], 2, length(a[0])-2)}' | tr '\n' '|' | sed 's/|$//')
+      if [[ -n "$ALREADY_PICKED" ]]; then
+        echo -e "\033[31m** Already picked but not tagged as cherry-picked **\033[0m"
+        git log --color --oneline -P --grep="$PR_NUMBERS" --reverse $RELEASE_BRANCH | gawk 'match($0, /\(#([0-9]+)\)/, a) {print $0 " https://github.com/apache/pulsar/pull/" substr(a[0], 3, length(a[0])-3)}' | awk '{ print $0 " https://github.com/apache/pulsar/commit/" $1 }'
+      fi
+      echo -e "\033[31m** Not cherry-picked from $UPSTREAM/master **\033[0m"
+      git log --color --oneline -P --grep="$PR_NUMBERS" --reverse $UPSTREAM/master | grep --color -v -E "$ALREADY_PICKED" | gawk 'match($0, /\(#([0-9]+)\)/, a) {print $0 " https://github.com/apache/pulsar/pull/" substr(a[0], 3, length(a[0])-3)}'
     fi
-    echo -e "\033[31m** Not cherry-picked from $UPSTREAM/master **\033[0m"
-    git log --color --oneline -P --grep="$PR_NUMBERS" --reverse $UPSTREAM/master | grep --color -v -E "$ALREADY_PICKED" | gawk 'match($0, /\(#([0-9]+)\)/, a) {print $0 " https://github.com/apache/pulsar/pull/" substr(a[0], 3, length(a[0])-3)}'
     echo -e "\033[34m** Urls **\033[0m"
     echo "PRs that haven't been cherry-picked: https://github.com/apache/pulsar/pulls?q=$(_ptbx_urlencode "is:pr $PR_QUERY")"
   )
