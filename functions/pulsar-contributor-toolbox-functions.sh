@@ -1402,7 +1402,7 @@ function ptbx_cherry_pick_check() {
         git log --color --oneline -P --grep="$PR_NUMBERS" --reverse $RELEASE_BRANCH | gawk 'match($0, /\(#([0-9]+)\)/, a) {print $0 " https://github.com/apache/pulsar/pull/" substr(a[0], 3, length(a[0])-3)}' | awk '{ print $0 " https://github.com/apache/pulsar/commit/" $1 }'
       fi
       echo -e "\033[31m** Not cherry-picked from $UPSTREAM/master **\033[0m"
-      git log --color --oneline -P --grep="$PR_NUMBERS" --reverse $UPSTREAM/master | grep --color -v -E "$ALREADY_PICKED" | gawk 'match($0, /\(#([0-9]+)\)/, a) {print $0 " https://github.com/apache/pulsar/pull/" substr(a[0], 3, length(a[0])-3)}'
+      git log --color --oneline -P --grep="$PR_NUMBERS" --reverse $UPSTREAM/master | { [ -n "$ALREADY_PICKED" ] && grep --color -v -E "$ALREADY_PICKED" || cat; } | gawk 'match($0, /\(#([0-9]+)\)/, a) {print $0 " https://github.com/apache/pulsar/pull/" substr(a[0], 3, length(a[0])-3)}'
     fi
     echo -e "\033[34m** Urls **\033[0m"
     echo "PRs that haven't been cherry-picked: https://github.com/apache/pulsar/pulls?q=$(_ptbx_urlencode "is:pr $PR_QUERY")"
