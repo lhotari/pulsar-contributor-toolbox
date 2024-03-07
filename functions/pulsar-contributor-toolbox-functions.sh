@@ -1426,8 +1426,7 @@ function ptbx_cherry_pick_move_to_release() {
     local ALREADY_PICKED=$(git log --oneline -P --grep="$PR_NUMBERS" --reverse $RELEASE_BRANCH | gawk 'match($0, /\(#([0-9]+)\)/, a) {print substr(a[0], 2, length(a[0])-2)}' | tr '\n' '|' | sed 's/|$//')
     for PR_NUMBER in $(git log --color --oneline -P --grep="$PR_NUMBERS" --reverse $UPSTREAM/master | { [ -n "$ALREADY_PICKED" ] && grep --color -v -E "$ALREADY_PICKED" || cat; } | gawk 'match($0, /\(#([0-9]+)\)/, a) {print substr(a[0], 3, length(a[0])-3)}'); do
       echo "Editing PR: $PR_NUMBER"
-      gh pr edit "$PR_NUMBER" --add-label "release/$NEXT_RELEASE" --repo "$SLUG"
-      gh pr edit "$PR_NUMBER" --remove-label "release/$RELEASE_NUMBER" --repo "$SLUG"
+      gh pr edit "$PR_NUMBER" --add-label "release/$NEXT_RELEASE" --remove-label "release/$RELEASE_NUMBER" --repo "$SLUG"
     done
   )
 }
