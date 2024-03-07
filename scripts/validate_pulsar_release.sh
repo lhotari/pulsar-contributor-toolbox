@@ -61,6 +61,7 @@ kill_processes() {
     fi
     docker rm -f cassandra$$ || true
     echo "Retry with:"
+    echo "rm -rf $WORKING_DIR/apache-pulsar-$VERSION"
     echo "$0" "$VERSION" "$CANDIDATE" "$WORKING_DIR"
     echo "Delete manually to clean up:"
     echo "rm -rf $WORKING_DIR"
@@ -213,4 +214,18 @@ fi
 
 bin/pulsar-admin functions delete --tenant test --namespace test-namespace --name word_count
 
+set +xe
 echo "All validation steps completed! (there are manual validation steps that are not automated)"
+
+cat <<EOF
+Vote with this email body:
+
++1 (binding/non-binding)
+
+- Built from source
+- Checked the signatures of the source and binary release artifacts
+- Run standalone
+- Checked producer and consumer
+- Verified the Cassandra connector
+- Verified the Stateful function
+EOF
