@@ -27,6 +27,9 @@ for file in apache-pulsar-$VERSION-bin.tar.gz apache-pulsar-$VERSION-bin.tar.gz.
     wget -c $BASE_URL/$file
 done
 
+# Import the Pulsar KEYS
+gpg --import <(curl https://dist.apache.org/repos/dist/release/pulsar/KEYS)
+
 # Verify the release tarballs
 gpg --verify apache-pulsar-$VERSION-bin.tar.gz.asc
 gpg --verify apache-pulsar-$VERSION-src.tar.gz.asc
