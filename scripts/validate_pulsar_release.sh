@@ -1,4 +1,7 @@
 #!/bin/bash
+# This script is used to validate a Pulsar release candidate
+# It semi-automates the validation steps described in the Pulsar release process
+# https://pulsar.apache.org/contribute/validate-release-candidate/
 set -xe -o pipefail
 VERSION=$1
 CANDIDATE=${2:-"1"}
