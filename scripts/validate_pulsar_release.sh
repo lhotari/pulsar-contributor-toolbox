@@ -218,7 +218,8 @@ set +xe
 echo "All validation steps completed! (there are manual validation steps that are not automated)"
 
 cat <<EOF
-Vote with this email body:
+Vote for pulsar-$VERSION-candidate-$CANDIDATE with this email body:
+====================
 
 +1 (binding/non-binding)
 
@@ -228,4 +229,6 @@ Vote with this email body:
 - Checked producer and consumer
 - Verified the Cassandra connector
 - Verified the Stateful function
+
+====================
 EOF
