@@ -28,7 +28,8 @@ else
 fi
 
 # add bin directory to path
-export PATH="$PULSAR_CONTRIBUTOR_TOOLBOX/bin:$PATH"
+[[ $(echo $PATH | grep -c "${PULSAR_CONTRIBUTOR_TOOLBOX}/bin") -eq 0 ]] && \
+    export PATH="$PULSAR_CONTRIBUTOR_TOOLBOX/bin:$PATH"
 
 # runs license checks
 function ptbx_run_license_check() {
