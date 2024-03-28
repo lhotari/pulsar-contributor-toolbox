@@ -1421,10 +1421,13 @@ function ptbx_cherry_pick_move_to_release() {
     local RELEASE_NUMBER=$(ptbx_project_version | sed 's/-SNAPSHOT//')
     local CURRENTBRANCH=$(git rev-parse --abbrev-ref --symbolic-full-name HEAD)
     local RELEASE_BRANCH=$CURRENTBRANCH
-    local PR_QUERY="is:merged label:release/$RELEASE_NUMBER -label:cherry-picked/$RELEASE_BRANCH"
-    local PR_NUMBERS=$(gh pr list -L 100 --search "$PR_QUERY" --json number --jq '["#"+(.[].number|tostring)] | join("|")')
-    local ALREADY_PICKED=$(git log --oneline -P --grep="$PR_NUMBERS" --reverse $RELEASE_BRANCH | gawk 'match($0, /\(#([0-9]+)\)/, a) {print substr(a[0], 2, length(a[0])-2)}' | tr '\n' '|' | sed 's/|$//')
-    for PR_NUMBER in $(git log --color --oneline -P --grep="$PR_NUMBERS" --reverse $UPSTREAM/master | { [ -n "$ALREADY_PICKED" ] && grep --color -v -E "$ALREADY_PICKED" || cat; } | gawk 'match($0, /\(#([0-9]+)\)/, a) {print substr(a[0], 3, length(a[0])-3)}'); do
+    local PR_QUERY="label:release/$RELEASE_NUMBER -label:cherry-picked/$RELEASE_BRANCH"
+    local PR_NUMBERS=$(gh pr list -L 100 --search "$PR_QUERY" --json number --jq '[(.[].number|tostring)] | join(" ")')
+    if [[ -z "$PR_NUMBERS" ]]; then
+      echo "No PRs found for query: '$PR_QUERY'"
+      return 1
+    fi
+    for PR_NUMBER in $PR_NUMBERS; do
       echo "Editing PR: $PR_NUMBER"
       gh pr edit "$PR_NUMBER" --add-label "release/$NEXT_RELEASE" --remove-label "release/$RELEASE_NUMBER" --repo "$SLUG"
     done
