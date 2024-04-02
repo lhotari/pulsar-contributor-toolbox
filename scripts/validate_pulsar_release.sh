@@ -228,10 +228,10 @@ Vote for pulsar-$VERSION-candidate-$CANDIDATE with this email body:
 
 - Built from source
 - Checked the signatures of the source and binary release artifacts
-- Run standalone
-- Checked producer and consumer
-- Verified the Cassandra connector
-- Verified the Stateful function
+- Ran pulsar standalone
+  - Checked producer and consumer
+  - Verified the Cassandra connector
+  - Verified the Stateful function
 
 ====================
 EOF
