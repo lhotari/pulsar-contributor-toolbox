@@ -1435,7 +1435,7 @@ function ptbx_cherry_pick_move_to_release() {
   )
 }
 
-function ptbx_convert_jfr_to_flamegraph() {
+function ptbx_jfr2flame() {
   (
     local jfr_file="$1"
     local flamegraph_file_base="${jfr_file%.*}"
@@ -1444,16 +1444,17 @@ function ptbx_convert_jfr_to_flamegraph() {
     if [ ! -f "$async_profiler_jar" ]; then
       async_profiler_jar="$async_profiler_dir/lib/converter.jar"
     fi
-    java -cp "${async_profiler_jar}" jfr2flame "${jfr_file}" "${flamegraph_file_base}.html"
-    java -cp "${async_profiler_jar}" jfr2flame --alloc "${jfr_file}" "${flamegraph_file_base}_alloc.html"
-    java -cp "${async_profiler_jar}" jfr2flame --alloc --live "${jfr_file}" "${flamegraph_file_base}_alloc_live.html"
-    java -cp "${async_profiler_jar}" jfr2flame --lock "${jfr_file}" "${flamegraph_file_base}_lock.html"
-    java -cp "${async_profiler_jar}" jfr2flame --threads "${jfr_file}" "${flamegraph_file_base}_threads.html"
-    java -cp "${async_profiler_jar}" jfr2flame --classify "${jfr_file}" "${flamegraph_file_base}_classify.html"
-    if [ $? -eq 0 ]; then
-      echo "Result in file://$(realpath "${flamegraph_file_base}.html")"
-    fi
-    
+    set -e
+    shift
+    java -cp "${async_profiler_jar}" jfr2flame "$@" "${jfr_file}" "${flamegraph_file_base}.html"
+    java -cp "${async_profiler_jar}" jfr2flame "$@" --alloc "${jfr_file}" "${flamegraph_file_base}_alloc.html"
+    java -cp "${async_profiler_jar}" jfr2flame "$@" --lock "${jfr_file}" "${flamegraph_file_base}_lock.html"
+    java -cp "${async_profiler_jar}" jfr2flame "$@" --threads "${jfr_file}" "${flamegraph_file_base}_threads.html"
+    java -cp "${async_profiler_jar}" jfr2flame "$@" --classify "${jfr_file}" "${flamegraph_file_base}_classify.html"
+    echo "Results in:"
+    for file in "${flamegraph_file_base}"*.html; do
+      echo "file://$(realpath "$file")"
+    done
   )
 }
 
