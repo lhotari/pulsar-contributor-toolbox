@@ -347,7 +347,7 @@ function ptbx_run_changed_tests() {
         test_classes=($(printf "%s\n" "${test_classes[@]}" | sort -u))
         printf "Running tests in %s for classes:\n" "$last_module"
         printf "\t%s\n" "${test_classes[@]}"
-        ptbx_run_test -Dtest="$(IFS=, ; echo "${test_classes[*]}")" || { echo "Failed to run tests in $last_module"; return 1; }
+        ptbx_run_test -Dsurefire.failIfNoSpecifiedTests=false -Dtest="$(IFS=, ; echo "${test_classes[*]}")" || { echo "Failed to run tests in $last_module"; return 1; }
         test_classes=()
       fi
       if [[ "$file" =~ src/test/java/.*Test\.java$ ]]; then
@@ -365,7 +365,7 @@ function ptbx_run_changed_tests() {
       test_classes=($(printf "%s\n" "${test_classes[@]}" | sort -u))
       printf "Running tests in %s for classes:\n" "$last_module"
       printf "\t%s\n" "${test_classes[@]}"
-      ptbx_run_test -Dtest="$(IFS=, ; echo "${test_classes[*]}")"  || { echo "Failed to run tests in $last_module"; return 1; }
+      ptbx_run_test -Dsurefire.failIfNoSpecifiedTests=false -Dtest="$(IFS=, ; echo "${test_classes[*]}")"  || { echo "Failed to run tests in $last_module"; return 1; }
     fi
   )
 }
