@@ -140,8 +140,8 @@ sleep 5
 
 
 docker run -d --rm --name=cassandra$$ -p 9042:9042 cassandra:3.11
-echo "Wait 10 seconds"
-sleep 10
+echo "Wait 20 seconds"
+sleep 20
 docker exec cassandra$$ nodetool status
 docker exec -i cassandra$$ cqlsh localhost <<EOF
 CREATE KEYSPACE pulsar_test_keyspace WITH replication = {'class':'SimpleStrategy', 'replication_factor':1};
