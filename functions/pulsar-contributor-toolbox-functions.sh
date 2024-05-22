@@ -685,8 +685,6 @@ function ptbx_build_java_test_image() {
   (
     docker pull ubuntu:22.04
     ptbx_cd_git_root
-    export UBUNTU_MIRROR=${UBUNTU_MIRROR:-mirror://mirrors.ubuntu.com/mirrors.txt}
-    export UBUNTU_SECURITY_MIRROR=${UBUNTU_SECURITY_MIRROR:-http://security.ubuntu.com/ubuntu/}
     ./build/build_java_test_image.sh -Dcheckstyle.skip=true || return 1
   )
 }
