@@ -1,4 +1,5 @@
-# kdiff3 for arm64 sometime segfaults, this is a way to get x86_64 version installed as a backup
+# kdiff3 1.11.1 segfaults, this is a way to get x86_64 version installed as a backup
+# issue: https://bugs.kde.org/show_bug.cgi?id=487338 
 # install with `brew install --cask kdiff3-x86.rb`
 cask "kdiff3-x86" do
   # NOTE: "3" is not a version number, but an intrinsic part of the product name
