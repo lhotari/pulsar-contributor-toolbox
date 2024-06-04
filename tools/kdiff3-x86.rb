@@ -2,8 +2,8 @@
 # install with `brew install --cask kdiff3-x86.rb`
 cask "kdiff3-x86" do
   # NOTE: "3" is not a version number, but an intrinsic part of the product name
-  version "1.11.1"
-  sha256 "fdc8e2043cdcf19c926665a4fa7a5534eeba21c48f5eac29542ee135f3887d22"
+  version "1.10.7"
+  sha256 "b00d18ecdf1f684c760e905c353d635cb79ce239eeed1fbae0a8bb7970be492a"
   url "https://download.kde.org/stable/kdiff3/kdiff3-#{version}-macos-x86_64.dmg"
   name "KDiff3-x86"
   desc "Utility for comparing and merging files and directories"
@@ -24,6 +24,4 @@ cask "kdiff3-x86" do
       '#{appdir}/kdiff3-x86.app/Contents/MacOS/kdiff3' "$@"
     EOS
   end
-
-  zap trash: "~/.kdiff3rc"
 end
