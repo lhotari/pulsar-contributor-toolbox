@@ -3,55 +3,83 @@
 # It semi-automates the validation steps described in the Pulsar release process
 # https://pulsar.apache.org/contribute/validate-release-candidate/
 set -xe -o pipefail
-VERSION=$1
-CANDIDATE=${2:-"1"}
-WORKING_DIR=$3
-
-if [[ -z "$VERSION" ]]; then
-    echo "Usage: $0 <version> <candidate> (<working_dir>)"
-    exit 1
+if [[ "$1" == "--local" ]]; then
+    LOCAL=true
+    shift
 fi
 
-if [[ -z "$WORKING_DIR" ]]; then
-    WORKING_DIR=$(mktemp -d)
-fi
-echo "Working directory: $WORKING_DIR"
-cd $WORKING_DIR
+if [[ ! $LOCAL ]]; then
+    VERSION=$1
+    CANDIDATE=${2:-"1"}
+    WORKING_DIR=$3
 
-BASE_URL=https://dist.apache.org/repos/dist/dev/pulsar/pulsar-$VERSION-candidate-$CANDIDATE
+    if [[ -z "$VERSION" ]]; then
+        echo "Usage: $0 <version> <candidate> (<working_dir>)"
+        exit 1
+    fi
 
-# Download the release tarballs
-for file in apache-pulsar-$VERSION-bin.tar.gz apache-pulsar-$VERSION-bin.tar.gz.asc \
- apache-pulsar-$VERSION-bin.tar.gz.sha512 apache-pulsar-$VERSION-src.tar.gz apache-pulsar-$VERSION-src.tar.gz.asc \
- apache-pulsar-$VERSION-src.tar.gz.sha512 connectors/pulsar-io-cassandra-$VERSION.nar; do
-    wget -c $BASE_URL/$file
-done
+    if [[ -z "$WORKING_DIR" ]]; then
+        WORKING_DIR=$(mktemp -d)
+    fi
+    echo "Working directory: $WORKING_DIR"
+    cd $WORKING_DIR
 
-# Import the Pulsar KEYS
-gpg --import <(curl https://dist.apache.org/repos/dist/release/pulsar/KEYS)
+    BASE_URL=https://dist.apache.org/repos/dist/dev/pulsar/pulsar-$VERSION-candidate-$CANDIDATE
 
-# Verify the release tarballs
-gpg --verify apache-pulsar-$VERSION-bin.tar.gz.asc
-gpg --verify apache-pulsar-$VERSION-src.tar.gz.asc
+    # Download the release tarballs
+    for file in apache-pulsar-$VERSION-bin.tar.gz apache-pulsar-$VERSION-bin.tar.gz.asc \
+    apache-pulsar-$VERSION-bin.tar.gz.sha512 apache-pulsar-$VERSION-src.tar.gz apache-pulsar-$VERSION-src.tar.gz.asc \
+    apache-pulsar-$VERSION-src.tar.gz.sha512 connectors/pulsar-io-cassandra-$VERSION.nar; do
+        wget -c $BASE_URL/$file
+    done
 
-if [[ ! -d apache-pulsar-$VERSION ]]; then
-    tar xvf apache-pulsar-$VERSION-bin.tar.gz
-fi
+    # Import the Pulsar KEYS
+    gpg --import <(curl https://dist.apache.org/repos/dist/release/pulsar/KEYS)
 
-if [[ ! -d apache-pulsar-$VERSION-src ]]; then
-    tar xvf apache-pulsar-$VERSION-src.tar.gz
-fi
+    # Verify the release tarballs
+    gpg --verify apache-pulsar-$VERSION-bin.tar.gz.asc
+    gpg --verify apache-pulsar-$VERSION-src.tar.gz.asc
 
-if [[ ! -f apache-pulsar-$VERSION-src/build_ok ]]; then
-    cd apache-pulsar-$VERSION-src
-    mvn clean install -DskipTests
-    touch build_ok
-    cd ..
-fi
+    if [[ ! -d apache-pulsar-$VERSION ]]; then
+        tar xvf apache-pulsar-$VERSION-bin.tar.gz
+    fi
 
-if [[ ! -d apache-pulsar-$VERSION/connectors ]]; then
-    mkdir apache-pulsar-$VERSION/connectors
-    cp pulsar-io-cassandra-$VERSION.nar apache-pulsar-$VERSION/connectors
+    if [[ ! -d apache-pulsar-$VERSION-src ]]; then
+        tar xvf apache-pulsar-$VERSION-src.tar.gz
+    fi
+
+    if [[ ! -f apache-pulsar-$VERSION-src/build_ok ]]; then
+        cd apache-pulsar-$VERSION-src
+        mvn clean install -DskipTests
+        touch build_ok
+        cd ..
+    fi
+
+    if [[ ! -d apache-pulsar-$VERSION/connectors ]]; then
+        mkdir apache-pulsar-$VERSION/connectors
+        cp pulsar-io-cassandra-$VERSION.nar apache-pulsar-$VERSION/connectors
+    fi
+
+    cd apache-pulsar-$VERSION
+else 
+    DISTFILE=$1
+    CASSANDRA_NAR_FILE=$2
+    WORKING_DIR=$3
+
+    if [[ ! ( -f "$DISTFILE" && -f "$CASSANDRA_NAR_FILE" ) ]]; then
+        echo "Usage: $0 --local <apache-pulsar-*-bin.tar.gz> <pulsar-io-cassandra-*.nar> (<working_dir>)"
+        exit 1
+    fi
+
+    if [[ -z "$WORKING_DIR" ]]; then
+        WORKING_DIR=$(mktemp -d)
+    fi
+    echo "Working directory: $WORKING_DIR"
+    tar zvxf "$DISTFILE" -C "$WORKING_DIR"
+    PULSAR_HOME=$(ls -d "$WORKING_DIR"/apache-pulsar-*)
+    mkdir "$PULSAR_HOME"/connectors
+    cp "$CASSANDRA_NAR_FILE" "$PULSAR_HOME"/connectors/
+    cd "$PULSAR_HOME"
 fi
 
 kill_processes() {
@@ -63,14 +91,18 @@ kill_processes() {
         kill $PULSAR_CONSUMER_PID || true
     fi
     docker rm -f cassandra$$ || true
-    echo "Retry with:"
-    echo "rm -rf $WORKING_DIR/apache-pulsar-$VERSION"
-    echo "$0" "$VERSION" "$CANDIDATE" "$WORKING_DIR"
+    if [[ ! $LOCAL ]]; then
+        echo "Retry with:"
+        echo "rm -rf $WORKING_DIR/apache-pulsar-$VERSION"
+    else
+        echo "Retry with:"
+        echo "rm -rf $WORKING_DIR"
+        echo "$0" --local "$DISTFILE" "$CASSANDRA_NAR_FILE"
+    fi
     echo "Delete manually to clean up:"
     echo "rm -rf $WORKING_DIR"
 }
 
-cd apache-pulsar-$VERSION
 sed -i.bak 's!statusFilePath=.*$!statusFilePath='"$PWD"'/status!' conf/standalone.conf && rm conf/standalone.conf.bak
 touch status
 PULSAR_STANDALONE_USE_ZOOKEEPER=1 bin/pulsar standalone &> standalone.log &
@@ -220,6 +252,7 @@ bin/pulsar-admin functions delete --tenant test --namespace test-namespace --nam
 set +xe
 echo "All validation steps completed! (there are manual validation steps that are not automated)"
 
+if [[ ! $LOCAL ]]; then
 cat <<EOF
 Vote for pulsar-$VERSION-candidate-$CANDIDATE with this email body:
 ====================
@@ -235,3 +268,4 @@ Vote for pulsar-$VERSION-candidate-$CANDIDATE with this email body:
 
 ====================
 EOF
+fi
