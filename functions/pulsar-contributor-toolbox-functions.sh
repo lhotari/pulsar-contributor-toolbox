@@ -1444,13 +1444,38 @@ function ptbx_cherry_pick_add_picked() {
     local PR_NUMBERS="$@"    
     local CURRENTBRANCH=$(git rev-parse --abbrev-ref --symbolic-full-name HEAD)
     local RELEASE_BRANCH=$CURRENTBRANCH
+    local SLUG=$(ptbx_gh_slug origin)
     for PR_NUMBER in $PR_NUMBERS; do
       echo "Editing PR: $PR_NUMBER, adding cherry-picked/$RELEASE_BRANCH label"
-      gh pr edit "$PR_NUMBER" --add-label "cherry-picked/$RELEASE_BRANCH"
+      gh pr edit "$PR_NUMBER" --add-label "cherry-picked/$RELEASE_BRANCH"  --repo "$SLUG"
     done
   )
 }
 
+function ptbx_cherry_pick_add_release_labels() {
+  (
+    local PREV_RELEASE_NUMBER=${1:?Pass the previous release number as the first argument}
+    local RELEASE_NUMBER=$(ptbx_project_version | sed 's/-SNAPSHOT//')
+    local CURRENTBRANCH=$(git rev-parse --abbrev-ref --symbolic-full-name HEAD)
+    local RELEASE_BRANCH=$CURRENTBRANCH
+    local PR_QUERY="label:release/$RELEASE_NUMBER"
+    local SLUG=$(ptbx_gh_slug origin)
+    local PR_NUMBERS=$(gh pr list -L 100 --repo "$SLUG" --state merged --search "$PR_QUERY" --json number --jq '["#" + (.[].number|tostring)] | join("|")')
+    local GREP_RULE=""
+    if [[ -n "$PR_NUMBERS" ]]; then
+      GREP_RULE="-P --invert-grep --grep=$PR_NUMBERS"
+    fi
+    local ALREADY_PICKED_NOT_IN_RELEASE=$(git log --oneline $GREP_RULE --reverse "v${PREV_RELEASE_NUMBER}..HEAD" | gawk 'match($0, /\(#([0-9]+)\)/, a) {print substr(a[0], 3, length(a[0])-3)}')
+    if [[ -z "$ALREADY_PICKED_NOT_IN_RELEASE" ]]; then
+      echo "All PRs are already labeled with release/$RELEASE_NUMBER"
+      return 1
+    fi
+    for PR_NUMBER in $ALREADY_PICKED_NOT_IN_RELEASE; do
+      echo "Editing PR: $PR_NUMBER, adding release/$RELEASE_NUMBER and cherry-picked/$RELEASE_BRANCH labels, removing possible release/$PREV_RELEASE_NUMBER label"
+      gh pr edit "$PR_NUMBER" --add-label "release/$RELEASE_NUMBER" --remove-label "release/$PREV_RELEASE_NUMBER" --add-label "cherry-picked/$RELEASE_BRANCH" --repo "$SLUG"
+    done
+ )
+}
 
 function ptbx_jfr2flame() {
   (
