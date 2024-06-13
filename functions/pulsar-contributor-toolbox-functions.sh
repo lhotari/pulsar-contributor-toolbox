@@ -1460,12 +1460,16 @@ function ptbx_cherry_pick_add_release_labels() {
     local RELEASE_BRANCH=$CURRENTBRANCH
     local PR_QUERY="label:release/$RELEASE_NUMBER"
     local SLUG=$(ptbx_gh_slug origin)
+    local RELEASE_TAG_PREFIX="v"
+    if [[ "$SLUG" == "apache/bookkeeper" ]]; then
+      RELEASE_TAG_PREFIX="release-"
+    fi
     local PR_NUMBERS=$(gh pr list -L 100 --repo "$SLUG" --state merged --search "$PR_QUERY" --json number --jq '["#" + (.[].number|tostring)] | join("|")')
     local GREP_RULE=""
     if [[ -n "$PR_NUMBERS" ]]; then
       GREP_RULE="-P --invert-grep --grep=$PR_NUMBERS"
     fi
-    local ALREADY_PICKED_NOT_IN_RELEASE=$(git log --oneline $GREP_RULE --reverse "v${PREV_RELEASE_NUMBER}..HEAD" | gawk 'match($0, /\(#([0-9]+)\)/, a) {print substr(a[0], 3, length(a[0])-3)}')
+    local ALREADY_PICKED_NOT_IN_RELEASE=$(git log --oneline $GREP_RULE --reverse "${RELEASE_TAG_PREFIX}${PREV_RELEASE_NUMBER}..HEAD" | gawk 'match($0, /\(#([0-9]+)\)/, a) {print substr(a[0], 3, length(a[0])-3)}')
     if [[ -z "$ALREADY_PICKED_NOT_IN_RELEASE" ]]; then
       echo "All PRs are already labeled with release/$RELEASE_NUMBER"
       return 1
