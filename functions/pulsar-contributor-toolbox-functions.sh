@@ -1439,6 +1439,18 @@ function ptbx_cherry_pick_move_to_release() {
   )
 }
 
+function ptbx_cherry_pick_add_picked() {
+  (
+    local PR_NUMBERS="$@"    
+    local CURRENTBRANCH=$(git rev-parse --abbrev-ref --symbolic-full-name HEAD)
+    local RELEASE_BRANCH=$CURRENTBRANCH
+    for PR_NUMBER in $PR_NUMBERS; do
+      echo "Editing PR: $PR_NUMBER, adding cherry-picked/$RELEASE_BRANCH label"
+      gh pr edit "$PR_NUMBER" --add-label "cherry-picked/$RELEASE_BRANCH"
+    done
+  )
+}
+
 
 function ptbx_jfr2flame() {
   (
