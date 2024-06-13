@@ -1416,13 +1416,14 @@ function ptbx_cherry_pick_check() {
 function ptbx_cherry_pick_move_to_release() {
   (
     local NEXT_RELEASE=$1
+    local RELEASE_NUMBER=${2-:$(ptbx_project_version | sed 's/-SNAPSHOT//')}
     if [[ -z "$NEXT_RELEASE" ]]; then
-      echo "Usage: ptbx_cherry_pick_move_to_release <next_release>"
+      echo "Usage: ptbx_cherry_pick_move_to_release <next_release> (<from_release>)"
       return 1
     fi
+    echo "Moving PRs from release/$RELEASE_NUMBER to release/$NEXT_RELEASE"
     local SLUG=$(ptbx_gh_slug origin)
     local UPSTREAM=origin
-    local RELEASE_NUMBER=$(ptbx_project_version | sed 's/-SNAPSHOT//')
     local CURRENTBRANCH=$(git rev-parse --abbrev-ref --symbolic-full-name HEAD)
     local RELEASE_BRANCH=$CURRENTBRANCH
     local PR_QUERY="label:release/$RELEASE_NUMBER -label:cherry-picked/$RELEASE_BRANCH"
@@ -1437,6 +1438,7 @@ function ptbx_cherry_pick_move_to_release() {
     done
   )
 }
+
 
 function ptbx_jfr2flame() {
   (
