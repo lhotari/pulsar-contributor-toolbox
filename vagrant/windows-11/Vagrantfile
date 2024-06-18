@@ -58,6 +58,7 @@ New-Item -ItemType SymbolicLink -Path "C:\Program Files\Git\mingw64\bin\zip.exe"
 & "C:\Program Files\Git\git-bash.exe" -c 'sdk i java 17.0.11-amzn'
 & "C:\Program Files\Git\git-bash.exe" -c 'sdk i maven'
 [Environment]::SetEnvironmentVariable("Path", $env:Path + ";C:\Users\vagrant\.sdkman\candidates\maven\current\bin;C:\Users\vagrant\.sdkman\candidates\java\current\bin", "Machine")
+Set-Itemproperty -path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -Name 'HideFileExt' -value 0
 EOH
   end
 end
