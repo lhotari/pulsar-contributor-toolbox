@@ -1,0 +1,63 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+VAGRANTFILE_API_VERSION = '2'
+Vagrant.configure("2") do |config|
+  config.vm.define 'windows11' do |windows|
+    windows.vm.box = 'gusztavvargadr/windows-11'
+    windows.vm.guest = :windows
+    windows.vm.synced_folder '.', 'c:\\users\\vagrant\\synced', create: true, owner: 'vagrant', group: 'vagrant'
+    config.ssh.password = 'vagrant'
+    config.ssh.username = 'vagrant'
+    windows.vm.communicator = 'winrm'
+    windows.vm.network :public_network
+    config.winrm.username = 'vagrant'
+    config.winrm.password = 'vagrant'
+    config.windows.halt_timeout = 15
+    config.winrm.timeout =   1800 # 30 minutes
+    config.vm.boot_timeout = 1800 # 30 minutes
+    config.vm.provider 'virtualbox' do |vb|
+      vb.gui = ENV['vbgui'] != nil
+      vb.linked_clone = true
+      vb.memory = 4096
+      vb.cpus = 2
+      vb.customize ['modifyvm', :id, '--vram', 256] if vb.gui
+      vb.customize ['modifyvm', :id, '--accelerate3d', 'on'] if vb.gui
+      vb.customize ['modifyvm', :id, '--accelerate2dvideo', 'on'] if vb.gui
+      vb.customize ['modifyvm', :id, '--clipboard', 'bidirectional'] if vb.gui
+      vb.customize ['modifyvm', :id, '--draganddrop', 'bidirectional'] if vb.gui
+      vb.customize [
+        'storageattach', :id,
+        '--storagectl', 'IDE Controller',
+        '--device', 0,
+        '--port', 1,
+        '--type', 'dvddrive',
+        '--medium', 'emptydrive'
+      ]
+      audio_driver = case RUBY_PLATFORM
+                     when /linux/
+                       'alsa'
+                     when /darwin/
+                       'coreaudio'
+                     when /mswin|mingw|cygwin/
+                       'dsound'
+                     else
+                       raise "Unknown RUBY_PLATFORM=#{RUBY_PLATFORM}"
+                     end
+      vb.customize ['modifyvm', :id, '--audio', audio_driver, '--audiocontroller', 'hda'] if ENV['vbaudio']
+    end
+    config.vm.provision 'shell', inline: <<-'EOH'
+cmd /c ver
+systeminfo
+Get-ComputerInfo
+Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+choco list -i
+choco install -y git 7zip
+New-Item -ItemType SymbolicLink -Path "C:\Program Files\Git\mingw64\bin\zip.exe" -Target "C:\Program Files\7-Zip\7z.exe"
+& "C:\Program Files\Git\git-bash.exe" -c 'curl -s "https://get.sdkman.io" | bash'
+& "C:\Program Files\Git\git-bash.exe" -c 'sdk'
+& "C:\Program Files\Git\git-bash.exe" -c 'sdk i java 17.0.11-amzn'
+& "C:\Program Files\Git\git-bash.exe" -c 'sdk i maven'
+[Environment]::SetEnvironmentVariable("Path", $env:Path + ";C:\Users\vagrant\.sdkman\candidates\maven\current\bin;C:\Users\vagrant\.sdkman\candidates\java\current\bin", "Machine")
+EOH
+  end
+end
