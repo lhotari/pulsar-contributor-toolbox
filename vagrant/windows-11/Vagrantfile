@@ -1,6 +1,5 @@
 # -*- mode: ruby -*-
 # vi: set ft=ruby :
-VAGRANTFILE_API_VERSION = '2'
 Vagrant.configure("2") do |config|
   config.vm.define 'windows11' do |windows|
     windows.vm.box = 'gusztavvargadr/windows-11'
