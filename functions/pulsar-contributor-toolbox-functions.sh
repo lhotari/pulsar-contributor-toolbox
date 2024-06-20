@@ -56,7 +56,7 @@ function ptbx_build_coremodules() {
     else
       ptbx_clean_snapshots
     fi
-    mvn -Pcore-modules,-main -T 1C $clean_param install -DskipTests -Dspotbugs.skip=true "$@"
+    mvn -Pcore-modules,-main -T 1C $clean_param install -DskipTests -Dspotbugs.skip=true -DnarPluginPhase=none "$@"
   )
 }
 
