@@ -1428,7 +1428,7 @@ function ptbx_cherry_pick_move_to_release() {
     local CURRENTBRANCH=$(git rev-parse --abbrev-ref --symbolic-full-name HEAD)
     local RELEASE_BRANCH=$CURRENTBRANCH
     local PR_QUERY="label:release/$RELEASE_NUMBER -label:cherry-picked/$RELEASE_BRANCH"
-    local PR_NUMBERS=$(gh pr list -L 100 --search "$PR_QUERY" --json number --jq '[(.[].number|tostring)] | join(" ")')
+    local PR_NUMBERS=$(gh pr list -L 100 --search "$PR_QUERY" --state all --json number,state --jq '[.[] | select(.state == "MERGED" or .state == "OPEN") | .number | tostring] | join(" ")')
     if [[ -z "$PR_NUMBERS" ]]; then
       echo "No PRs found for query: '$PR_QUERY'"
       return 1
