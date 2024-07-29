@@ -1417,7 +1417,7 @@ function ptbx_cherry_pick_check() {
 function ptbx_cherry_pick_move_to_release() {
   (
     local NEXT_RELEASE=$1
-    local RELEASE_NUMBER=${2-:$(ptbx_project_version | sed 's/-SNAPSHOT//')}
+    local RELEASE_NUMBER=${2:-$(ptbx_project_version | sed 's/-SNAPSHOT//')}
     if [[ -z "$NEXT_RELEASE" ]]; then
       echo "Usage: ptbx_cherry_pick_move_to_release <next_release> (<from_release>)"
       return 1
