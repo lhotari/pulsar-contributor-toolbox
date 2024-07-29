@@ -1505,6 +1505,15 @@ function ptbx_jfr2flame() {
   )
 }
 
+function ptbx_gh_add_label() {
+  (
+    local label_name=${1:?label_name is required}
+    local label_color=${2:-"$(printf "%06x\n" $(shuf -i 1-16777215 -n 1))"}
+    local SLUG=$(ptbx_gh_slug origin)
+    GITHUB_TOKEN=$(gh auth token) gh api -X POST /repos/$SLUG/labels -f name="$label_name" -f color="$label_color" | jq .
+  )
+}
+
 function ptbx_gha_ci_trigger() {
   (
     local SLUG=$(ptbx_gh_slug origin)
