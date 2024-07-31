@@ -1,0 +1,55 @@
+name: Pulsar Release Validation
+on:
+  workflow_dispatch:
+    inputs:
+      jdk_major_version:
+        description: 'JDK major version to use for the build'
+        required: true
+        type: choice
+        options:
+          - '17'
+          - '21'
+        default: '17'
+      release_version:
+        description: 'Pulsar release version to validate'
+        required: true
+        type: string
+      release_candidate:
+        description: 'Pulsar release candidate to validate'
+        required: true
+        type: string
+        default: '1'
+
+env:
+  JDK_DISTRIBUTION: corretto
+  CI_JDK_MAJOR_VERSION: ${{ github.event.inputs.jdk_major_version }}
+  RELEASE_VERSION: ${{ github.event.inputs.release_version }}
+  RELEASE_CANDIDATE: ${{ github.event.inputs.release_candidate }}
+
+jobs:
+  validate-pulsar-release:
+    name: Validate pulsar-${{ github.event.inputs.release_version }}-candidate-${{ github.event.inputs.release_candidate }}
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tune Runner VM
+        uses: ./.github/actions/tune-runner-vm
+      - name: Setup ssh access to build runner VM
+        uses: ./.github/actions/ssh-access
+        continue-on-error: true
+        with:
+          limit-access-to-actor: true              
+      - name: Set up JDK ${{ env.CI_JDK_MAJOR_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: ${{ env.JDK_DISTRIBUTION }}
+          java-version: ${{ env.CI_JDK_MAJOR_VERSION }}
+      - name: Validate Pulsar release
+        run: |
+          echo "Validating pulsar-${RELEASE_VERSION}-candidate-${RELEASE_CANDIDATE}"
+          ./scripts/validate_pulsar_release.sh $RELEASE_VERSION $RELEASE_CANDIDATE
+      - name: Wait for ssh connection when build fails
+        uses: ./.github/actions/ssh-access
+        continue-on-error: true
+        with:
+          action: wait          
