@@ -335,6 +335,11 @@ function ptbx_run_test_in_docker() {
 
 function ptbx_run_changed_tests() {
   (
+    local run_all=0
+    if [[ "$1" == "--all" ]]; then
+      run_all=1
+      shift
+    fi
     local compare_to_branch="${1:-"origin/$(ptbx_detect_default_branch)"}"
     ptbx_cd_git_root
     local root_dir=$(pwd)
@@ -353,7 +358,7 @@ function ptbx_run_changed_tests() {
       if [[ "$file" =~ src/test/java/.*Test\.java$ ]]; then
         local test_class=$(echo "$file" | sed 's#.*src/test/java/##;s#\.java$##;s#/#.#g')
         test_classes+=("$test_class")
-      elif [[ "$file" =~ src/main/java/.*\.java$ ]]; then
+      elif [[ $run_all == 1 && "$file" =~ src/main/java/.*\.java$ ]]; then
         local test_class="$(echo "$file" | sed 's#.*src/main/java/##;s#\.java$##;s#/#.#g')Test"
         test_classes+=("$test_class")
       fi
