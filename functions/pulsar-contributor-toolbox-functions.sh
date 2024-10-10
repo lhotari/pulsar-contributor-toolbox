@@ -1549,3 +1549,8 @@ function ptbx_gha_ci_list() {
     fi
   )
 }
+
+function ptbx_json_pp() {
+  prettier --parser json --print-width 100 --tab-width 2 | bat --language json -p "$@"
+}
+
