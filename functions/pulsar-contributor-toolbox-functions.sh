@@ -1441,6 +1441,39 @@ function ptbx_cherry_pick_move_to_release() {
   )
 }
 
+function ptbx_gh_move_to_milestone() {
+  (
+    local FROM_MILESTONE=$1
+    local NEXT_MILESTONE=$2
+    local BACKPORT_RELEASE=$3
+    if [[ -z "$FROM_MILESTONE" || -z "$NEXT_MILESTONE" ]]; then
+      echo "Usage: ptbx_gh_move_to_milestone <from_milestone> <next_milestone> [<backport_release>]"
+      return 1
+    fi
+    echo "Moving PRs from milestone $FROM_MILESTONE to milestone $NEXT_MILESTONE"
+    local SLUG=$(ptbx_gh_slug origin)
+    local PR_QUERY="milestone:$FROM_MILESTONE"
+    local PR_NUMBERS=$(gh pr list -L 100 --search "$PR_QUERY" --state open --json number --jq '[.[].number | tostring] | join(" ")')
+    local PR_NUMBERS=23411
+    if [[ -z "$PR_NUMBERS" ]]; then
+      echo "No PRs found for query: '$PR_QUERY'"
+      return 1
+    fi
+    for PR_NUMBER in $PR_NUMBERS; do
+      echo "Editing PR: $PR_NUMBER"
+      gh pr edit "$PR_NUMBER" --milestone "$NEXT_MILESTONE" --repo "$SLUG"
+      if [[ -n "$BACKPORT_RELEASE" ]]; then
+        local PR_DATA=$(gh pr view "$PR_NUMBER" --json labels,reviewDecision --jq '.')
+        local HAS_READY_TO_TEST=$(echo "$PR_DATA" | jq '.labels[] | select(.name == "ready-to-test") | length > 0')
+        local IS_APPROVED=$(echo "$PR_DATA" | jq '.reviewDecision == "APPROVED"')
+        if [[ "$HAS_READY_TO_TEST" == "true" || "$IS_APPROVED" == "true" ]]; then
+          gh pr edit "$PR_NUMBER" --add-label "release/$BACKPORT_RELEASE" --repo "$SLUG"
+        fi
+      fi
+    done
+  )
+}
+
 function ptbx_cherry_pick_add_picked() {
   (
     local PR_NUMBERS="$@"    
