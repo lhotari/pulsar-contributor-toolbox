@@ -1630,7 +1630,9 @@ function ptbx_run_standalone() {
     mv data "data.archives/data.$(ptbx_datetime)"
   fi
 
-  PULSAR_STANDALONE_USE_ZOOKEEPER=1 $filtered_env_vars bin/pulsar standalone -nss -nfw 2>&1 | ptbx_tee_log standalone
+  PULSAR_STANDALONE_USE_ZOOKEEPER=1 \
+    PULSAR_EXTRA_OPTS="-Dpulsar.allocator.exit_on_oom=true -Dio.netty.recycler.maxCapacityPerThread=4096 -Dpulsar.allocator.leak_detection=Advanced -Dio.netty.leakDetectionLevel=advanced -Dio.netty.leakDetection.targetRecords=40" \
+    $filtered_env_vars bin/pulsar standalone -nss -nfw 2>&1 | ptbx_tee_log standalone
 }
 
 function ptbx_run_pulsar_docker() {
@@ -1659,6 +1661,7 @@ function ptbx_run_pulsar_docker() {
 
   docker run --rm -it --name pulsar-standalone-$datetime \
     -e PULSAR_STANDALONE_USE_ZOOKEEPER=1 \
+    -e PULSAR_EXTRA_OPTS="-Dpulsar.allocator.exit_on_oom=true -Dio.netty.recycler.maxCapacityPerThread=4096 -Dpulsar.allocator.leak_detection=Advanced -Dio.netty.leakDetectionLevel=advanced -Dio.netty.leakDetection.targetRecords=40" \
     -p 8080:8080 -p 6650:6650 \
     $filtered_env_vars \
     $pulsar_image_name \
