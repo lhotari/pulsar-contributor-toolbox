@@ -1810,10 +1810,10 @@ function ptbx_jfr_flamegraphs() {
     local output_base="${jfr_dir}/${jfr_base_name}_${type}"
     
     # Generate flamegraph without --threads
-    "$jfrconv" "--${type}" --title "${type} Profile" "$jfr_file" "${output_base}.html"
+    "$jfrconv" "--${type}" --title "${jfr_base_name} ${type}" "$jfr_file" "${output_base}.html"
     
     # Generate flamegraph with --threads
-    "$jfrconv" "--${type}" --threads --title "${type} Profile (Threads)" "$jfr_file" "${output_base}_threads.html"
+    "$jfrconv" "--${type}" --threads --title "${jfr_base_name} ${type} (threads)" "$jfr_file" "${output_base}_threads.html"
   done
 
   echo "Flamegraphs generated in $jfr_dir:"
