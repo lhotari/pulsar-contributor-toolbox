@@ -1803,3 +1803,77 @@ function ptbx_jfr_flamegraphs() {
   echo "Flamegraphs generated in $jfr_dir:"
   ls -1 "${jfr_dir}/${jfr_base_name}"_*.html | sed "s|^|file://$(readlink -f "$jfr_dir")/|"
 }
+
+function ptbx_async_profiler_install_nightly() {
+  (
+    set -e
+    local os_type=$(uname -s | tr '[:upper:]' '[:lower:]')
+    local arch=$(uname -m)
+    local release_info=$(curl -s https://api.github.com/repos/async-profiler/async-profiler/releases/tags/nightly)
+    local download_url
+
+    if [[ "$os_type" == "linux" ]]; then
+      if [[ "$arch" == "x86_64" ]]; then
+        download_url=$(echo "$release_info" | jq -r '.assets[] | select(.name | contains("linux-x64.tar.gz")) | .browser_download_url')
+      elif [[ "$arch" == "aarch64" ]]; then
+        download_url=$(echo "$release_info" | jq -r '.assets[] | select(.name | contains("linux-arm64.tar.gz")) | .browser_download_url')
+      else
+        echo "Unsupported architecture: $arch"
+        return 1
+      fi
+    elif [[ "$os_type" == "darwin" ]]; then
+      download_url=$(echo "$release_info" | jq -r '.assets[] | select(.name | contains("macos.zip")) | .browser_download_url')
+    else
+      echo "Unsupported operating system: $os_type"
+      return 1
+    fi
+
+    if [[ -z "$download_url" ]]; then
+      echo "Could not find a suitable download URL for your system."
+      return 1
+    fi
+
+    local temp_dir=$(mktemp -d)
+    local archive_file="$temp_dir/async-profiler.archive"
+
+    echo "Downloading async-profiler from $download_url"
+    curl -L "$download_url" -o "$archive_file"
+
+    local tools_dir="$HOME/tools"
+    mkdir -p "$tools_dir"
+
+    if [[ "$download_url" == *.zip ]]; then
+      unzip -q "$archive_file" -d "$temp_dir"
+    else
+      tar -xzf "$archive_file" -C "$temp_dir"
+    fi
+
+    local extracted_dir=$(find "$temp_dir" -maxdepth 1 -type d -name "async-profiler*" -print -quit)
+    if [[ -z "$extracted_dir" ]]; then
+      echo "Could not find extracted async-profiler directory."
+      return 1
+    fi
+
+    local version=$(basename "$extracted_dir")
+    local target_dir="$tools_dir/$version"
+
+    if [[ -d "$target_dir" ]]; then
+      echo "Removing existing directory: $target_dir"
+      rm -rf "$target_dir"
+    fi
+
+    mv "$extracted_dir" "$target_dir"
+
+    local symlink="$tools_dir/async-profiler"
+    if [[ -L "$symlink" ]]; then
+      rm "$symlink"
+    fi
+    ln -s "$target_dir" "$symlink"
+
+    echo "Async-profiler nightly build installed to $target_dir"
+    echo "Symlink created: $symlink"
+
+    # Clean up
+    rm -rf "$temp_dir"
+  )
+}
