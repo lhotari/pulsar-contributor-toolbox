@@ -1725,7 +1725,7 @@ function ptbx_run_pulsar_docker() {
     | ptbx_tee_log docker_standalone $datetime
 }
 
-function ptbx_set_async_profiler_opts() {
+function ptbx_async_profiler_opts() {
   local event="cpu"
   local profile_name="profile"
   local datetime=$(ptbx_datetime)
@@ -1764,9 +1764,24 @@ function ptbx_set_async_profiler_opts() {
     "jfrsync=$profile_name"
     "file=$jfr_dir/${jfr_file_name_prefix}.jfr"
   )
-  export OPTS="-XX:+UnlockDiagnosticVMOptions -XX:+DebugNonSafepoints -agentpath:$HOME/tools/async-profiler/lib/libasyncProfiler.so=$(IFS=,; echo "${opts[*]}")"
+
+  local os_type=$(uname -s | tr '[:upper:]' '[:lower:]')
+  local lib_suffix=".so"
+  if [[ "$os_type" == "darwin" ]]; then
+    lib_suffix=".dylib"
+  fi
+
+  local async_profiler_lib="$HOME/tools/async-profiler/lib/libasyncProfiler$lib_suffix"
+
+  if [[ ! -f "$async_profiler_lib" ]]; then
+    echo "Error: async-profiler library not found at $async_profiler_lib"
+    echo "Please install async-profiler with ptbx_async_profiler_install_nightly"
+    return 1
+  fi
+
+  export OPTS="-XX:+UnlockDiagnosticVMOptions -XX:+DebugNonSafepoints -agentpath:$async_profiler_lib=$(IFS=,; echo "${opts[*]}")"
   if [ "$silent" = false ]; then
-    echo -e "Setting\nexport OPTS=\"$OPTS\""
+    echo -e "Setting\nexport OPTS=\"$OPTS\"" | ptbx_bat_log
   fi
 }
 
@@ -1784,7 +1799,7 @@ function ptbx_jfr_flamegraphs() {
 
   if [ ! -x "$jfrconv" ]; then
     echo "jfrconv not found or not executable: $jfrconv"
-    echo "Please install async-profiler nightly build from https://github.com/async-profiler/async-profiler/releases/tag/nightly"
+    echo "Please install async-profiler nightly build with ptbx_async_profiler_install_nightly"
     return 1
   fi
 
