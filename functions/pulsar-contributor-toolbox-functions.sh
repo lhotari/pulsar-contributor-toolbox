@@ -1816,8 +1816,13 @@ function ptbx_jfr_flamegraphs() {
     "$jfrconv" "--${type}" --threads --title "${jfr_base_name} ${type} (threads)" "$jfr_file" "${output_base}_threads.html"
   done
 
-  echo "Flamegraphs generated in $jfr_dir:"
-  ls -1 "${jfr_dir}/${jfr_base_name}"_*.html | sed "s|^|file://$(readlink -f "$jfr_dir")/|"
+  local jfr_dir_path=$(readlink -f "${jfr_dir}")
+  echo "Flamegraphs generated in ${jfr_dir_path}:"
+  if [[ "$TERM_PROGRAM" == "iTerm.app" ]]; then
+    find "${jfr_dir_path}" -name "*.html"
+  else
+    find "${jfr_dir_path}" -name "*.html" -printf "file://%p\n"
+  fi
 }
 
 function ptbx_async_profiler_install_nightly() {
