@@ -1584,8 +1584,8 @@ function ptbx_json_pp() {
 }
 
 function ptbx_bat_log() {
-  # skip bat if no_bat is set
-  if [[ -z "$no_bat" ]] && command -v bat &> /dev/null; then
+  # Use bat if it's available and no_bat is not set to 1 or true
+  if [[ "$no_bat" != "1" && "$no_bat" != "true" ]] && command -v bat &> /dev/null; then
     bat -l log -pp "$@"
   else
     cat "$@"
@@ -1606,11 +1606,14 @@ function ptbx_tee_log() {
 }
 
 function ptbx_run_standalone_g1gc_perf() {
-  no_bat=1 ptbx_run_standalone \
-  --disable-leak-detection \
-    PULSAR_MEM="-Xms2g -Xmx4g -XX:MaxDirectMemorySize=6g" \
-    PULSAR_GC="-XX:+UseG1GC -XX:+PerfDisableSharedMem -XX:+AlwaysPreTouch" \
-    "$@"
+  (
+    export no_bat=${no_bat:-"true"}
+    ptbx_run_standalone \
+    --disable-leak-detection \
+      PULSAR_MEM="-Xms2g -Xmx4g -XX:MaxDirectMemorySize=6g" \
+      PULSAR_GC="-XX:+UseG1GC -XX:+PerfDisableSharedMem -XX:+AlwaysPreTouch" \
+      "$@"
+  )
 }
 
 function ptbx_get_pulsar_extra_opts() {
