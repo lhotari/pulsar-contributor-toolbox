@@ -1725,3 +1725,81 @@ function ptbx_run_pulsar_docker() {
     | ptbx_tee_log docker_standalone $datetime
 }
 
+function ptbx_set_async_profiler_opts() {
+  local event="cpu"
+  local profile_name="profile"
+  local datetime=$(ptbx_datetime)
+  local silent=false
+
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --exceptions)
+        event="Java_java_lang_Throwable_fillInStackTrace"
+        shift
+        ;;
+      -n|--name)
+        profile_name="$2"
+        shift 2
+        ;;
+      -s|--silent)
+        silent=true
+        shift
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+  
+  local jfr_file_name_prefix="${profile_name}_$datetime"
+  local jfr_dir="flamegraphs/${jfr_file_name_prefix}"
+
+  mkdir -p "$jfr_dir"
+  
+  local -a opts=(
+    "start"
+    "event=$event"
+    "alloc=2m"
+    "lock=10ms"
+    "jfrsync=$profile_name"
+    "file=$jfr_dir/${jfr_file_name_prefix}.jfr"
+  )
+  export OPTS="-XX:+UnlockDiagnosticVMOptions -XX:+DebugNonSafepoints -agentpath:$HOME/tools/async-profiler/lib/libasyncProfiler.so=$(IFS=,; echo "${opts[*]}")"
+  if [ "$silent" = false ]; then
+    echo -e "Setting\nexport OPTS=\"$OPTS\""
+  fi
+}
+
+function ptbx_jfr_flamegraphs() {
+  local jfr_file="$1"
+  local jfr_base_name="${jfr_file%.*}"
+  local jfr_dir="$(dirname "$jfr_file")"
+  local async_profiler_dir="$HOME/tools/async-profiler"
+  local jfrconv="$async_profiler_dir/bin/jfrconv"
+
+  if [ ! -f "$jfr_file" ]; then
+    echo "Input JFR file not found: $jfr_file"
+    return 1
+  fi
+
+  if [ ! -x "$jfrconv" ]; then
+    echo "jfrconv not found or not executable: $jfrconv"
+    echo "Please install async-profiler nightly build from https://github.com/async-profiler/async-profiler/releases/tag/nightly"
+    return 1
+  fi
+
+  local profile_types=("cpu" "wall" "alloc" "lock")
+  
+  for type in "${profile_types[@]}"; do
+    local output_base="${jfr_dir}/${jfr_base_name}_${type}"
+    
+    # Generate flamegraph without --threads
+    "$jfrconv" --"$type" --title "${type^} Profile" "$jfr_file" "${output_base}.html"
+    
+    # Generate flamegraph with --threads
+    "$jfrconv" --"$type" --threads --title "${type^} Profile (Threads)" "$jfr_file" "${output_base}_threads.html"
+  done
+
+  echo "Flamegraphs generated in $jfr_dir:"
+  ls -1 "${jfr_dir}/${jfr_base_name}"_*.html | sed "s|^|file://$(readlink -f "$jfr_dir")/|"
+}
