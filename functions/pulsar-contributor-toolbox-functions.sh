@@ -1604,6 +1604,13 @@ function ptbx_tee_log() {
   tee "${file_prefix}${file_suffix}.log" | ptbx_bat_log
 }
 
+function ptbx_run_standalone_g1gc_perf() {
+  ptbx_run_standalone \
+    PULSAR_MEM="-Xms2g -Xmx4g -XX:MaxDirectMemorySize=6g" \
+    PULSAR_GC="-XX:+UseG1GC -XX:+PerfDisableSharedMem -XX:+AlwaysPreTouch" \
+    "$@"
+}
+
 function ptbx_run_standalone() {
   ptbx_cd_pulsar_dir
   local filtered_env_vars=""
