@@ -1752,7 +1752,7 @@ function ptbx_async_profiler_opts() {
   done
   
   local jfr_file_name_prefix="${profile_name}_$datetime"
-  local jfr_dir="flamegraphs/${jfr_file_name_prefix}"
+  local jfr_dir="$(pwd)/flamegraphs/${jfr_file_name_prefix}"
 
   mkdir -p "$jfr_dir"
   
