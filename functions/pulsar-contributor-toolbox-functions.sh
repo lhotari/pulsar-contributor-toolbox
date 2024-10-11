@@ -1787,7 +1787,8 @@ function ptbx_async_profiler_opts() {
 
 function ptbx_jfr_flamegraphs() {
   local jfr_file="$1"
-  local jfr_base_name="${jfr_file%.*}"
+  local jfr_base_name="${jfr_file##*/}"
+  jfr_base_name="${jfr_base_name%.*}"
   local jfr_dir="$(dirname "$jfr_file")"
   local async_profiler_dir="$HOME/tools/async-profiler"
   local jfrconv="$async_profiler_dir/bin/jfrconv"
@@ -1809,10 +1810,10 @@ function ptbx_jfr_flamegraphs() {
     local output_base="${jfr_dir}/${jfr_base_name}_${type}"
     
     # Generate flamegraph without --threads
-    "$jfrconv" --"$type" --title "${type^} Profile" "$jfr_file" "${output_base}.html"
+    "$jfrconv" "--${type}" --title "${type} Profile" "$jfr_file" "${output_base}.html"
     
     # Generate flamegraph with --threads
-    "$jfrconv" --"$type" --threads --title "${type^} Profile (Threads)" "$jfr_file" "${output_base}_threads.html"
+    "$jfrconv" "--${type}" --threads --title "${type} Profile (Threads)" "$jfr_file" "${output_base}_threads.html"
   done
 
   echo "Flamegraphs generated in $jfr_dir:"
