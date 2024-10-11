@@ -1804,7 +1804,7 @@ function ptbx_jfr_flamegraphs() {
     return 1
   fi
 
-  local profile_types=("cpu" "wall" "alloc" "lock")
+  local profile_types=("cpu" "alloc" "lock")
   
   for type in "${profile_types[@]}"; do
     local output_base="${jfr_dir}/${jfr_base_name}_${type}"
