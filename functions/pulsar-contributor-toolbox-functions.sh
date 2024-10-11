@@ -1584,7 +1584,8 @@ function ptbx_json_pp() {
 }
 
 function ptbx_bat_log() {
-  if command -v bat &> /dev/null; then
+  # skip bat if no_bat is set
+  if [[ -z "$no_bat" ]] && command -v bat &> /dev/null; then
     bat -l log -pp "$@"
   else
     cat "$@"
@@ -1605,7 +1606,7 @@ function ptbx_tee_log() {
 }
 
 function ptbx_run_standalone_g1gc_perf() {
-  ptbx_run_standalone \
+  no_bat=1 ptbx_run_standalone \
   --disable-leak-detection \
     PULSAR_MEM="-Xms2g -Xmx4g -XX:MaxDirectMemorySize=6g" \
     PULSAR_GC="-XX:+UseG1GC -XX:+PerfDisableSharedMem -XX:+AlwaysPreTouch" \
