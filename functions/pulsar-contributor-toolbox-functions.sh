@@ -276,7 +276,7 @@ function ptbx_until_test_fails_in_docker() {
 
 function ptbx_until_test_fails_in_docker_with_logs() {
   (
-    ptbx_until_test_fails_in_docker "$@" |& ptbx_tee_to_output_log
+    ptbx_until_test_fails_in_docker "$@" |& ptbx_tee_log
   )
 }
 
@@ -288,7 +288,7 @@ function ptbx_until_test_fails() {
 
 function ptbx_until_test_fails_with_logs() {
   (
-    ptbx_until_test_fails "$@" |& ptbx_tee_to_output_log
+    ptbx_until_test_fails "$@" |& ptbx_tee_log
   )
 }
 
@@ -387,10 +387,6 @@ function ptbx_build_changed_modules() {
       echo "No changed modules."
     fi
   )
-}
-
-function ptbx_tee_to_output_log() {
-  tee "output_$(ptbx_datetime).log"
 }
 
 # prints a date & time up to second resolution
@@ -1585,5 +1581,88 @@ function ptbx_gha_ci_list() {
 
 function ptbx_json_pp() {
   prettier --parser json --print-width 100 --tab-width 2 | bat --language json -p "$@"
+}
+
+function ptbx_bat_log() {
+  if command -v bat &> /dev/null; then
+    bat -l log -pp "$@"
+  else
+    cat "$@"
+  fi
+}
+
+function ptbx_tee_log() {
+  local file_prefix="${1:-output}"
+  local file_suffix=""
+  if [[ $# -eq 1 ]]; then
+    file_suffix="_$(ptbx_datetime)"
+  elif [[ $# -eq 2 && -n "$2" ]]; then
+    file_suffix="_$2"
+  else
+    file_suffix=""
+  fi
+  tee "${file_prefix}${file_suffix}.log" | ptbx_bat_log
+}
+
+function ptbx_run_standalone() {
+  ptbx_cd_pulsar_dir
+  local filtered_env_vars=""
+
+  # Process arguments
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      *=*)
+        if [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*=.* ]]; then
+          filtered_env_vars+=" $1"
+        fi
+        shift
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+
+  # Archive data directory if it exists
+  if [ -d "data" ]; then
+    echo "Archiving existing data directory..."
+    mkdir -p data.archives
+    mv data "data.archives/data.$(ptbx_datetime)"
+  fi
+
+  PULSAR_STANDALONE_USE_ZOOKEEPER=1 $filtered_env_vars bin/pulsar standalone -nss -nfw 2>&1 | ptbx_tee_log standalone
+}
+
+function ptbx_run_pulsar_docker() {
+  local pulsar_image_name="apachepulsar/pulsar"
+  local filtered_env_vars=""
+  local datetime=$(ptbx_datetime)
+
+  # Process arguments
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      *=*)
+        if [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*=.* ]]; then
+          filtered_env_vars+=" -e $1"
+        fi
+        shift
+        ;;
+      *"/"*)
+        pulsar_image_name="$1"
+        shift
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+
+  docker run --rm -it --name pulsar-standalone-$datetime \
+    -e PULSAR_STANDALONE_USE_ZOOKEEPER=1 \
+    -p 8080:8080 -p 6650:6650 \
+    $filtered_env_vars \
+    $pulsar_image_name \
+    sh -c "bin/apply-config-from-env.py conf/standalone.conf && bin/pulsar standalone -nss -nfw" \
+    | ptbx_tee_log docker_standalone $datetime
 }
 
