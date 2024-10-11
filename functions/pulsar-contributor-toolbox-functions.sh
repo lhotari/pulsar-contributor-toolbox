@@ -1442,7 +1442,7 @@ function ptbx_gh_move_to_milestone() {
     local FROM_MILESTONE=$1
     local NEXT_MILESTONE=$2
     local BACKPORT_RELEASE=$3
-    if [[ -z "$FROM_MILESTONE" || -z "$NEXT_MILESTONE" ]]; then
+    if [[ -z "$FROM_MILESTONE" || -z "$NEXT_MILESTONE" || -z "$BACKPORT_RELEASE" ]]; then
       echo "Usage: ptbx_gh_move_to_milestone <from_milestone> <next_milestone> [<backport_release>]"
       return 1
     fi
@@ -1450,7 +1450,6 @@ function ptbx_gh_move_to_milestone() {
     local SLUG=$(ptbx_gh_slug origin)
     local PR_QUERY="milestone:$FROM_MILESTONE"
     local PR_NUMBERS=$(gh pr list -L 100 --search "$PR_QUERY" --state open --json number --jq '[.[].number | tostring] | join(" ")')
-    local PR_NUMBERS=23411
     if [[ -z "$PR_NUMBERS" ]]; then
       echo "No PRs found for query: '$PR_QUERY'"
       return 1
