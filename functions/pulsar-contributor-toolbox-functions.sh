@@ -1606,14 +1606,40 @@ function ptbx_tee_log() {
 
 function ptbx_run_standalone_g1gc_perf() {
   ptbx_run_standalone \
+  --disable-leak-detection \
     PULSAR_MEM="-Xms2g -Xmx4g -XX:MaxDirectMemorySize=6g" \
     PULSAR_GC="-XX:+UseG1GC -XX:+PerfDisableSharedMem -XX:+AlwaysPreTouch" \
     "$@"
 }
 
+function ptbx_get_pulsar_extra_opts() {
+  local disable_leak_detection=""
+  local extra_opts="-Dpulsar.allocator.exit_on_oom=true -Dio.netty.recycler.maxCapacityPerThread=4096"
+
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --disable-leak-detection)
+        disable_leak_detection="true"
+        shift
+        ;;
+      *)
+        extra_opts+=" $1"
+        shift
+        ;;
+    esac
+  done
+
+  if [[ "$disable_leak_detection" != "true" ]]; then
+    extra_opts+=" -Dpulsar.allocator.leak_detection=Advanced -Dio.netty.leakDetectionLevel=advanced -Dio.netty.leakDetection.targetRecords=40"
+  fi
+
+  echo "$extra_opts"
+}
+
 function ptbx_run_standalone() {
   ptbx_cd_pulsar_dir
   local filtered_env_vars=""
+  local extra_opts_args=""
 
   # Process arguments
   while [[ $# -gt 0 ]]; do
@@ -1624,7 +1650,12 @@ function ptbx_run_standalone() {
         fi
         shift
         ;;
+      --disable-leak-detection)
+        extra_opts_args+=" $1"
+        shift
+        ;;
       *)
+        extra_opts_args+=" $1"
         shift
         ;;
     esac
@@ -1637,8 +1668,10 @@ function ptbx_run_standalone() {
     mv data "data.archives/data.$(ptbx_datetime)"
   fi
 
+  local extra_opts=$(ptbx_get_pulsar_extra_opts $extra_opts_args)
+
   PULSAR_STANDALONE_USE_ZOOKEEPER=1 \
-    PULSAR_EXTRA_OPTS="-Dpulsar.allocator.exit_on_oom=true -Dio.netty.recycler.maxCapacityPerThread=4096 -Dpulsar.allocator.leak_detection=Advanced -Dio.netty.leakDetectionLevel=advanced -Dio.netty.leakDetection.targetRecords=40" \
+    PULSAR_EXTRA_OPTS="$extra_opts" \
     $filtered_env_vars bin/pulsar standalone -nss -nfw 2>&1 | ptbx_tee_log standalone
 }
 
@@ -1646,6 +1679,7 @@ function ptbx_run_pulsar_docker() {
   local pulsar_image_name="apachepulsar/pulsar"
   local filtered_env_vars=""
   local datetime=$(ptbx_datetime)
+  local extra_opts_args=""
 
   # Process arguments
   while [[ $# -gt 0 ]]; do
@@ -1660,15 +1694,22 @@ function ptbx_run_pulsar_docker() {
         pulsar_image_name="$1"
         shift
         ;;
+      --disable-leak-detection)
+        extra_opts_args+=" $1"
+        shift
+        ;;
       *)
+        extra_opts_args+=" $1"
         shift
         ;;
     esac
   done
 
+  local extra_opts=$(ptbx_get_pulsar_extra_opts $extra_opts_args)
+
   docker run --rm -it --name pulsar-standalone-$datetime \
     -e PULSAR_STANDALONE_USE_ZOOKEEPER=1 \
-    -e PULSAR_EXTRA_OPTS="-Dpulsar.allocator.exit_on_oom=true -Dio.netty.recycler.maxCapacityPerThread=4096 -Dpulsar.allocator.leak_detection=Advanced -Dio.netty.leakDetectionLevel=advanced -Dio.netty.leakDetection.targetRecords=40" \
+    -e PULSAR_EXTRA_OPTS="$extra_opts" \
     -p 8080:8080 -p 6650:6650 \
     $filtered_env_vars \
     $pulsar_image_name \
