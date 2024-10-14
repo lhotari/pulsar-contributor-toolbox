@@ -1469,6 +1469,35 @@ function ptbx_gh_move_to_milestone() {
   )
 }
 
+function ptbx_gh_add_missing_milestone_to_merged_prs() {
+  (
+    local MILESTONE=${1:?Pass the milestone to move PRs to}
+    local LAST_FORKED_BRANCH=${2:?Pass the last forked branch}
+    local RELEASE_BRANCH=${3:?Pass the release branch}
+    local MASTER_BRANCH=${4:-"master"}
+    local merge_base=$(git merge-base $LAST_FORKED_BRANCH $RELEASE_BRANCH)
+    local first_commit_in_release=$(git rev-list --ancestry-path --first-parent $merge_base..$RELEASE_BRANCH | tail -n 1)
+    local timestamp_of_first_commit_in_release=$(git show -s --format=%cI $first_commit_in_release)
+    local release_merge_base=$(git merge-base $MASTER_BRANCH $RELEASE_BRANCH)
+    local first_commit_in_release_branch=$(git rev-list --ancestry-path --first-parent $release_merge_base..$RELEASE_BRANCH | tail -n 1)
+    local timestamp_of_last_commit_in_release=$(git show -s --format=%cI $first_commit_in_release_branch)
+    local SLUG=$(ptbx_gh_slug origin)
+    local PR_QUERY="is:pr is:merged base:$MASTER_BRANCH -milestone:$MILESTONE merged:$timestamp_of_first_commit_in_release..$timestamp_of_last_commit_in_release"
+    while true; do
+      local PR_NUMBERS=$(gh pr list -L 100 --search "$PR_QUERY" --state all --json number --jq '[.[].number | tostring] | join(" ")')
+      if [[ -z "$PR_NUMBERS" ]]; then
+        echo "No PRs found for query: '$PR_QUERY'"
+        return 1
+      fi
+      for PR_NUMBER in $PR_NUMBERS; do
+        gh pr edit "$PR_NUMBER" --milestone "$MILESTONE" --repo "$SLUG"
+      done
+    done
+  )
+}
+
+
+
 function ptbx_cherry_pick_add_picked() {
   (
     local PR_NUMBERS="$@"    
