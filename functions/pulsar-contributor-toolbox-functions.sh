@@ -1469,7 +1469,7 @@ function ptbx_gh_move_to_milestone() {
   )
 }
 
-function ptbx_gh_add_missing_milestone_to_merged_prs() {
+function ptbx_gh_update_milestone_in_merged_prs() {
   (
     local MILESTONE=${1:?Pass the milestone to move PRs to}
     local LAST_FORKED_BRANCH=${2:?Pass the last forked branch}
@@ -1487,16 +1487,25 @@ function ptbx_gh_add_missing_milestone_to_merged_prs() {
       local PR_NUMBERS=$(gh pr list -L 100 --search "$PR_QUERY" --state all --json number --jq '[.[].number | tostring] | join(" ")')
       if [[ -z "$PR_NUMBERS" ]]; then
         echo "No PRs found for query: '$PR_QUERY'"
-        return 1
+        break
       fi
       for PR_NUMBER in $PR_NUMBERS; do
         gh pr edit "$PR_NUMBER" --milestone "$MILESTONE" --repo "$SLUG"
       done
     done
+    # remove invalid milestone definition in PRs where base is not master
+    PR_QUERY="is:pr is:merged -base:$MASTER_BRANCH milestone:$MILESTONE"
+    PR_NUMBERS=$(gh pr list -L 500 --search "$PR_QUERY" --state all --json number --jq '[.[].number | tostring] | join(" ")')
+    if [[ -z "$PR_NUMBERS" ]]; then
+      echo "No PRs found for query: '$PR_QUERY'"
+      return 1
+    fi
+    for PR_NUMBER in $PR_NUMBERS; do
+      echo "Removing milestone. Editing PR: $PR_NUMBER"
+      gh pr edit "$PR_NUMBER" --remove-milestone --repo "$SLUG"
+    done
   )
 }
-
-
 
 function ptbx_cherry_pick_add_picked() {
   (
