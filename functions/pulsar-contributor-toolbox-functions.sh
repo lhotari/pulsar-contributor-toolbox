@@ -1469,17 +1469,25 @@ function ptbx_gh_move_to_milestone() {
   )
 }
 
+function ptbx_gh_first_commit_in_release() {
+  (
+    local FORK_POINT_BRANCH=${1:?Pass the fork point branch}
+    local RELEASE_BRANCH=${2:?Pass the release branch}
+    local merge_base=$(git merge-base $FORK_POINT_BRANCH $RELEASE_BRANCH)
+    local first_commit_in_release=$(git rev-list --ancestry-path --first-parent $merge_base..$RELEASE_BRANCH | tail -n 1)
+    echo $first_commit_in_release
+  )
+}
+
 function ptbx_gh_update_milestone_in_merged_prs() {
   (
     local MILESTONE=${1:?Pass the milestone to move PRs to}
     local LAST_FORKED_BRANCH=${2:?Pass the last forked branch}
     local RELEASE_BRANCH=${3:?Pass the release branch}
     local MASTER_BRANCH=${4:-"master"}
-    local merge_base=$(git merge-base $LAST_FORKED_BRANCH $RELEASE_BRANCH)
-    local first_commit_in_release=$(git rev-list --ancestry-path --first-parent $merge_base..$RELEASE_BRANCH | tail -n 1)
+    local first_commit_in_release=$(ptbx_gh_first_commit_in_release $LAST_FORKED_BRANCH $RELEASE_BRANCH)
     local timestamp_of_first_commit_in_release=$(git show -s --format=%cI $first_commit_in_release)
-    local release_merge_base=$(git merge-base $MASTER_BRANCH $RELEASE_BRANCH)
-    local first_commit_in_release_branch=$(git rev-list --ancestry-path --first-parent $release_merge_base..$RELEASE_BRANCH | tail -n 1)
+    local first_commit_in_release_branch=$(ptbx_gh_first_commit_in_release $MASTER_BRANCH $RELEASE_BRANCH)
     local timestamp_of_last_commit_in_release=$(git show -s --format=%cI $first_commit_in_release_branch)
     local SLUG=$(ptbx_gh_slug origin)
     local PR_QUERY="is:pr is:merged base:$MASTER_BRANCH -milestone:$MILESTONE merged:$timestamp_of_first_commit_in_release..$timestamp_of_last_commit_in_release"
