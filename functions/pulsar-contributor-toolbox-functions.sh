@@ -1595,7 +1595,7 @@ function ptbx_gha_ci_trigger() {
     local BRANCH=$(git rev-parse --abbrev-ref --symbolic-full-name HEAD)
     if [[ "$SLUG" == "apache/pulsar" ]]; then
       case "$BRANCH" in
-        branch-3.0|branch-3.2|branch-3.3|master)
+        branch-3.0|branch-3.2|branch-3.3|branch-4.0|master)
           gh workflow run pulsar-ci.yaml -r $BRANCH --field collect_coverage=false
           gh workflow run pulsar-ci-flaky.yaml -r $BRANCH --field collect_coverage=false
           ;;
