@@ -2007,3 +2007,9 @@ function ptbx_docs_merge_origin_using_docs_diff() {
     ptbx_docs_apply_patch_to_versioned_docs "$patchfile" "$@"
   )
 }
+
+function ptbx_delete_patch_backups() {
+  (
+    find -name "*.rej" -or -name "*.orig" -delete
+  )
+}
