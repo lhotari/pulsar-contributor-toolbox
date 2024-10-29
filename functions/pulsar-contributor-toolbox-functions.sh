@@ -1944,18 +1944,27 @@ function ptbx_async_profiler_install_nightly() {
   )
 }
 
-function ptbx_docs_apply_last_commit_to_versioned_docs() {
+function ptbx_docs_apply_patch_to_versioned_docs() {
   (
+    local patchfile="${1:?Patch file is required}"
+    shift
     local -a version_dirs=("${@:-version-3.0.x version-3.3.x version-4.0.x}")
     ptbx_cd_git_root
-    local tempfile=$(mktemp)
-    git format-patch --stdout -1 HEAD > "$tempfile"
     cd versioned_docs
     for version_dir in "${version_dirs[@]}"; do
       cd "$version_dir"
       echo "Applying patch to $version_dir"
-      patch -f -N -V none -p2 < "$tempfile" || echo "Failed to apply patch to $version_dir"
+      patch -f -N -V none -p2 < "$patchfile" || echo "Failed to apply patch to $version_dir"
       cd ..
     done
+  )
+}
+
+function ptbx_docs_apply_last_commit_to_versioned_docs() {
+  (
+    ptbx_cd_git_root
+    local patchfile=$(mktemp)
+    git format-patch --stdout -1 HEAD > "$patchfile"
+    ptbx_docs_apply_patch_to_versioned_docs "$patchfile" "$@"
   )
 }
