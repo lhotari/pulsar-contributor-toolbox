@@ -1948,7 +1948,12 @@ function ptbx_docs_apply_patch_to_versioned_docs() {
   (
     local patchfile="${1:?Patch file is required}"
     shift
-    local -a version_dirs=("${@:-version-3.0.x version-3.3.x version-4.0.x}")
+    local -a version_dirs
+    if [ "$#" -eq 0 ]; then
+        version_dirs=("version-3.0.x" "version-3.3.x" "version-4.0.x")
+    else
+        version_dirs=("$@")
+    fi
     ptbx_cd_git_root
     cd versioned_docs
     for version_dir in "${version_dirs[@]}"; do
