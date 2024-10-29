@@ -2010,6 +2010,6 @@ function ptbx_docs_merge_origin_using_docs_diff() {
 
 function ptbx_delete_patch_backups() {
   (
-    find -name "*.rej" -or -name "*.orig" -delete
+    find '(' -name "*.rej" -or -name "*.orig" ')' -delete
   )
 }
