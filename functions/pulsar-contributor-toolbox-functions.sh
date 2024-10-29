@@ -1968,3 +1968,12 @@ function ptbx_docs_apply_last_commit_to_versioned_docs() {
     ptbx_docs_apply_patch_to_versioned_docs "$patchfile" "$@"
   )
 }
+
+function ptbx_docs_apply_git_diff_origin_main_to_versioned_docs() {
+  (
+    ptbx_cd_git_root
+    local patchfile=$(mktemp)
+    git diff -u origin/main -- docs/ > "$patchfile"
+    ptbx_docs_apply_patch_to_versioned_docs "$patchfile" "$@"
+  )
+}
