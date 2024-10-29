@@ -1976,9 +1976,15 @@ function ptbx_docs_apply_last_commit_to_versioned_docs() {
 
 function ptbx_docs_apply_git_diff_origin_main_to_versioned_docs() {
   (
+    local doc_dir="docs"
+    if [[ "$1" == "--doc-dir"  ]]; then
+      shift
+      doc_dir="$1"
+      shift
+    fi
     ptbx_cd_git_root
     local patchfile=$(mktemp)
-    git diff -u origin/main -- docs/ > "$patchfile"
+    git diff -u origin/main -- "$doc_dir" > "$patchfile"
     ptbx_docs_apply_patch_to_versioned_docs "$patchfile" "$@"
   )
 }
