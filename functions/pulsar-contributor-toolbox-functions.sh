@@ -1984,7 +1984,26 @@ function ptbx_docs_apply_git_diff_origin_main_to_versioned_docs() {
     fi
     ptbx_cd_git_root
     local patchfile=$(mktemp)
-    git diff -u origin/main -- "$doc_dir" > "$patchfile"
+    git diff -u $(git merge-base HEAD origin/main) -- "$doc_dir" > "$patchfile"
+    ptbx_docs_apply_patch_to_versioned_docs "$patchfile" "$@"
+  )
+}
+
+function ptbx_docs_merge_origin_using_docs_diff() {
+  (
+    local doc_dir="docs"
+    if [[ "$1" == "--doc-dir"  ]]; then
+      shift
+      doc_dir="$1"
+      shift
+    fi
+    ptbx_cd_git_root
+    local patchfile=$(mktemp)
+    git diff -u $(git merge-base HEAD origin/main) -- "$doc_dir" > "$patchfile"
+    git merge -X theirs --no-edit origin/main
+    cat "$patchfile" | patch -p1 || { echo "Failed to apply patch '$patchfile'."; return 1; }
+    git add -u
+    git commit --amend --no-edit
     ptbx_docs_apply_patch_to_versioned_docs "$patchfile" "$@"
   )
 }
