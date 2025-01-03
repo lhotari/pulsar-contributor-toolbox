@@ -192,6 +192,9 @@ function ptbx_docker_run() {
           imageid=""
         fi
       fi
+      if [ ! -f $HOME/.bashrc_docker_${arch} ]; then
+        echo "# bashrc for ptbx_docker_run for ${arch}" >> $HOME/.bashrc_docker_${arch}
+      fi
       if [[ -z "$imageid" ]]; then
         docker build $platform --tag $imagename - <<EOT
 FROM ubuntu:latest
@@ -206,9 +209,8 @@ groupadd -g $GID mygroup || true
 useradd -M -d $HOME -u $UID -g $GID -s /bin/bash $USER
 EOS
 EOT
-        touch $HOME/.bashrc_docker_${arch}
-        docker run $platform -e HOME=$HOME -e SDKMAN_DIR=$HOME/.sdkman_docker_${arch} --net=host -it --rm -v $HOME:$HOME -u "$UID:${GID:-"$(id -g)"}" -v /var/run/docker.sock:/var/run/docker.sock -v $HOME/.bashrc_docker_${arch}:$HOME/.bashrc -w $PWD $imagename bash -c 'curl -s "https://get.sdkman.io" | bash; source $SDKMAN_DIR/bin/sdkman-init.sh; sdk install java 17.0.9-tem; sdk install maven; sdk install gradle'
-      fi   
+        docker run $platform -e HOME=$HOME -e SDKMAN_DIR=$HOME/.sdkman_docker_${arch} --net=host -it --rm -v $HOME:$HOME -u "$UID:${GID:-"$(id -g)"}" -v /var/run/docker.sock:/var/run/docker.sock -v $HOME/.bashrc_docker_${arch}:$HOME/.bashrc -w $PWD $imagename bash -c 'curl -s "https://get.sdkman.io" | bash; source $SDKMAN_DIR/bin/sdkman-init.sh; echo "sdkman_auto_answer=true" >> $SDKMAN_DIR/etc/config; sdk install java 17.0.13-amzn; sdk install maven; sdk install gradle'
+      fi
       docker run $platform --env-file=<(printenv |egrep -v 'SDKMAN|HOME|MANPATH|INFOPATH|PATH') -e HOME=$HOME -e SDKMAN_DIR=$HOME/.sdkman_docker_${arch} --security-opt seccomp=unconfined --cap-add SYS_ADMIN --cpus=$cpus --memory=$memory --net=host -it --rm -u "$UID:${GID:-"$(id -g)"}" -v $HOME:$HOME -v /var/run/docker.sock:/var/run/docker.sock -v $HOME/.bashrc_docker_${arch}:$HOME/.bashrc -w $PWD $imagename "$@"
     else
       echo "Unsupported OS: $OSTYPE"
