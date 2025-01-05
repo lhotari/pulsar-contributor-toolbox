@@ -1391,10 +1391,17 @@ function _ptbx_urlencode() {
 function ptbx_cherry_pick_check() {
   (
     local UPSTREAM=origin
-    local RELEASE_NUMBER=$(ptbx_project_version | sed 's/-SNAPSHOT//')
+    local PROJECT_VERSION=$(ptbx_project_version)
+    local RELEASE_NUMBER=$(echo "$PROJECT_VERSION" | sed 's/-SNAPSHOT//')
     local CURRENTBRANCH=$(git rev-parse --abbrev-ref --symbolic-full-name HEAD)
     local RELEASE_BRANCH=$CURRENTBRANCH
-    local PR_QUERY="is:merged label:release/$RELEASE_NUMBER -label:cherry-picked/$RELEASE_BRANCH NOT $RELEASE_BRANCH in:title"
+    local PR_QUERY="is:merged label:release/$RELEASE_NUMBER"
+    if [[ "$PROJECT_VERSION" == "$RELEASE_NUMBER" ]]; then
+      # use pipx to run semver to get the next release number
+      local NEXT_RELEASE_NUMBER=$(pipx run semver bump patch $PROJECT_VERSION 2>/dev/null)
+      PR_QUERY="$PR_QUERY,release/$NEXT_RELEASE_NUMBER"
+    fi
+    PR_QUERY="$PR_QUERY -label:cherry-picked/$RELEASE_BRANCH NOT $RELEASE_BRANCH in:title"
     local PR_NUMBERS=$(gh pr list -L 100 --search "$PR_QUERY" --json number --jq '["#"+(.[].number|tostring)] | join("|")')
     local SLUG=$(ptbx_gh_slug origin)
     if [[ -z "$PR_NUMBERS" ]]; then
