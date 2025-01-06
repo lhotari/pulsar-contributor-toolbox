@@ -1480,6 +1480,34 @@ function ptbx_gh_move_to_milestone() {
   )
 }
 
+function ptbx_gh_remove_release_labels_from_stale_prs() {
+  (
+    local SLUG=$(ptbx_gh_slug origin)
+    local PR_QUERY="label:Stale"
+    local PR_NUMBERS=$(gh pr list -L 100 --repo "$SLUG" --search "$PR_QUERY" --state open --json number,labels --jq '[.[] | {number: .number | tostring, labels: [.labels[].name | select(startswith("release/"))]} | select(.labels | length > 0)] | map(.number) | join(" ")')
+    if [[ -z "$PR_NUMBERS" ]]; then
+      echo "No stale PRs found with Stale label and release labels"
+      return 0
+    fi
+    for PR_NUMBER in $PR_NUMBERS; do
+      echo "Processing PR #$PR_NUMBER"
+      # Get all release labels for this PR
+      local RELEASE_LABELS=$(gh pr view "$PR_NUMBER" --repo "$SLUG" --json labels --jq '.labels[].name | select(startswith("release/"))')
+      # Remove each release label
+      for LABEL in $RELEASE_LABELS; do
+        echo "Removing label $LABEL from PR #$PR_NUMBER"
+        gh pr edit "$PR_NUMBER" --remove-label "$LABEL" --repo "$SLUG"
+      done
+      # Remove milestone if present
+      echo "Removing milestone from PR #$PR_NUMBER"
+      gh pr edit "$PR_NUMBER" --remove-milestone --repo "$SLUG"
+    done
+  )
+}
+
+
+
+
 function ptbx_gh_first_commit_in_release() {
   (
     local FORK_POINT_BRANCH=${1:?Pass the fork point branch}
