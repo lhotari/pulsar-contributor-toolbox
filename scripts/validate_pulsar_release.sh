@@ -29,8 +29,13 @@ if [[ ! $LOCAL ]]; then
     # Download the release tarballs
     for file in apache-pulsar-$VERSION-bin.tar.gz apache-pulsar-$VERSION-bin.tar.gz.asc \
     apache-pulsar-$VERSION-bin.tar.gz.sha512 apache-pulsar-$VERSION-src.tar.gz apache-pulsar-$VERSION-src.tar.gz.asc \
-    apache-pulsar-$VERSION-src.tar.gz.sha512 connectors/pulsar-io-cassandra-$VERSION.nar; do
-        wget -c $BASE_URL/$file
+    apache-pulsar-$VERSION-src.tar.gz.sha512; do
+        wget -nv -c $BASE_URL/$file
+    done
+
+    for file in pulsar-io-cassandra-$VERSION.nar pulsar-io-cassandra-$VERSION.nar.asc \
+    pulsar-io-cassandra-$VERSION.nar.sha512; do
+        wget -nv -c $BASE_URL/connectors/$file
     done
 
     # Import the Pulsar KEYS
@@ -38,7 +43,11 @@ if [[ ! $LOCAL ]]; then
 
     # Verify the release tarballs
     gpg --verify apache-pulsar-$VERSION-bin.tar.gz.asc
+    sha512sum -c apache-pulsar-$VERSION-bin.tar.gz.sha512
     gpg --verify apache-pulsar-$VERSION-src.tar.gz.asc
+    sha512sum -c apache-pulsar-$VERSION-src.tar.gz.sha512
+    gpg --verify pulsar-io-cassandra-$VERSION.nar.asc
+    cat pulsar-io-cassandra-$VERSION.nar.sha512 | sed 's/\.\/connectors\///' | sha512sum -c -
 
     if [[ ! -d apache-pulsar-$VERSION ]]; then
         tar xvf apache-pulsar-$VERSION-bin.tar.gz
