@@ -33,13 +33,10 @@ if [[ ! $LOCAL ]]; then
         wget -nv -c $BASE_URL/$file
     done
 
-    mkdir connectors
-    pushd connectors
     for file in pulsar-io-cassandra-$VERSION.nar pulsar-io-cassandra-$VERSION.nar.asc \
     pulsar-io-cassandra-$VERSION.nar.sha512; do
         wget -nv -c $BASE_URL/connectors/$file
     done
-    popd
 
     # Import the Pulsar KEYS
     gpg --import <(curl https://dist.apache.org/repos/dist/release/pulsar/KEYS)
@@ -49,8 +46,8 @@ if [[ ! $LOCAL ]]; then
     sha512sum -c apache-pulsar-$VERSION-bin.tar.gz.sha512
     gpg --verify apache-pulsar-$VERSION-src.tar.gz.asc
     sha512sum -c apache-pulsar-$VERSION-src.tar.gz.sha512
-    gpg --verify connectors/pulsar-io-cassandra-$VERSION.nar.asc
-    sha512sum -c connectors/pulsar-io-cassandra-$VERSION.nar.sha512
+    gpg --verify pulsar-io-cassandra-$VERSION.nar.asc
+    cat pulsar-io-cassandra-$VERSION.nar.sha512 | sed 's/\.\/connectors\///' | sha512sum -c -
 
     if [[ ! -d apache-pulsar-$VERSION ]]; then
         tar xvf apache-pulsar-$VERSION-bin.tar.gz
