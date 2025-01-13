@@ -43,5 +43,6 @@ diagdir=/tmp/diagnostics$$
 set -xe
 kubectl exec "$@" -- bash -c "${diag_script}" -- $diagdir
 diagnostics_file="jvm_diagnostics_$(date +%F-%H%M%S).tar.gz"
-kubectl exec -q "$@" -- bash -c "cd $diagdir && tar zcf - * && rm -rf $diagdir" > "${diagnostics_file}"
+# sleep 10 workaround explained in https://stackoverflow.com/a/74746419
+kubectl exec --request-timeout=0 -q "$@" -- bash -c "cd $diagdir && tar zcf - * && rm -rf $diagdir && sleep 10" > "${diagnostics_file}"
 echo "diagnostics information in ${diagnostics_file}"
