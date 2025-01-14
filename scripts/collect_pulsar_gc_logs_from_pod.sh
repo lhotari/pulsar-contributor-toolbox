@@ -12,5 +12,5 @@ if [[ -z "$podname" ]]; then
     exit 1
 fi
 gc_logs_file="pulsar_gc_logs_${namespace}_${podname}_$(date +%F-%H%M%S).tar.gz"
-kubectl exec -n "$namespace" pod/"$podname" -- bash -c "cd /pulsar/logs; tar zcvf - pulsar_gc_*.log*" > "${gc_logs_file}"
+kubectl exec -n "$namespace" pod/"$podname" -- bash -c "cd /pulsar/logs; tar zcvf - pulsar_gc_*.log* && sleep 10" > "${gc_logs_file}"
 echo "GC logs collected to ${gc_logs_file}"
