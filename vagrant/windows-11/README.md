@@ -2,9 +2,9 @@
 
 ## Prerequisites
 
-- Vagrant
-- VirtualBox
-- Linux host running on Intel/AMD CPU (not Apple Silicon
+- Linux host running on Intel/AMD CPU (not Apple Silicon)
+- [Vagrant](https://www.vagrantup.com/)
+- [VirtualBox](https://www.virtualbox.org/)
 
 ## Usage
 
