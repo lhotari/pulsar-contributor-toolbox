@@ -26,6 +26,20 @@ vagrant ssh
 vagrant halt
 ```
 
+### Usage in Windows shell to build Pulsar
+
+while in the `vagrant ssh` shell, you can build Pulsar with the following commands:
+
+git, java and maven are installed as part of the provisioning script.
+
+```shell
+git clone https://github.com/apache/pulsar
+cd pulsar
+git fetch origin pull/<PR NUMBER>/merge
+git checkout FETCH_HEAD
+mvn clean install -DskipTests
+```
+
 ## Troubleshooting
 
 To start the box with GUI, run the following command:
