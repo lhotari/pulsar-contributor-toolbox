@@ -40,6 +40,13 @@ git checkout FETCH_HEAD
 mvn clean install -DskipTests
 ```
 
+Instead of compiling in Windows shell, you can copy files into the Vagrant box directory on the host machine. The files will be available in the `C:\Users\vagrant\synced` directory.
+
+```shell
+cd C:\Users\vagrant\synced
+# do whatever you want here
+```
+
 ## Troubleshooting
 
 To start the box with GUI, run the following command:
