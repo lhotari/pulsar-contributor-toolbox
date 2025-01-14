@@ -41,6 +41,7 @@ mvn clean install -DskipTests
 ```
 
 Instead of compiling in Windows shell, you can copy files into the Vagrant box directory on the host machine. The files will be available in the `C:\Users\vagrant\synced` directory.
+You can use the 7zip's `7z x file_name` command to extract files in the Windows shell. For `.tar.gz` files, you will need to run the command twice since the first time, it will uncompress the file to a `.tar` file.
 
 ```shell
 cd C:\Users\vagrant\synced
