@@ -52,9 +52,11 @@ if [[ ! $LOCAL ]]; then
     gpg --verify pulsar-io-cassandra-$VERSION.nar.asc
     cat pulsar-io-cassandra-$VERSION.nar.sha512 | sed 's/\.\/connectors\///' | sha512sum -c -
 
-    if [[ ! -d apache-pulsar-$VERSION ]]; then
-        tar xvf apache-pulsar-$VERSION-bin.tar.gz
+    if [[ -d apache-pulsar-$VERSION ]]; then
+        rm -rf apache-pulsar-$VERSION
     fi
+
+    tar xvf apache-pulsar-$VERSION-bin.tar.gz
 
     if [[ ! -d apache-pulsar-$VERSION-src ]]; then
         tar xvf apache-pulsar-$VERSION-src.tar.gz
@@ -104,11 +106,10 @@ kill_processes() {
     fi
     docker rm -f cassandra$$ || true
     if [[ ! $LOCAL ]]; then
-        echo "Retry with:"
-        echo "rm -rf $WORKING_DIR/apache-pulsar-$VERSION"
+        echo "In case of transient errors in validation, you can retry with this command without re-downloading and re-building the release artifacts:"
         echo "$RETRY_CMD"
     else
-        echo "Retry with:"
+        echo "In case of transient errors in validation, you can retry with this command:"
         echo "rm -rf $WORKING_DIR"
         echo "$0" --local "$DISTFILE" "$CASSANDRA_NAR_FILE"
     fi
