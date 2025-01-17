@@ -3,6 +3,8 @@
 # It semi-automates the validation steps described in the Pulsar release process
 # https://pulsar.apache.org/contribute/validate-release-candidate/
 set -xe -o pipefail
+RETRY_CMD="$0 $@"
+
 if [[ "$1" == "--local" ]]; then
     LOCAL=true
     shift
@@ -20,6 +22,7 @@ if [[ ! $LOCAL ]]; then
 
     if [[ -z "$WORKING_DIR" ]]; then
         WORKING_DIR=$(mktemp -d)
+        RETRY_CMD="${RETRY_CMD} ${WORKING_DIR}"
     fi
     echo "Working directory: $WORKING_DIR"
     cd $WORKING_DIR
@@ -103,6 +106,7 @@ kill_processes() {
     if [[ ! $LOCAL ]]; then
         echo "Retry with:"
         echo "rm -rf $WORKING_DIR/apache-pulsar-$VERSION"
+        echo "$RETRY_CMD"
     else
         echo "Retry with:"
         echo "rm -rf $WORKING_DIR"
