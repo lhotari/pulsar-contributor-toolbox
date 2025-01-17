@@ -1407,10 +1407,10 @@ function ptbx_cherry_pick_check() {
     if [[ -z "$PR_NUMBERS" ]]; then
       echo "No PRs found for query: '$PR_QUERY'"
     else
-      local ALREADY_PICKED=$(git log --oneline -P --grep="$PR_NUMBERS" --reverse $RELEASE_BRANCH | gawk 'match($0, /\(#([0-9]+)\)/, a) {print substr(a[0], 2, length(a[0])-2)}' | tr '\n' '|' | sed 's/|$//')
+      local ALREADY_PICKED=$(git log --oneline -P --grep="$PR_NUMBERS" --reverse $RELEASE_BRANCH | gawk 'match($0, /.*(\(#([0-9]+)\))/, a) {print substr(a[1], 2, length(a[1])-2)}' | tr '\n' '|' | sed 's/|$//')
       if [[ -n "$ALREADY_PICKED" ]]; then
         echo -e "\033[31m** Already picked but not tagged as cherry-picked **\033[0m"
-        git log --color --oneline -P --grep="$PR_NUMBERS" --reverse $RELEASE_BRANCH | gawk 'match($0, /\(#([0-9]+)\)/, a) {print $0 " https://github.com/'$SLUG'/pull/" substr(a[0], 3, length(a[0])-3)}' | awk '{ print $0 " https://github.com/'$SLUG'/commit/" $1 }'
+        git log --color --oneline -P --grep="$PR_NUMBERS" --reverse $RELEASE_BRANCH | gawk 'match($0, /.*(\(#([0-9]+)\))/, a) {print $0 " https://github.com/'$SLUG'/pull/" substr(a[1], 3, length(a[1])-3)}' | awk '{ print $0 " https://github.com/'$SLUG'/commit/" $1 }'
         echo "ptbx_cherry_pick_add_picked $(printf "$ALREADY_PICKED" | sed 's/|/ /g' | sed 's/#//g')" | tee >(pbcopy)
       fi
       echo -e "\033[31m** Not cherry-picked from $UPSTREAM/master **\033[0m"
@@ -1445,6 +1445,13 @@ function ptbx_cherry_pick_move_to_release() {
       echo "Editing PR: $PR_NUMBER"
       gh pr edit "$PR_NUMBER" --add-label "release/$NEXT_RELEASE" --remove-label "release/$RELEASE_NUMBER" --repo "$SLUG"
     done
+  )
+}
+
+function ptbx_parse_gitlog_prnums() {
+  (
+    # use with command like "git log --oneline v4.0.2-candidate-2..v4.0.2-candidate-3"
+    gawk 'match($0, /.*\(#([0-9]+)\)/, a) {print a[1]}' | tr '\n' ' ' | sed 's/ $//'
   )
 }
 
@@ -1584,7 +1591,7 @@ function ptbx_cherry_pick_add_release_labels() {
     if [[ -n "$PR_NUMBERS" ]]; then
       GREP_RULE="-P --invert-grep --grep=$PR_NUMBERS"
     fi
-    local ALREADY_PICKED_NOT_IN_RELEASE=$(git log --oneline $GREP_RULE --reverse "${RELEASE_TAG_PREFIX}${PREV_RELEASE_NUMBER}..HEAD" | gawk 'match($0, /\(#([0-9]+)\)/, a) {print substr(a[0], 3, length(a[0])-3)}')
+    local ALREADY_PICKED_NOT_IN_RELEASE=$(git log --oneline $GREP_RULE --reverse "${RELEASE_TAG_PREFIX}${PREV_RELEASE_NUMBER}..HEAD" | gawk 'match($0, /.*(\(#([0-9]+)\))/, a) {print substr(a[1], 3, length(a[1])-3)}')
     if [[ -z "$ALREADY_PICKED_NOT_IN_RELEASE" ]]; then
       echo "All PRs are already labeled with release/$RELEASE_NUMBER"
       return 1
