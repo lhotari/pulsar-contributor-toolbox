@@ -115,6 +115,11 @@ kill_processes() {
     fi
     echo "Delete manually to clean up:"
     echo "rm -rf $WORKING_DIR"
+    NAR_DIR="${TMPDIR:-"/tmp"}/pulsar-nar"
+    if [[ -d "$NAR_DIR" ]]; then
+        echo "Sometimes extracted Pulsar nar files get corrupted. If you get an error 'Cannot resolve type description for org.apache.pulsar.io.cassandra.CassandraStringSink', you can try to remove the nar extraction directory with this command:"
+        echo "rm -rf $(readlink -f "$NAR_DIR")"
+    fi
 }
 
 sed -i.bak 's!statusFilePath=.*$!statusFilePath='"$PWD"'/status!' conf/standalone.conf && rm conf/standalone.conf.bak
