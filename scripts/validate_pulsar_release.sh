@@ -4,6 +4,7 @@
 # https://pulsar.apache.org/contribute/validate-release-candidate/
 set -xe -o pipefail
 RETRY_CMD="$0 $@"
+COMPLETED=0
 
 if [[ "$1" == "--local" ]]; then
     LOCAL=true
@@ -113,12 +114,14 @@ kill_processes() {
         echo "rm -rf $WORKING_DIR"
         echo "$0" --local "$DISTFILE" "$CASSANDRA_NAR_FILE"
     fi
-    echo "Delete manually to clean up:"
+    echo "Delete working directory manually to clean up:"
     echo "rm -rf $WORKING_DIR"
-    NAR_DIR="${TMPDIR:-"/tmp"}/pulsar-nar"
-    if [[ -d "$NAR_DIR" ]]; then
-        echo "Sometimes extracted Pulsar nar files get corrupted. If you get an error 'Cannot resolve type description for org.apache.pulsar.io.cassandra.CassandraStringSink', you can try to remove the nar extraction directory with this command:"
-        echo "rm -rf $(readlink -f "$NAR_DIR")"
+    if [[ $COMPLETED -eq 0 ]]; then
+        NAR_DIR="${TMPDIR:-"/tmp"}/pulsar-nar"
+        if [[ -d "$NAR_DIR" ]]; then
+            echo "Sometimes extracted Pulsar nar files get corrupted. If you get an error 'Cannot resolve type description for org.apache.pulsar.io.cassandra.CassandraStringSink', you can try to remove the nar extraction directory with this command:"
+            echo "rm -rf $(readlink -f "$NAR_DIR")"
+        fi
     fi
 }
 
@@ -269,6 +272,7 @@ fi
 bin/pulsar-admin functions delete --tenant test --namespace test-namespace --name word_count
 
 set +xe
+COMPLETED=1
 echo "All validation steps completed! (there are manual validation steps that are not automated)"
 
 if [[ ! $LOCAL ]]; then
