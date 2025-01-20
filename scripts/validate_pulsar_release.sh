@@ -306,6 +306,8 @@ set +xe
 COMPLETED=1
 echo "All validation steps completed! (there are manual validation steps that are not automated)"
 
+mvn --version
+
 if [[ ! $LOCAL ]]; then
 cat <<EOF
 Vote for pulsar-$VERSION-candidate-$CANDIDATE with this email body:
