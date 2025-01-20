@@ -2,6 +2,14 @@
 # This script is used to validate a Pulsar release candidate
 # It semi-automates the validation steps described in the Pulsar release process
 # https://pulsar.apache.org/contribute/validate-release-candidate/
+# Script supports Linux and MacOS
+# Tested with MacOS with the following homebrew packages:
+# brew install wget gnupg coreutils jq
+# In Linux, you will need curl, jq, wget, netcat and gpg packages installed.
+# Installing the packages for Ubuntu:
+# sudo apt-get install wget gpg netcat-openbsd curl jq
+# In addition, you will need to have a working docker installation, as well as maven (mvn) and Java installed
+# Please check https://pulsar.apache.org/contribute/setup-buildtools/ for installing build tools.
 set -xe -o pipefail
 RETRY_CMD="$0 $@"
 COMPLETED=0
