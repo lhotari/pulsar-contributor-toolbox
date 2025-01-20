@@ -10,7 +10,6 @@
 # sudo apt-get install wget gpg netcat-openbsd curl jq
 # In addition, you will need to have a working docker installation, as well as maven (mvn) and Java installed
 # Please check https://pulsar.apache.org/contribute/setup-buildtools/ for installing build tools.
-set -xe -o pipefail
 RETRY_CMD="$0 $@"
 COMPLETED=0
 
@@ -18,6 +17,27 @@ if [[ "$1" == "--local" ]]; then
     LOCAL=true
     shift
 fi
+
+# check if required commands are installed
+required_commands=("wget" "gpg" "nc" "curl" "jq" "mvn" "java" "docker")
+for cmd in "${required_commands[@]}"; do
+    if ! command -v "$cmd" &> /dev/null; then
+        echo "$cmd could not be found. Please install $cmd and retry." >&2
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            echo "Tested with MacOS and homebrew."
+            echo "Go to https://brew.sh/ and install homebrew then run:"
+            echo "brew install wget gnupg coreutils jq"
+        elif [[ "$OSTYPE" == "linux"* ]]; then
+            echo "Tested with Ubuntu with the following packages:"
+            echo "sudo apt-get install wget gpg netcat-openbsd curl jq"
+        else
+            echo "Please install $cmd using your package manager"
+        fi
+        exit 1
+    fi
+done
+
+set -e -o pipefail
 
 if [[ ! $LOCAL ]]; then
     VERSION=$1
@@ -33,6 +53,8 @@ if [[ ! $LOCAL ]]; then
         WORKING_DIR=$(mktemp -d)
         RETRY_CMD="${RETRY_CMD} ${WORKING_DIR}"
     fi
+
+    set -x
     echo "Working directory: $WORKING_DIR"
     cd $WORKING_DIR
 
@@ -97,6 +119,7 @@ else
     if [[ -z "$WORKING_DIR" ]]; then
         WORKING_DIR=$(mktemp -d)
     fi
+    set -x
     echo "Working directory: $WORKING_DIR"
     tar zvxf "$DISTFILE" -C "$WORKING_DIR"
     PULSAR_HOME=$(ls -d "$WORKING_DIR"/apache-pulsar-*)
