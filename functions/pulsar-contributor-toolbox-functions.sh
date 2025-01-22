@@ -214,7 +214,7 @@ set -eux
 set -o pipefail
 apt-get update
 apt-get dist-upgrade -y
-apt-get install -y curl zip unzip wget ca-certificates git netcat-openbsd jq docker.io vim procps less netcat-openbsd dnsutils iputils-ping
+apt-get install -y curl zip unzip wget ca-certificates git tig netcat-openbsd jq docker.io vim procps less netcat-openbsd dnsutils iputils-ping
 groupadd -g $GID mygroup || true
 useradd -M -d $HOME -u $UID -g $GID -s /bin/bash $USER
 adduser $USER root
