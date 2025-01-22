@@ -214,7 +214,8 @@ set -eux
 set -o pipefail
 apt-get update
 apt-get dist-upgrade -y
-apt-get install -y curl zip unzip wget ca-certificates git tig netcat-openbsd jq docker.io vim procps less netcat-openbsd dnsutils iputils-ping
+apt-get install -y curl zip unzip wget ca-certificates git tig locales netcat-openbsd jq docker.io vim procps less netcat-openbsd dnsutils iputils-ping
+locale-gen en_US.UTF-8
 groupadd -g $GID mygroup || true
 useradd -M -d $HOME -u $UID -g $GID -s /bin/bash $USER
 adduser $USER root
@@ -222,7 +223,7 @@ EOS
 EOT
         docker run $platform -e HOME=$HOME -e SDKMAN_DIR=$HOME/.sdkman_docker_${arch} -e GRADLE_USER_HOME=$HOME/.gradle_docker $host_net_param -it --rm -v $HOME:$HOME -u "$UID:${GID:-"$(id -g)"}" -v /var/run/docker.sock:/var/run/docker.sock -v $HOME/.bashrc_docker_${arch}:$HOME/.bashrc -w $PWD $imagename bash -c 'curl -s "https://get.sdkman.io" | bash; source $SDKMAN_DIR/bin/sdkman-init.sh; echo "sdkman_auto_answer=true" >> $SDKMAN_DIR/etc/config; sdk install java 17.0.13-amzn; sdk install maven; sdk install gradle'
       fi
-      docker run $platform --env-file=<(printenv |egrep -v 'SDKMAN|HOME|MANPATH|INFOPATH|PATH') -e HOME=$HOME -e SDKMAN_DIR=$HOME/.sdkman_docker_${arch} -e GRADLE_USER_HOME=$HOME/.gradle_docker -e DOCKER_HOST=unix:///var/run/docker.sock $testcontainers_param --privileged --security-opt seccomp=unconfined --cap-add SYS_ADMIN --cpus=$cpus --memory=$memory $host_net_param -it --rm -u "$UID:${GID:-"$(id -g)"}" --group-add 0 -v $HOME:$HOME -v /var/run/docker.sock:/var/run/docker.sock -v $HOME/.bashrc_docker_${arch}:$HOME/.bashrc -w $PWD $imagename "$@"
+      docker run $platform --env-file=<(printenv |egrep -v 'SDKMAN|HOME|MANPATH|INFOPATH|PATH') -e HOME=$HOME -e TERM=xterm -e SDKMAN_DIR=$HOME/.sdkman_docker_${arch} -e GRADLE_USER_HOME=$HOME/.gradle_docker -e DOCKER_HOST=unix:///var/run/docker.sock $testcontainers_param --privileged --security-opt seccomp=unconfined --cap-add SYS_ADMIN --cpus=$cpus --memory=$memory $host_net_param -it --rm -u "$UID:${GID:-"$(id -g)"}" --group-add 0 -v $HOME:$HOME -v /var/run/docker.sock:/var/run/docker.sock -v $HOME/.bashrc_docker_${arch}:$HOME/.bashrc -w $PWD $imagename "$@"
     else
       echo "Unsupported OS: $OSTYPE"
       return 1
