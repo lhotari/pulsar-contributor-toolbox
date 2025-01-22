@@ -155,6 +155,7 @@ function ptbx_docker_run() {
     local cpus=2
     local memory=6g
     local platform=""
+    local no_host_net=0
     while [ true ]; do
       if [[ "$1" =~ --cpus=.* ]]; then
         cpus="${1#*=}"
@@ -165,10 +166,17 @@ function ptbx_docker_run() {
       elif [[ "$1" =~ --platform=.* ]]; then
         platform="$1"
         shift
+      elif [[ "$1" == --no-host-net ]]; then
+        no_host_net=1
+        shift
       else
         break
       fi
     done
+    local host_net_param="--net=host"
+    if [[ $no_host_net == 1 ]]; then
+      host_net_param=""
+    fi
     if [[ -z "$platform" ]]; then
       if uname -m | grep -q x86_64; then
         platform="--platform=linux/amd64"
@@ -183,7 +191,7 @@ function ptbx_docker_run() {
       for gid in $(id -G); do
         additional_groups+=("--group-add=$gid")
       done
-      docker run $platform --env-file=<(printenv) --security-opt seccomp=unconfined --cap-add SYS_ADMIN --cpus=$cpus --memory=$memory -u "$UID:${GID:-"$(id -g)"}" "${additional_groups[@]}" --net=host -it --rm -v $HOME:$HOME -v /var/run/docker.sock:/var/run/docker.sock -w $PWD -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro ubuntu "$@"
+      docker run $platform --env-file=<(printenv) --security-opt seccomp=unconfined --cap-add SYS_ADMIN --cpus=$cpus --memory=$memory -u "$UID:${GID:-"$(id -g)"}" "${additional_groups[@]}" $host_net_param -it --rm -v $HOME:$HOME -v /var/run/docker.sock:/var/run/docker.sock -w $PWD -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro ubuntu "$@"
     elif [[ "$OSTYPE" == "darwin"* ]]; then
       local imagename="ubuntu_sdkman_${arch}"
       local imageid=$(docker images -q $imagename 2> /dev/null)
@@ -204,14 +212,15 @@ set -eux
 set -o pipefail
 apt-get update
 apt-get dist-upgrade -y
-apt-get install -y curl zip unzip wget ca-certificates
+apt-get install -y curl zip unzip wget ca-certificates git netcat-openbsd jq docker.io
 groupadd -g $GID mygroup || true
 useradd -M -d $HOME -u $UID -g $GID -s /bin/bash $USER
+adduser $USER root
 EOS
 EOT
-        docker run $platform -e HOME=$HOME -e SDKMAN_DIR=$HOME/.sdkman_docker_${arch} -e GRADLE_USER_HOME=$HOME/.gradle_docker --net=host -it --rm -v $HOME:$HOME -u "$UID:${GID:-"$(id -g)"}" -v /var/run/docker.sock:/var/run/docker.sock -v $HOME/.bashrc_docker_${arch}:$HOME/.bashrc -w $PWD $imagename bash -c 'curl -s "https://get.sdkman.io" | bash; source $SDKMAN_DIR/bin/sdkman-init.sh; echo "sdkman_auto_answer=true" >> $SDKMAN_DIR/etc/config; sdk install java 17.0.13-amzn; sdk install maven; sdk install gradle'
+        docker run $platform -e HOME=$HOME -e SDKMAN_DIR=$HOME/.sdkman_docker_${arch} -e GRADLE_USER_HOME=$HOME/.gradle_docker $host_net_param -it --rm -v $HOME:$HOME -u "$UID:${GID:-"$(id -g)"}" -v /var/run/docker.sock:/var/run/docker.sock -v $HOME/.bashrc_docker_${arch}:$HOME/.bashrc -w $PWD $imagename bash -c 'curl -s "https://get.sdkman.io" | bash; source $SDKMAN_DIR/bin/sdkman-init.sh; echo "sdkman_auto_answer=true" >> $SDKMAN_DIR/etc/config; sdk install java 17.0.13-amzn; sdk install maven; sdk install gradle'
       fi
-      docker run $platform --env-file=<(printenv |egrep -v 'SDKMAN|HOME|MANPATH|INFOPATH|PATH') -e HOME=$HOME -e SDKMAN_DIR=$HOME/.sdkman_docker_${arch} -e GRADLE_USER_HOME=$HOME/.gradle_docker --security-opt seccomp=unconfined --cap-add SYS_ADMIN --cpus=$cpus --memory=$memory --net=host -it --rm -u "$UID:${GID:-"$(id -g)"}" -v $HOME:$HOME -v /var/run/docker.sock:/var/run/docker.sock -v $HOME/.bashrc_docker_${arch}:$HOME/.bashrc -w $PWD $imagename "$@"
+      docker run $platform --env-file=<(printenv |egrep -v 'SDKMAN|HOME|MANPATH|INFOPATH|PATH') -e HOME=$HOME -e SDKMAN_DIR=$HOME/.sdkman_docker_${arch} -e GRADLE_USER_HOME=$HOME/.gradle_docker -e DOCKER_HOST=unix:///var/run/docker.sock --privileged --security-opt seccomp=unconfined --cap-add SYS_ADMIN --cpus=$cpus --memory=$memory $host_net_param -it --rm -u "$UID:${GID:-"$(id -g)"}" --group-add 0 -v $HOME:$HOME -v /var/run/docker.sock:/var/run/docker.sock -v $HOME/.bashrc_docker_${arch}:$HOME/.bashrc -w $PWD $imagename "$@"
     else
       echo "Unsupported OS: $OSTYPE"
       return 1
