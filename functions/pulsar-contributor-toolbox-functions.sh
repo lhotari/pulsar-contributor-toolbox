@@ -347,6 +347,24 @@ function ptbx_run_test_in_docker() {
   )
 }
 
+function ptbx_run_test_and_detect_leaks() {
+  (
+    # create a temp directory
+    local temp_dir=$(mktemp -d)
+    # run the test
+    NETTY_LEAK_DUMP_DIR=$temp_dir ptbx_run_test -DtestExitJvmOnLeak=true -DtestExitJvmOnLeakDelayMillis=2000 "$@"
+    # check for leaks
+    local leaks=$(find $temp_dir -type f)
+    if [ -n "$leaks" ]; then
+      { echo "Leaks detected"; grep -h Test $temp_dir/* | sort -u; echo Details:; cat $temp_dir/*; } | less
+      rm -rf $temp_dir
+      return 1
+    fi
+    # clean up
+    rmdir $temp_dir
+  )
+}
+
 function ptbx_run_changed_tests() {
   (
     local run_all=0
