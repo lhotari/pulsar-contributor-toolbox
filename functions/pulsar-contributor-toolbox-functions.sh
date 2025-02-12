@@ -356,7 +356,7 @@ function ptbx_run_test_and_detect_leaks() {
     # check for leaks
     local leaks=$(find $temp_dir -type f)
     if [ -n "$leaks" ]; then
-      { echo "Leaks detected"; grep -h Test $temp_dir/* | sort -u; echo Details:; cat $temp_dir/*; } | less
+      { echo "Leaks detected"; grep -h -i test $temp_dir/* | grep org.apache | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^Hint: //' | sort -u; echo Details:; cat $temp_dir/*; } | less
       rm -rf $temp_dir
       return 1
     fi
