@@ -352,7 +352,7 @@ function ptbx_run_test_and_detect_leaks() {
     # create a temp directory
     local temp_dir=$(mktemp -d)
     # run the test
-    NETTY_LEAK_DUMP_DIR=$temp_dir ptbx_run_test -DtestExitJvmOnLeak=true -DtestExitJvmOnLeakDelayMillis=2000 "$@"
+    NETTY_LEAK_DUMP_DIR=$temp_dir ptbx_run_test "$@"
     # check for leaks
     local leaks=$(find $temp_dir -type f)
     if [ -n "$leaks" ]; then
