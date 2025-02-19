@@ -13,44 +13,78 @@
 RETRY_CMD="$0 $@"
 COMPLETED=0
 
-if [[ "$1" == "--local" ]]; then
-    LOCAL=true
-    shift
-fi
-
-# check if required commands are installed
-required_commands=("wget" "gpg" "nc" "curl" "jq" "mvn" "java" "docker")
-for cmd in "${required_commands[@]}"; do
-    if ! command -v "$cmd" &> /dev/null; then
-        echo "$cmd could not be found. Please install $cmd and retry." >&2
-        if [[ "$OSTYPE" == "darwin"* ]]; then
-            echo "Tested with MacOS and homebrew."
-            echo "Go to https://brew.sh/ and install homebrew then run:"
-            echo "brew install wget gnupg coreutils jq"
-        elif [[ "$OSTYPE" == "linux"* ]]; then
-            echo "Tested with Ubuntu with the following packages:"
-            echo "sudo apt-get install wget gpg netcat-openbsd curl jq"
-        else
-            echo "Please install $cmd using your package manager"
-        fi
-        exit 1
-    fi
+while [[ "$1" =~ ^- && ! "$1" == "--" ]]; do
+    case "$1" in
+        --local)
+            LOCAL=true
+            shift
+            ;;
+        --docker-network=*)
+            DOCKER_NETWORK="${1#--docker-network=}"
+            shift
+            ;;
+        --pulsar-image=*)
+            PULSAR_IMAGE="${1#--pulsar-image=}"
+            shift
+            ;;
+        --skip-build)
+            SKIP_BUILD=true
+            shift
+            ;;
+        *)
+            break
+            ;;
+    esac
 done
+if [[ "$1" == '--' ]]; then shift; fi
+
+if [[ ! $CHECK_PARAMS ]]; then
+    # check if required commands are installed
+    required_commands=("wget" "gpg" "nc" "curl" "jq" "mvn" "java" "docker")
+    for cmd in "${required_commands[@]}"; do
+        if ! command -v "$cmd" &> /dev/null; then
+            echo "$cmd could not be found. Please install $cmd and retry." >&2
+            if [[ "$OSTYPE" == "darwin"* ]]; then
+                echo "Tested with MacOS and homebrew."
+                echo "Go to https://brew.sh/ and install homebrew then run:"
+                echo "brew install wget gnupg coreutils jq"
+            elif [[ "$OSTYPE" == "linux"* ]]; then
+                echo "Tested with Ubuntu with the following packages:"
+                echo "sudo apt-get install wget gpg netcat-openbsd curl jq"
+            else
+                echo "Please install $cmd using your package manager"
+            fi
+            exit 1
+        fi
+    done
+fi
 
 set -e -o pipefail
 
 if [[ ! $LOCAL ]]; then
     VERSION=$1
     CANDIDATE=${2:-"1"}
-    WORKING_DIR=$3
+    WORKING_DIR_PARAM=$3
 
     if [[ -z "$VERSION" ]]; then
-        echo "Usage: $0 <version> <candidate> (<working_dir>)"
+        echo "Usage: $(basename "$0") <version> <candidate> (<working_dir>)"
         exit 1
     fi
 
+    if [[ $CHECK_PARAMS ]]; then
+        echo "${WORKING_DIR}"
+        exit 0
+    fi
+
     if [[ -z "$WORKING_DIR" ]]; then
-        WORKING_DIR=$(mktemp -d)
+        if [[ -z "$WORKING_DIR_PARAM" ]]; then
+            WORKING_DIR=$(mktemp -d)
+            RETRY_CMD="${RETRY_CMD} ${WORKING_DIR}"
+        else
+            WORKING_DIR="${WORKING_DIR_PARAM}"
+        fi
+    elif [[ -z "$WORKING_DIR_PARAM" ]]; then
+        # working dir passed in environment variable
         RETRY_CMD="${RETRY_CMD} ${WORKING_DIR}"
     fi
 
@@ -64,12 +98,12 @@ if [[ ! $LOCAL ]]; then
     for file in apache-pulsar-$VERSION-bin.tar.gz apache-pulsar-$VERSION-bin.tar.gz.asc \
     apache-pulsar-$VERSION-bin.tar.gz.sha512 apache-pulsar-$VERSION-src.tar.gz apache-pulsar-$VERSION-src.tar.gz.asc \
     apache-pulsar-$VERSION-src.tar.gz.sha512; do
-        wget -c $BASE_URL/$file
+        wget --progress=bar:force:noscroll -c $BASE_URL/$file
     done
 
     for file in pulsar-io-cassandra-$VERSION.nar pulsar-io-cassandra-$VERSION.nar.asc \
     pulsar-io-cassandra-$VERSION.nar.sha512; do
-        wget -c $BASE_URL/connectors/$file
+        wget --progress=bar:force:noscroll -c $BASE_URL/connectors/$file
     done
 
     # Import the Pulsar KEYS
@@ -93,7 +127,7 @@ if [[ ! $LOCAL ]]; then
         tar xvf apache-pulsar-$VERSION-src.tar.gz
     fi
 
-    if [[ ! -f apache-pulsar-$VERSION-src/build_ok ]]; then
+    if [[ ! -f apache-pulsar-$VERSION-src/build_ok && ! $SKIP_BUILD ]]; then
         cd apache-pulsar-$VERSION-src
         mvn -B clean install -DskipTests
         touch build_ok
@@ -109,16 +143,22 @@ if [[ ! $LOCAL ]]; then
 else 
     DISTFILE=$1
     CASSANDRA_NAR_FILE=$2
-    WORKING_DIR=$3
+    WORKING_DIR=${3:-"${WORKING_DIR}"}
 
     if [[ ! ( -f "$DISTFILE" && -f "$CASSANDRA_NAR_FILE" ) ]]; then
-        echo "Usage: $0 --local <apache-pulsar-*-bin.tar.gz> <pulsar-io-cassandra-*.nar> (<working_dir>)"
+        echo "Usage: $(basename "$0") --local <apache-pulsar-*-bin.tar.gz> <pulsar-io-cassandra-*.nar> (<working_dir>)"
         exit 1
+    fi
+
+    if [[ $CHECK_PARAMS ]]; then
+        echo "${WORKING_DIR}"
+        exit 0
     fi
 
     if [[ -z "$WORKING_DIR" ]]; then
         WORKING_DIR=$(mktemp -d)
     fi
+
     set -x
     echo "Working directory: $WORKING_DIR"
     tar zvxf "$DISTFILE" -C "$WORKING_DIR"
@@ -158,9 +198,25 @@ kill_processes() {
 
 sed -i.bak 's!statusFilePath=.*$!statusFilePath='"$PWD"'/status!' conf/standalone.conf && rm conf/standalone.conf.bak
 touch status
-PULSAR_STANDALONE_USE_ZOOKEEPER=1 bin/pulsar standalone &> standalone.log &
-PULSAR_PID=$!
-echo $PULSAR_PID > pulsar.pid
+PULSAR_HOST=localhost
+if [[ -z "$PULSAR_IMAGE" ]]; then
+    PULSAR_STANDALONE_USE_ZOOKEEPER=1 bin/pulsar standalone &> standalone.log &
+    PULSAR_PID=$!
+    echo $PULSAR_PID > pulsar.pid
+else
+    if [[ -n "$DOCKER_NETWORK" ]]; then
+        docker run --name pulsar --network ${DOCKER_NETWORK} --rm -e PULSAR_STANDALONE_USE_ZOOKEEPER=1 ${PULSAR_IMAGE} bin/pulsar standalone &> standalone.log &
+        PULSAR_PID=$!
+        echo $PULSAR_PID > pulsar.pid
+        PULSAR_HOST=pulsar
+        # Update the client.conf to use the pulsar host
+        sed -i 's!localhost!pulsar!' conf/client.conf
+    else
+        docker run --name pulsar$$ --rm -e PULSAR_STANDALONE_USE_ZOOKEEPER=1 -p 6650:6650 -p 8080:8080 ${PULSAR_IMAGE} bin/pulsar standalone &> standalone.log &
+        PULSAR_PID=$!
+        echo $PULSAR_PID > pulsar.pid
+    fi
+fi
 trap kill_processes EXIT
 
 while ! grep -q "messaging service is ready" standalone.log; do
@@ -168,24 +224,24 @@ while ! grep -q "messaging service is ready" standalone.log; do
     sleep 3
 done
 
-curl http://localhost:8080/status.html
+curl http://${PULSAR_HOST}:8080/status.html
 
 grep "Found connector ConnectorDefinition(name=cassandra" standalone.log
 
-nc -vz4 localhost 6650
+nc -vz4 ${PULSAR_HOST} 6650
 
 echo "check function cluster"
-curl -s http://localhost:8080/admin/v2/worker/cluster
+curl -s http://${PULSAR_HOST}:8080/admin/v2/worker/cluster
 echo ""
 sleep 5
 
 echo "check brokers"
-curl -s http://localhost:8080/admin/v2/namespaces/public
+curl -s http://${PULSAR_HOST}:8080/admin/v2/namespaces/public
 echo ""
 sleep 5
 
 echo "check connectors"
-curl -s http://localhost:8080/admin/v2/functions/connectors
+curl -s http://${PULSAR_HOST}:8080/admin/v2/functions/connectors
 echo ""
 sleep 5
 
@@ -194,7 +250,7 @@ bin/pulsar-admin tenants create test
 sleep 2
 bin/pulsar-admin namespaces create test/test-namespace
 sleep 2
-bin/pulsar-admin functions create --function-config-file examples/example-function-config.yaml --jar examples/api-examples.jar
+bin/pulsar-admin functions create --function-config-file $PWD/examples/example-function-config.yaml --jar $PWD/examples/api-examples.jar
 
 echo "Wait 10 seconds"
 sleep 10
@@ -223,8 +279,13 @@ if [[ "$(grep "got message" consume.log | wc -l)" -ne 10 ]]; then
 fi
 sleep 5
 
-
-docker run -d --rm --name=cassandra$$ -p 9042:9042 cassandra:3.11
+CASSANDRA_HOST=localhost
+if [[ -z "$DOCKER_NETWORK" ]]; then
+    docker run -d --rm --name=cassandra$$ -p 9042:9042 cassandra:3.11
+else
+    docker run -d --rm --name=cassandra$$ --network ${DOCKER_NETWORK} cassandra:3.11
+    CASSANDRA_HOST=cassandra$$
+fi
 echo "Wait 20 seconds"
 sleep 20
 docker exec cassandra$$ nodetool status
@@ -236,14 +297,14 @@ EOF
 
 cat > examples/cassandra-sink.yml <<EOF
 configs:
-    roots: "localhost:9042"
+    roots: "${CASSANDRA_HOST}:9042"
     keyspace: "pulsar_test_keyspace"
     columnFamily: "pulsar_test_table"
     keyname: "key"
     columnName: "col"
 EOF
 
-bin/pulsar-admin sink create --tenant public --namespace default --name cassandra-test-sink --sink-type cassandra --sink-config-file examples/cassandra-sink.yml --inputs test_cassandra
+bin/pulsar-admin sink create --tenant public --namespace default --name cassandra-test-sink --sink-type cassandra --sink-config-file $PWD/examples/cassandra-sink.yml --inputs test_cassandra
 sleep 5
 bin/pulsar-admin sink get --tenant public --namespace default --name cassandra-test-sink
 sleep 5
@@ -268,7 +329,7 @@ bin/pulsar-admin sink delete --tenant public --namespace default --name cassandr
 
 sleep 5
 
-bin/pulsar-admin functions create --function-config-file examples/example-function-config.yaml --jar examples/api-examples.jar --name word_count --className org.apache.pulsar.functions.api.examples.WordCountFunction --inputs test_wordcount_src --output test_wordcount_dest
+bin/pulsar-admin functions create --function-config-file $PWD/examples/example-function-config.yaml --jar $PWD/examples/api-examples.jar --name word_count --className org.apache.pulsar.functions.api.examples.WordCountFunction --inputs test_wordcount_src --output test_wordcount_dest
 
 sleep 5
 
@@ -315,7 +376,11 @@ Vote for pulsar-$VERSION-candidate-$CANDIDATE with this email body:
 
 +1 (binding/non-binding)
 
-- Built from source
+$(
+if [[ ! $SKIP_BUILD ]]; then
+    echo "- Built from source"
+fi
+)
 - Checked the signatures of the source and binary release artifacts
 - Ran pulsar standalone
   - Checked producer and consumer
