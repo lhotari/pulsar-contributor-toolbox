@@ -533,17 +533,15 @@ function _ptbx_git_sync_branches() {
       if [[ $branch == $current_branch ]]; then
         git checkout $branch
       fi
+      git push -f forked "refs/remotes/origin/${branch}:refs/heads/${branch}"
     done
   )
 }
 
-
 function ptbx_git_sync_pulsar_maintenance_branches_with_upstream() {
   (
     cd ~/workspace-pulsar/pulsar
-    _ptbx_git_sync_branches origin master branch-2.7 branch-2.8 branch-2.9 branch-2.10 branch-2.11 branch-3.0
-    cd ~/workspace-pulsar/pulsar.datastax
-    _ptbx_git_sync_branches datastax 2.7.2_ds 2.8.0_ds 2.8.3_ds 2.10_ds
+    _ptbx_git_sync_branches origin branch-3.0 branch-3.3 branch-4.0
   )
 }
 
