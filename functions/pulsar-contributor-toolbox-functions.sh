@@ -1667,13 +1667,14 @@ function ptbx_gh_add_label() {
 
 function ptbx_gha_ci_trigger() {
   (
-    local SLUG=$(ptbx_gh_slug origin)
+    local remote=${1:-origin}
+    local SLUG=$(ptbx_gh_slug $remote)
     local BRANCH=$(git rev-parse --abbrev-ref --symbolic-full-name HEAD)
-    if [[ "$SLUG" == "apache/pulsar" ]]; then
+    if [[ "$SLUG" =~ .*/pulsar$ ]]; then
       case "$BRANCH" in
         branch-3.0|branch-3.2|branch-3.3|branch-4.0|master)
-          gh workflow run pulsar-ci.yaml -r $BRANCH --field collect_coverage=false
-          gh workflow run pulsar-ci-flaky.yaml -r $BRANCH --field collect_coverage=false
+          gh workflow run pulsar-ci.yaml -R $SLUG -r $BRANCH --field collect_coverage=false
+          gh workflow run pulsar-ci-flaky.yaml -R $SLUG -r $BRANCH --field collect_coverage=false
           ;;
         *)
           echo "Unsupported branch $BRANCH"
@@ -1689,10 +1690,11 @@ function ptbx_gha_ci_trigger() {
 
 function ptbx_gha_ci_list() {
   (
-    local SLUG=$(ptbx_gh_slug origin)
+    local remote=${1:-origin}
+    local SLUG=$(ptbx_gh_slug $remote)
     local BRANCH=$(git rev-parse --abbrev-ref --symbolic-full-name HEAD)
-    if [[ "$SLUG" == "apache/pulsar" ]]; then
-      gh run list -b $BRANCH --limit 5 --json status,conclusion,headBranch,startedAt,url,workflowName | jq -r '.[] | "\(.status) \(.conclusion) \(.headBranch) \(.startedAt) \(.url) \(.workflowName)"'
+    if [[ "$SLUG" =~ .*/pulsar$ ]]; then
+      gh run list -R $SLUG -b $BRANCH --limit 5 --json status,conclusion,headBranch,startedAt,url,workflowName | jq -r '.[] | "\(.status) \(.conclusion) \(.headBranch) \(.startedAt) \(.url) \(.workflowName)"'
     else 
       echo "Unsupported repository $SLUG"
       return 1
