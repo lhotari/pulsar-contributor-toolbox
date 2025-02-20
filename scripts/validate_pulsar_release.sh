@@ -10,6 +10,11 @@
 # sudo apt-get install wget gpg netcat-openbsd curl jq
 # In addition, you will need to have a working docker installation, as well as maven (mvn) and Java installed
 # Please check https://pulsar.apache.org/contribute/setup-buildtools/ for installing build tools.
+#
+# There's also another script that can run this script in a Docker container when docker-in-docker support is available.
+# Please see https://github.com/lhotari/pulsar-contributor-toolbox/blob/master/scripts/validate_pulsar_release_in_docker.sh for details.
+# In that case you won't have to install all the dependencies on the machine where you run the script.
+#
 RETRY_CMD="$0 $@"
 COMPLETED=0
 

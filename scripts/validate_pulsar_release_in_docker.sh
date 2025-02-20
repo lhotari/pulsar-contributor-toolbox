@@ -4,6 +4,8 @@
 #
 # Prerequisites:
 # - Docker with docker-in-docker support
+# - validate_pulsar_release.sh script in the same directory as this script
+#
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 set -eu
 set -o pipefail
