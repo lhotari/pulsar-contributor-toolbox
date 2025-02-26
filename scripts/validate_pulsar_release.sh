@@ -134,7 +134,7 @@ if [[ ! $LOCAL ]]; then
 
     if [[ ! -f apache-pulsar-$VERSION-src/build_ok && ! $SKIP_BUILD ]]; then
         cd apache-pulsar-$VERSION-src
-        mvn -B clean install -DskipTests
+        mvn -B -ntp clean install -DskipTests
         touch build_ok
         cd ..
     fi
