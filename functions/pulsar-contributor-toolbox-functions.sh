@@ -2089,3 +2089,50 @@ function ptbx_delete_patch_backups() {
     find '(' -name "*.rej" -or -name "*.orig" ')' -delete
   )
 }
+
+# Function to query all common DNS record types for a domain
+function ptbx_dns_all() {
+  (
+    local domain=$1
+    local dns_server=$2
+
+    # If DNS server is provided, use it
+    local server_option=""
+    if [ -n "$dns_server" ]; then
+        server_option="@$dns_server"
+    fi
+
+    echo "==== DNS Records for $domain ===="
+    if [ -n "$dns_server" ]; then
+        echo "==== Using DNS server: $dns_server ===="
+    fi
+    echo ""
+
+    # Common DNS record types
+    local record_types=("A" "AAAA" "CNAME" "MX" "NS" "SOA" "TXT" "SRV" "CAA" "DNSKEY" "DS" "NAPTR" "PTR" "SSHFP")
+
+    # Try ANY query first (though many servers block it)
+    echo "Attempting ANY query (may be blocked by DNS servers):"
+    result=$(dig $server_option $domain ANY +noall +answer | grep -v "^;" | grep -v "^$")
+    if [ -n "$result" ]; then
+        echo "$result"
+    else
+        echo "No results for ANY query (likely blocked by DNS server)"
+    fi
+    echo ""
+
+    # Query each record type individually
+    for type in "${record_types[@]}"; do
+        # Store the result in a variable to check if it's empty
+        # Use grep to filter out comment lines (starting with ;) and empty lines
+        result=$(dig $server_option $domain $type +noall +answer | grep -v "^;" | grep -v "^$")
+        
+        # Only display the section if there are results
+        if [ -n "$result" ]; then
+            echo "==== $type records ===="
+            echo "$result"
+            echo ""
+        fi
+    done
+  )
+}
