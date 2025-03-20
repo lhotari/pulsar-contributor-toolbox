@@ -2136,3 +2136,13 @@ function ptbx_dns_all() {
     done
   )
 }
+
+function ptbx_mvn_quickstart() {
+  (
+    if [[ "$1" == "--help" ]]; then
+      echo "usage example: ptbx_mvn_quickstart -DgroupId=com.example -DartifactId=my-app -DinteractiveMode=false"
+      return 0
+    fi
+    mvn archetype:generate -DarchetypeArtifactId=maven-archetype-quickstart -DarchetypeVersion=1.5 "$@"
+  )
+}
