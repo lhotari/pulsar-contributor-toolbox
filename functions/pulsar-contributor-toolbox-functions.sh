@@ -351,17 +351,31 @@ function ptbx_run_test_and_detect_leaks() {
   (
     # create a temp directory
     local temp_dir=$(mktemp -d)
+    local netty_leak_dump_dir=$temp_dir/netty-leak-dump
+    local thread_leak_detector_dir=$temp_dir/thread-leak-detector
+    mkdir -p $netty_leak_dump_dir
+    mkdir -p $thread_leak_detector_dir
+    local thread_leak_detector_wait_millis=10000
+
     # run the test
-    NETTY_LEAK_DUMP_DIR=$temp_dir ptbx_run_test "$@"
+    NETTY_LEAK_DUMP_DIR=$netty_leak_dump_dir THREAD_LEAK_DETECTOR_WAIT_MILLIS=$thread_leak_detector_wait_millis THREAD_LEAK_DETECTOR_DIR=$thread_leak_detector_dir ptbx_run_test "$@"
     # check for leaks
-    local leaks=$(find $temp_dir -type f)
-    if [ -n "$leaks" ]; then
-      { echo "Leaks detected"; grep -h -i test $temp_dir/* | grep org.apache | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^Hint: //' | sort -u; echo Details:; cat $temp_dir/*; } | less
-      rm -rf $temp_dir
+    local leaks_detected=0
+    local netty_leak_files=$(find $netty_leak_dump_dir -type f)
+    if [ -n "$netty_leak_files" ]; then
+      { echo "Leaks detected"; grep -h -i test $netty_leak_dump_dir/* | grep org.apache | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^Hint: //' | sort -u; echo Details:; cat $netty_leak_dump_dir/*; } | less
+      leaks_detected=1
+    fi
+    local thread_leak_files=$(find $thread_leak_detector_dir -type f)
+    if [ -n "$thread_leak_files" ]; then
+      cat $thread_leak_detector_dir/threadleak*.txt | awk '/^Summary:/ {print $0 "\n"; next} {print}'
+      leaks_detected=1
+    fi
+    if [ $leaks_detected -ne 0 ]; then
+      echo "Leaks detected. Files in $temp_dir"
       return 1
     fi
-    # clean up
-    rmdir $temp_dir
+    rm -rf $temp_dir
   )
 }
 
