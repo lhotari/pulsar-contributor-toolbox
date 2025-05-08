@@ -421,6 +421,22 @@ function ptbx_run_changed_tests() {
   )
 }
 
+function ptbx_print_changed_tests_run_commands() {
+  (
+    local compare_to_branch="${1:-"origin/$(ptbx_detect_default_branch)"}"
+    ptbx_cd_git_root
+    local root_dir=$(pwd)
+    while read -r file; do
+      local module=$(echo "$file" | sed 's#/src/.*##g')      
+      if [[ "$file" =~ src/test/java/.*Tests?\.java$ ]]; then
+        local test_class=$(echo "$file" | sed 's#.*src/test/java/##;s#\.java$##;s#/#.#g')
+        test_classes+=("$test_class")
+        echo "ptbx_run_test_and_detect_leaks -pl $module -Dtest=$test_class"
+      fi
+    done < <(git diff --name-only "${compare_to_branch}")
+  )
+}
+
 function ptbx_build_changed_modules() {
   (
     local compare_to_branch="${1:-"origin/$(ptbx_detect_default_branch)"}"
