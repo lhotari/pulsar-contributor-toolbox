@@ -575,7 +575,17 @@ function ptbx_git_sync_pulsar_maintenance_branches_with_upstream() {
   )
 }
 
-
+function ptbx_maven_do_release_version_commits() {
+  (
+    mvn -ntp -B versions:set -DremoveSnapshot -DgenerateBackupPoms=false
+    RELEASE_VERSION=$(command mvn -ntp -B help:evaluate -Dexpression=project.version -q -DforceStdout)
+    git commit -m "Release v$RELEASE_VERSION" -a
+    git tag v$RELEASE_VERSION
+    mvn -ntp -B versions:set -DnextSnapshot -DgenerateBackupPoms=false
+    SNAPSHOT_VERSION=$(command mvn -ntp -B help:evaluate -Dexpression=project.version -q -DforceStdout)
+    git commit -m "Next development version v$SNAPSHOT_VERSION" -a
+  )
+}
 
 # generates ssh config file for connecting to running vms managed by https://multipass.run/
 # this is useful for using rsync to copy files to/from multipass vm
