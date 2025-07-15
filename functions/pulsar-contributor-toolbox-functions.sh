@@ -690,11 +690,13 @@ function ptbx_project_version() {
 
 function ptbx_build_docker_pulsar_all_image() {
   (
-    docker pull ubuntu:20.04
-    ptbx_clean_cppbuild
-    command mvn clean install -Dspotbugs.skip=true -DskipTests
-    command mvn -f docker/pulsar/pom.xml install -am -Pdocker,-main -DskipTests
-    command mvn -f docker/pulsar-all/pom.xml install -am -Pdocker,-main -DskipTests
+    docker pull alpine:3.21
+    command mvn clean install -DskipTests -Dspotbugs.skip=true -Dlicense.skip=true -Dcheckstyle.skip=true
+    command mvn install -pl docker/pulsar,docker/pulsar-all \
+        -DskipTests -Dspotbugs.skip=true -Dlicense.skip=true -Dcheckstyle.skip=true \
+        -Pmain,docker \
+        -Ddocker.noCache=true \
+        -Ddocker.skip.tag=false
   )
 }
 
