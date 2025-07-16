@@ -56,7 +56,12 @@ function ptbx_build_coremodules() {
     else
       ptbx_clean_snapshots
     fi
-    mvn -Pcore-modules,-main -T 1C $clean_param install -DskipTests -Dspotbugs.skip=true -DnarPluginPhase=none "$@"
+    local sources_param=""
+    if [[ "$1" == "--sources" ]]; then
+      sources_param="source:jar"
+      shift
+    fi
+    mvn -Pcore-modules,-main -T 1C $clean_param $sources_param install -DskipTests -Dspotbugs.skip=true -DnarPluginPhase=none "$@"
   )
 }
 
