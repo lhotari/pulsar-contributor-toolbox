@@ -31,6 +31,13 @@ fi
 [[ $(echo $PATH | grep -c "${PULSAR_CONTRIBUTOR_TOOLBOX}/bin") -eq 0 ]] && \
     export PATH="$PULSAR_CONTRIBUTOR_TOOLBOX/bin:$PATH"
 
+# useful aliases
+
+# this is useful when cherry-picking/merging while avoiding previous merge conflict resolutions
+alias git_norerere='git -c rerere.enabled=false'
+
+# functions
+
 # runs license checks
 function ptbx_run_license_check() {
   (
