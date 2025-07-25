@@ -35,6 +35,7 @@ fi
 
 # this is useful when cherry-picking/merging while avoiding previous merge conflict resolutions
 alias git_norerere='git -c rerere.enabled=false'
+alias mcss='mcs search -l 100'
 
 # functions
 
