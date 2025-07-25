@@ -41,12 +41,16 @@ alias git_norerere='git -c rerere.enabled=false'
 # disabling rerere for the current git repository
 # this is useful when cherry-picking/merging while avoiding previous merge conflict resolutions
 function ptbx_git_rerere_disable() {
+  echo "Disabling rerere for the current git repository. Current rerere.enabled setting: $(git config rerere.enabled)"
   git config rerere.enabled false
+  echo "Current rerere.enabled setting: $(git config rerere.enabled)"
 }
 
 # unsetting rerere setting for the current git repository and relying on the global rerere setting
 function ptbx_git_rerere_unset() {
+  echo "Unsetting rerere for the current git repository. Current rerere.enabled setting: $(git config rerere.enabled)"
   git config unset rerere.enabled
+  echo "Current rerere.enabled setting: $(git config rerere.enabled)"
 }
 
 # runs license checks
