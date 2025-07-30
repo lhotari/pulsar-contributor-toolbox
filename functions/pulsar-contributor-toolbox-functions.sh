@@ -1526,8 +1526,8 @@ function ptbx_cherry_pick_check() {
         echo "ptbx_cherry_pick_add_picked $(printf "$ALREADY_PICKED" | sed 's/|/ /g' | sed 's/#//g')" | tee >(pbcopy)
       fi
       echo -e "\033[31m** Not cherry-picked from $UPSTREAM/master **\033[0m"
-      git log --color --oneline -P --grep="$PR_NUMBERS" --reverse $UPSTREAM/master | { [ -n "$ALREADY_PICKED" ] && grep --color -v -E "$ALREADY_PICKED" || cat; } | gawk 'match($0, /\(#([0-9]+)\)/, a) {print $0 " https://github.com/'$SLUG'/pull/" substr(a[0], 3, length(a[0])-3)}'
-      git log --oneline -P --grep="$PR_NUMBERS" --reverse $UPSTREAM/master | { [ -n "$ALREADY_PICKED" ] && grep -v -E "$ALREADY_PICKED" || cat; } | gawk '{ print "git cpx " $1 }' | { [ -z "$ALREADY_PICKED" ] && tee >(pbcopy) || cat; }
+      git log --color --oneline -P --grep="$PR_NUMBERS" --reverse $UPSTREAM/master | { [ -n "$ALREADY_PICKED" ] && grep -v -E "$ALREADY_PICKED" || cat; } | { [ -n "$REVERTED_PR_NUMBERS" ] && grep -v -E "$REVERTED_PR_NUMBERS" || cat; } | gawk 'match($0, /\(#([0-9]+)\)/, a) {print $0 " https://github.com/'$SLUG'/pull/" substr(a[0], 3, length(a[0])-3)}'
+      git log --oneline -P --grep="$PR_NUMBERS" --reverse $UPSTREAM/master | { [ -n "$ALREADY_PICKED" ] && grep -v -E "$ALREADY_PICKED" || cat; } | { [ -n "$REVERTED_PR_NUMBERS" ] && grep -v -E "$REVERTED_PR_NUMBERS" || cat; } | gawk '{ print "git cpx " $1 }' | { [ -z "$ALREADY_PICKED" ] && tee >(pbcopy) || cat; }
     fi
     echo -e "\033[34m** Urls **\033[0m"
     echo "PRs that haven't been cherry-picked: https://github.com/$SLUG/pulls?q=$(_ptbx_urlencode "is:pr $PR_QUERY")"
