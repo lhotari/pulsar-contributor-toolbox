@@ -1505,10 +1505,24 @@ function ptbx_cherry_pick_check() {
     if [[ -z "$PR_NUMBERS" ]]; then
       echo "No PRs found for query: '$PR_QUERY'"
     else
-      local ALREADY_PICKED=$(git log --oneline -P --grep="$PR_NUMBERS" --reverse $RELEASE_BRANCH | gawk 'match($0, /.*(\(#([0-9]+)\))/, a) {print substr(a[1], 2, length(a[1])-2)}' | tr '\n' '|' | sed 's/|$//')
+      local GIT_LOG_OUTPUT=$(git log --oneline -P --grep="$PR_NUMBERS" --reverse $RELEASE_BRANCH)
+      local ALREADY_PICKED=$(echo "$GIT_LOG_OUTPUT" \
+        | grep -v 'Revert "' \
+        | gawk 'match($0, /.*(\(#([0-9]+)\))/, a) {print substr(a[1], 2, length(a[1])-2)}' \
+        | tr '\n' '|' | sed 's/|$//')
+      local REVERTED_PR_NUMBERS=$(echo "$GIT_LOG_OUTPUT" \
+        | grep 'Revert "' \
+        | gawk 'match($0, /.*(\(#([0-9]+)\))/, a) {print substr(a[1], 2, length(a[1])-2)}' \
+        | tr '\n' '|' | sed 's/|$//')
+      # Remove reverted PR numbers from ALREADY_PICKED
+      if [[ -n "$ALREADY_PICKED" && -n "$REVERTED_PR_NUMBERS" ]]; then
+        # Remove any PR number in REVERTED_PR_NUMBERS from ALREADY_PICKED
+        local FILTERED_ALREADY_PICKED=$(echo "$ALREADY_PICKED" | tr '|' '\n' | grep -vxFf <(echo "$REVERTED_PR_NUMBERS" | tr '|' '\n') | tr '\n' '|' | sed 's/|$//')
+        ALREADY_PICKED="$FILTERED_ALREADY_PICKED"
+      fi
       if [[ -n "$ALREADY_PICKED" ]]; then
         echo -e "\033[31m** Already picked but not tagged as cherry-picked **\033[0m"
-        git log --color --oneline -P --grep="$PR_NUMBERS" --reverse $RELEASE_BRANCH | gawk 'match($0, /.*(\(#([0-9]+)\))/, a) {print $0 " https://github.com/'$SLUG'/pull/" substr(a[1], 3, length(a[1])-3)}' | awk '{ print $0 " https://github.com/'$SLUG'/commit/" $1 }'
+        git log --color --oneline -P --grep="$ALREADY_PICKED" --reverse $RELEASE_BRANCH | gawk 'match($0, /.*(\(#([0-9]+)\))/, a) {print $0 " https://github.com/'$SLUG'/pull/" substr(a[1], 3, length(a[1])-3)}' | awk '{ print $0 " https://github.com/'$SLUG'/commit/" $1 }'
         echo "ptbx_cherry_pick_add_picked $(printf "$ALREADY_PICKED" | sed 's/|/ /g' | sed 's/#//g')" | tee >(pbcopy)
       fi
       echo -e "\033[31m** Not cherry-picked from $UPSTREAM/master **\033[0m"
