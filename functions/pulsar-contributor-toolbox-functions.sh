@@ -347,7 +347,7 @@ EOF
 
 function ptbx_run_test() {
   (
-    mvn -DredirectTestOutputToFile=false -DtestRetryCount=0 test "$@"
+    mvn -DtestFailFast=false --fail-at-end -DredirectTestOutputToFile=false -DtestRetryCount=0 test "$@"
   )
 }
 
