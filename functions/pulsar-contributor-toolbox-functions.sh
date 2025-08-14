@@ -1715,29 +1715,6 @@ function ptbx_cherry_pick_add_release_labels() {
  )
 }
 
-function ptbx_jfr2flame() {
-  (
-    local jfr_file="$1"
-    local flamegraph_file_base="${jfr_file%.*}"
-    local async_profiler_dir="${ASYNC_PROFILER_HOME:-"$HOME/tools/async-profiler"}"
-    local async_profiler_jar="$async_profiler_dir/build/converter.jar"
-    if [ ! -f "$async_profiler_jar" ]; then
-      async_profiler_jar="$async_profiler_dir/lib/converter.jar"
-    fi
-    set -e
-    shift
-    java -cp "${async_profiler_jar}" jfr2flame "$@" "${jfr_file}" "${flamegraph_file_base}.html"
-    java -cp "${async_profiler_jar}" jfr2flame "$@" --alloc "${jfr_file}" "${flamegraph_file_base}_alloc.html"
-    java -cp "${async_profiler_jar}" jfr2flame "$@" --lock "${jfr_file}" "${flamegraph_file_base}_lock.html"
-    java -cp "${async_profiler_jar}" jfr2flame "$@" --threads "${jfr_file}" "${flamegraph_file_base}_threads.html"
-    java -cp "${async_profiler_jar}" jfr2flame "$@" --classify "${jfr_file}" "${flamegraph_file_base}_classify.html"
-    echo "Results in:"
-    for file in "${flamegraph_file_base}"*.html; do
-      echo "file://$(realpath "$file")"
-    done
-  )
-}
-
 function ptbx_gh_add_label() {
   (
     local label_name=${1:?label_name is required}
@@ -1967,6 +1944,7 @@ function ptbx_async_profiler_opts() {
     "alloc=2m"
     "lock=10ms"
     "jfrsync=$profile_name"
+    "cstack=vmx"
     "file=$jfr_dir/${jfr_file_name_prefix}.jfr"
   )
 
@@ -2009,7 +1987,7 @@ function ptbx_jfr_flamegraphs() {
     return 1
   fi
 
-  local profile_types=("cpu" "alloc" "lock")
+  local profile_types=("cpu" "wall" "alloc" "lock")
   
   for type in "${profile_types[@]}"; do
     local output_base="${jfr_dir}/${jfr_base_name}_${type}"
@@ -2019,6 +1997,9 @@ function ptbx_jfr_flamegraphs() {
     
     # Generate flamegraph with --threads
     "$jfrconv" "--${type}" --threads --title "${jfr_base_name} ${type} (threads)" "$jfr_file" "${output_base}_threads.html"
+
+    # Generate flamegraph with --classify
+    "$jfrconv" "--${type}" --classify --title "${jfr_base_name} ${type} (classify)" "$jfr_file" "${output_base}_classify.html"
   done
 
   local jfr_dir_path=$(readlink -f "${jfr_dir}")
