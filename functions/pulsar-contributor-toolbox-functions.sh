@@ -2011,6 +2011,57 @@ function ptbx_jfr_flamegraphs() {
   fi
 }
 
+function ptbx_microbench_build_all() {
+  (
+    ptbx_cd_git_root
+    mvn -Pcore-modules,microbench,-main -T 1C clean package
+  )
+}
+
+function ptbx_microbench_build() {
+  (
+    ptbx_cd_git_root
+    mvn -Pcore-modules,microbench,-main -pl microbench package
+  )
+}
+
+function ptbx_microbench_run() {
+  (
+    if [[ -z "$1" ]]; then
+      echo "Benchmark name is required"
+      return 1
+    fi
+    ptbx_cd_git_root
+    java -jar microbench/target/microbenchmarks.jar -rf json -rff jmh-result-$(date +%s).json "$@" | tee jmh-result-$(date +%s).txt
+  )
+}
+
+function ptbx_microbench_list() {
+  (
+    ptbx_cd_git_root
+    java -jar microbench/target/microbenchmarks.jar -l
+  )
+}
+
+function ptbx_microbench_profile() {
+  (
+    if [[ -z "$1" ]]; then
+      echo "Benchmark name is required"
+      return 1
+    fi
+    if [[ -z "$LIBASYNCPROFILER_PATH" ]]; then
+      echo "LIBASYNCPROFILER_PATH is not set"
+      return 1
+    fi
+    if [[ ! -f "$LIBASYNCPROFILER_PATH" ]]; then
+      echo "LIBASYNCPROFILER_PATH is not an executable file: $LIBASYNCPROFILER_PATH"
+      return 1
+    fi
+    ptbx_cd_git_root
+    java -jar microbench/target/microbenchmarks.jar -rf json -rff jmh-result-$(date +%s).json -prof async:libPath=$LIBASYNCPROFILER_PATH\;output=jfr\;dir=profile-results\;rawCommand=all,cstack=vmx "$@" | tee jmh-result-$(date +%s).txt
+  )
+}
+
 function ptbx_async_profiler_install_nightly() {
   (
     set -e
