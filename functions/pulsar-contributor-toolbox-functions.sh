@@ -88,6 +88,13 @@ function ptbx_build_coremodules() {
   )
 }
 
+function ptbx_checkstyle() {
+  (
+    ptbx_cd_git_root
+    mvn -T 1C initialize license:check checkstyle:check
+  )
+}
+
 function ptbx_build_all() {
   (
     ptbx_cd_git_root
