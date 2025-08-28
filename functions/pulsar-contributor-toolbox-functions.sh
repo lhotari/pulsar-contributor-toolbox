@@ -91,7 +91,14 @@ function ptbx_build_coremodules() {
 function ptbx_checkstyle() {
   (
     ptbx_cd_git_root
-    mvn -T 1C initialize license:check checkstyle:check
+    mvn -T 1C initialize checkstyle:check "$@"
+  )
+}
+
+function ptbx_checkstyle_and_license() {
+  (
+    ptbx_cd_git_root
+    mvn -T 1C initialize checkstyle:check license:check "$@"
   )
 }
 
