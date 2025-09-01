@@ -2292,3 +2292,9 @@ function ptbx_prepare_env_for_inttest_profiling() {
   export NETTY_LEAK_DETECTION=off
   export ENABLE_MANUAL_TEST=true
 }
+
+# opens a root shell in the the docker host machine
+function ptbx_docker_root_shell() {
+  docker run --rm -it --privileged --cap-add SYS_ADMIN --security-opt seccomp=unconfined \
+    --pid host ubuntu bash -c "nsenter -t 1 --all /bin/sh"
+}
