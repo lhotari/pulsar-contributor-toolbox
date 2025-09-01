@@ -802,9 +802,9 @@ EOF
 
 function ptbx_build_java_test_image() {
   (
-    docker pull ubuntu:22.04
+    docker pull alpine:3.21
     ptbx_cd_git_root
-    ./build/build_java_test_image.sh -Dcheckstyle.skip=true || return 1
+    ./build/build_java_test_image.sh "$@" || return 1
   )
 }
 
@@ -2297,4 +2297,8 @@ function ptbx_prepare_env_for_inttest_profiling() {
 function ptbx_docker_root_shell() {
   docker run --rm -it --privileged --cap-add SYS_ADMIN --security-opt seccomp=unconfined \
     --pid host ubuntu bash -c "nsenter -t 1 --all /bin/sh"
+}
+
+function ptbx_build_java_test_image_with_async_profiler() {
+  ptbx_build_java_test_image -Ddocker.install.asyncprofiler=true "$@"
 }
