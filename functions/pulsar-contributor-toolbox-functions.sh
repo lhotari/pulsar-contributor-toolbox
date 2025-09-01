@@ -113,8 +113,7 @@ function ptbx_build_all() {
 function ptbx_build_inttests() {
   (
     ptbx_cd_git_root
-    ptbx_clean_snapshots
-    command mvn -T 1C clean install -DskipTests -Dspotbugs.skip=true -DintegrationTests -Dtest=NoneTest -DfailIfNoTests=false -am -pl tests/integration "$@"
+    command mvn -T 1C install -DskipTests -Dcheckstyle.skip=true -Dlicense.skip=true -Dspotbugs.skip=true -DintegrationTests -Dtest=NoneTest -DfailIfNoTests=false -am -pl tests/integration "$@"
   )
 }
 
@@ -122,7 +121,7 @@ function ptbx_run_inttest() {
   (
     ptbx_cd_git_root
     export PULSAR_TEST_IMAGE_NAME=apachepulsar/java-test-image:latest
-    command mvn -T 1C test -DredirectTestOutputToFile=false -DtestRetryCount=0 -Dspotbugs.skip=true -DintegrationTests -pl tests/integration "$@"
+    command mvn test -DredirectTestOutputToFile=false -DtestRetryCount=0 -Dcheckstyle.skip=true -Dlicense.skip=true -Dspotbugs.skip=true -DintegrationTests -pl tests/integration "$@"
   )
 }
 
@@ -2275,4 +2274,21 @@ function ptbx_mvn_quickstart() {
     fi
     mvn archetype:generate -DarchetypeArtifactId=maven-archetype-quickstart -DarchetypeVersion=1.5 "$@"
   )
+}
+
+function ptbx_docker_allow_perfevents() {
+  # configures docker container to allow perfevents
+  # so that async-profiler can be run inside the container
+  docker run --rm -it --privileged --cap-add SYS_ADMIN --security-opt seccomp=unconfined \
+    alpine sh -c "echo 1 > /proc/sys/kernel/perf_event_paranoid \
+    && echo 0 > /proc/sys/kernel/kptr_restrict \
+    && echo 1024 > /proc/sys/kernel/perf_event_max_stack \
+    && echo 2048 > /proc/sys/kernel/perf_event_mlock_kb"
+}
+
+# prepares environment for inttest profiling 
+function ptbx_prepare_env_for_inttest_profiling() {
+  export PULSAR_TEST_IMAGE_NAME=apachepulsar/java-test-image:latest
+  export NETTY_LEAK_DETECTION=off
+  export ENABLE_MANUAL_TEST=true
 }
