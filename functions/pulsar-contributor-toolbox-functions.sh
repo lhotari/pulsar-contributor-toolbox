@@ -1573,6 +1573,33 @@ function ptbx_cherry_pick_move_to_release() {
   )
 }
 
+function ptbx_cherry_pick_add_to_release() {
+  (
+    local ADD_TO_RELEASE=$1
+    local TARGET_BRANCH_MILESTONE=$2
+    local RELEASE_NUMBER=${3:-$(ptbx_project_version | sed 's/-SNAPSHOT//')}
+    if [[ -z "$ADD_TO_RELEASE" || -z "$TARGET_BRANCH_MILESTONE" ]]; then
+      echo "Usage: ptbx_cherry_pick_add_to_release <add_to_release> <target_branch_milestone> <from_release>"
+      return 1
+    fi
+    echo "Adding PRs with release/$RELEASE_NUMBER to release/$ADD_TO_RELEASE"
+    local SLUG=$(ptbx_gh_slug origin)
+    local UPSTREAM=origin
+    local CURRENTBRANCH=$(git rev-parse --abbrev-ref --symbolic-full-name HEAD)
+    local RELEASE_BRANCH=$CURRENTBRANCH
+    local PR_QUERY="label:release/$RELEASE_NUMBER label:cherry-picked/$RELEASE_BRANCH -label:release/$ADD_TO_RELEASE -milestone:$TARGET_BRANCH_MILESTONE -label:cherry-picked/$ADD_TO_RELEASE NOT $RELEASE_BRANCH in:title"
+    local PR_NUMBERS=$(gh pr list -L 100 --search "$PR_QUERY" --state all --json number,state --jq '[.[] | select(.state == "MERGED" or .state == "OPEN") | .number | tostring] | join(" ")')
+    if [[ -z "$PR_NUMBERS" ]]; then
+      echo "No PRs found for query: '$PR_QUERY'"
+      return 1
+    fi
+    for PR_NUMBER in $PR_NUMBERS; do
+      echo "Editing PR: $PR_NUMBER"
+      gh pr edit "$PR_NUMBER" --add-label "release/$ADD_TO_RELEASE" --repo "$SLUG"
+    done
+  )
+}
+
 function ptbx_parse_gitlog_prnums() {
   (
     # use with command like "git log --oneline v4.0.2-candidate-2..v4.0.2-candidate-3"
