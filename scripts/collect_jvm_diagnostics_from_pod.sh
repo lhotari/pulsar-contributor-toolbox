@@ -1,8 +1,16 @@
 #!/bin/bash
+
+# Check for --no-heapdump as the first argument
+NO_HEAPDUMP=0
+if [[ "$1" == "--no-heapdump" ]]; then
+    NO_HEAPDUMP=1
+    shift
+fi
+
 # script for collecting 3 threaddumps and 1 heapdump from all Java processes running inside a pod
 # assumes that bash, pgrep, jstack and jmap commands are available in the container
 if [[ $# -lt 1 ]]; then
-    echo "usage: $0 -n [namespace] [podname]"
+    echo "usage: $0 [--no-heapdump] -n [namespace] [podname]"
     echo "example: $0 -n pulsar-testenv pod/pulsar-testenv-deployment-broker-0"
     exit 1
 fi
@@ -27,7 +35,7 @@ for i in 1 2 3; do
         echo "Creating threaddump..."
         jstack -l $javapid > $diagdir/threaddump_${javapid}_$(date +%F-%H%M%S).txt
         # collect a heap dump on 1. round
-        if [ $i -eq 1 ]; then
+        if [[ $i -eq 1 && "$NO_HEAPDUMP" != "1" ]]; then
             echo "Creating heapdump..."
             jmap -dump:format=b,file=$diagdir/heapdump_${javapid}_$(date +%F-%H%M%S).hprof $javapid
         fi
@@ -41,7 +49,8 @@ EOF
 # run the script and provide the target directory inside the pod
 diagdir=/tmp/diagnostics$$
 set -xe
-kubectl exec "$@" -- bash -c "${diag_script}" -- $diagdir
+# Pass NO_HEAPDUMP variable into the container environment
+kubectl exec "$@" -- env NO_HEAPDUMP=$NO_HEAPDUMP bash -c "${diag_script}" -- $diagdir
 diagnostics_file="jvm_diagnostics_$(date +%F-%H%M%S).tar.gz"
 # sleep 10 workaround explained in https://stackoverflow.com/a/74746419
 kubectl exec --request-timeout=0 -q "$@" -- bash -c "cd $diagdir && tar zcf - * && rm -rf $diagdir && sleep 10" > "${diagnostics_file}"
