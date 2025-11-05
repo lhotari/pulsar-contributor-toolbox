@@ -331,7 +331,7 @@ function ptbx_until_test_fails_in_docker() {
 
 function ptbx_until_test_fails_in_docker_with_logs() {
   (
-    ptbx_until_test_fails_in_docker "$@" |& ptbx_tee_log
+    ptbx_until_test_fails_in_docker "$@" 2>&1 | ptbx_tee_log
   )
 }
 
@@ -343,7 +343,7 @@ function ptbx_until_test_fails() {
 
 function ptbx_until_test_fails_with_logs() {
   (
-    ptbx_until_test_fails "$@" |& ptbx_tee_log
+    ptbx_until_test_fails "$@" 2>&1 | ptbx_tee_log
   )
 }
 
