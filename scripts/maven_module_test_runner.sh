@@ -112,7 +112,18 @@ echo "================================"
 # Process each file argument
 for file in "$@"; do
     log_verbose "Processing file: $file"
-    
+
+    # Extract class name from file name (remove .java extension)
+    class_name=$(basename "$file" .java)
+
+    # Check if the file exists and contains an abstract class definition with this class name
+    if [ -f "$file" ]; then
+        if grep -q -E "abstract\s+class\s+$class_name" "$file"; then
+            print_warning "File '$file' contains an abstract class '$class_name' - skipping"
+            continue
+        fi
+    fi
+
     # Check if file path contains "src/test/java"
     if [[ "$file" == *"src/test/java"* ]]; then
         # Extract module path (everything before "src/test/java")
