@@ -5,6 +5,10 @@
 # This is useful with Brokk as "Test Some Command" with {{#files}}"{{value}}" {{/files}} 
 # as the arguments to this script
 
+# When using in Brokk, set the shell to "/bin/zsh -c"
+# If you are using SDKMAN and brew, move the initialization to ~/.zshenv file since that gets evaluated for all shells
+
+
 set -e  # Exit on error
 
 # Colors for output
