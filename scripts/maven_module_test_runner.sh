@@ -38,7 +38,7 @@ show_usage() {
 VERBOSE=false
 MAVEN_GOAL="test"
 MAVEN_ROOT="."
-MAVEN_TEST_ARGS="-DtestFailFast=false -DexcludedGroups='' --fail-at-end -DredirectTestOutputToFile=false -DtestRetryCount=0"
+MAVEN_TEST_ARGS="-DtestFailFast=false -DexcludedGroups='' --fail-at-end -DredirectTestOutputToFile=true -DtestRetryCount=0"
 
 # Parse command line options
 while [[ $# -gt 0 ]]; do
