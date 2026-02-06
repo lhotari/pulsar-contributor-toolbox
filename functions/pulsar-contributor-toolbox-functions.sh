@@ -432,14 +432,37 @@ function ptbx_run_changed_tests() {
     local root_dir=$(pwd)
     local last_module=""
     local -a test_classes=()
+    local overall_result=0
+    local failure_report_dir
+    failure_report_dir=$(mktemp -d)
+    trap "rm -rf '$failure_report_dir'" EXIT
+
+    _run_module_tests() {
+      local module_dir="$1"
+      shift
+      local -a classes=("$@")
+      cd "$module_dir"
+      classes=($(printf "%s\n" "${classes[@]}" | sort -u))
+      printf "Running tests in %s for classes:\n" "$module_dir"
+      printf "\t%s\n" "${classes[@]}"
+      local log_file
+      log_file=$(mktemp "$failure_report_dir/test_output.XXXXXX")
+      ptbx_run_test -DtestRetryCount=1 -Dsurefire.failIfNoSpecifiedTests=false -Dtest="$(IFS=, ; echo "${classes[*]}")" 2>&1 | tee "$log_file"
+      local rc=${PIPESTATUS[0]}
+      if [[ $rc -ne 0 ]]; then
+        overall_result=1
+        local failure_file
+        failure_file=$(mktemp "$failure_report_dir/failure.XXXXXX")
+        printf "=== FAILED: %s ===\n" "$module_dir" > "$failure_file"
+        tail -50 "$log_file" >> "$failure_file"
+      fi
+      rm -f "$log_file"
+    }
+
     while read -r file; do
-      local module=$(echo "$file" | sed 's#/src/.*##g')      
+      local module=$(echo "$file" | sed 's#/src/.*##g')
       if [[ "$module" != "$last_module" && "$last_module" != "" && -n ${test_classes[*]} ]]; then
-        cd "$root_dir/$last_module"
-        test_classes=($(printf "%s\n" "${test_classes[@]}" | sort -u))
-        printf "Running tests in %s for classes:\n" "$last_module"
-        printf "\t%s\n" "${test_classes[@]}"
-        ptbx_run_test -DtestRetryCount=1 -Dsurefire.failIfNoSpecifiedTests=false -Dtest="$(IFS=, ; echo "${test_classes[*]}")" || { echo "Failed to run tests in $last_module"; exit 1; }
+        _run_module_tests "$root_dir/$last_module" "${test_classes[@]}"
         test_classes=()
       fi
       if [[ "$file" =~ src/test/java/.*Test\.java$ ]]; then
@@ -449,16 +472,25 @@ function ptbx_run_changed_tests() {
         local test_class="$(echo "$file" | sed 's#.*src/main/java/##;s#\.java$##;s#/#.#g')Test"
         test_classes+=("$test_class")
       fi
-      last_module="$module"      
+      last_module="$module"
     done < <(git diff --name-only "${compare_to_branch}")
-    # if test_classes isn't empty
     if [[ "$last_module" != "" && -n ${test_classes[*]} ]]; then
-      cd "$root_dir/$last_module"
-      test_classes=($(printf "%s\n" "${test_classes[@]}" | sort -u))
-      printf "Running tests in %s for classes:\n" "$last_module"
-      printf "\t%s\n" "${test_classes[@]}"
-      ptbx_run_test -DtestRetryCount=1 -Dsurefire.failIfNoSpecifiedTests=false -Dtest="$(IFS=, ; echo "${test_classes[*]}")"  || { echo "Failed to run tests in $last_module"; exit 1; }
+      _run_module_tests "$root_dir/$last_module" "${test_classes[@]}"
     fi
+
+    if [[ $overall_result -ne 0 ]]; then
+      printf "\n\n========================================\n"
+      printf "FAILURE SUMMARY\n"
+      printf "========================================\n\n"
+      for failure_file in "$failure_report_dir"/failure.*; do
+        [[ -f "$failure_file" ]] || continue
+        cat "$failure_file"
+        echo ""
+      done
+    fi
+
+    unset -f _run_module_tests
+    return $overall_result
   )
 }
 
