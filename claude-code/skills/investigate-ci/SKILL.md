@@ -1,7 +1,7 @@
 ---
 name: investigate-ci
 description: Investigate failing GitHub Actions CI tests for a PR or recent workflow runs. Downloads logs and optionally surefire reports to find Java/Maven test failures and their stack traces.
-argument-hint: [PR_NUMBER] [--repo owner/repo] [--artifacts] [--workflow <name>]
+argument-hint: [PR_NUMBER] [--repo owner/repo] [--artifacts] [--workflow <name>] [--job <name>] [--check-flaky-tests]
 allowed-tools: Bash(gh *), Bash(python3 *), Bash(unzip *), Bash(find *), Bash(grep *), Bash(xmllint *), Bash(python *), Read, Glob, Grep
 ---
 
@@ -15,11 +15,13 @@ Parse `$ARGUMENTS`:
 - First positional argument: PR number (optional)
 - `--repo <owner/repo>`: override repo (optional, defaults to current repo from `gh repo view --json nameWithOwner -q .nameWithOwner`)
 - `--artifacts`: also download surefire report artifacts for deeper analysis
-- `--workflow <name>`: filter to a specific workflow name or filename (optional)
+- `--workflow <name>`: filter to a specific workflow — matched case-insensitively against the workflow's display name or filename (substring match)
+- `--job <name>`: filter to a specific job — matched case-insensitively against the job name (substring match)
+- `--check-flaky-tests`: download logs for the most recent run of the specified workflow (and optionally job), **regardless of whether it passed or failed** — used to inspect tests that may be flaky
 
 If arguments are missing or invalid, respond with usage:
 ```
-Usage: /investigate-ci [PR_NUMBER] [--repo owner/repo] [--artifacts] [--workflow <name>]
+Usage: /investigate-ci [PR_NUMBER] [--repo owner/repo] [--artifacts] [--workflow <name>] [--job <name>] [--check-flaky-tests]
 ```
 
 ---
@@ -47,45 +49,58 @@ Usage: /investigate-ci [PR_NUMBER] [--repo owner/repo] [--artifacts] [--workflow
 
 1. List recent workflow runs on the default branch:
    ```bash
-   gh run list [--repo <repo>] --branch master --limit 20 --json databaseId,name,status,conclusion,workflowName,headBranch,url,createdAt
+   gh run list [--repo <repo>] --branch master --limit 50 --json databaseId,name,status,conclusion,workflowName,headBranch,url,createdAt
    ```
-   If `--workflow` was specified, add `--workflow <name>`.
 
-2. For each workflow, take only the **most recent run**. If its `conclusion` is `"success"`, skip it — it's passing. Only investigate runs that are `"failure"`, `"timed_out"`, or still `"in_progress"` with a bad conclusion.
+2. **Workflow filtering** (if `--workflow` was specified): filter runs where `workflowName` contains the given `--workflow` value, case-insensitively (substring match). Do NOT pass `--workflow` to `gh run list` directly — fetch all runs and filter in the result.
 
-3. Collect the failing run IDs.
+3. For each workflow name, take only the **most recent run**.
+
+   - **Normal mode** (no `--check-flaky-tests`): if the most recent run's `conclusion` is `"success"`, skip it — it's passing. Only investigate runs that are `"failure"`, `"timed_out"`, or still `"in_progress"` with a bad conclusion.
+   - **`--check-flaky-tests` mode**: take the most recent run **regardless of conclusion**, including successful ones. This is for inspecting tests in a passing run that might be flaky.
+
+4. Collect the run IDs to investigate.
+
+### Job filtering (if `--job` was specified)
+
+After identifying runs to investigate, apply job filtering in Phase 2:
+- In normal mode: filter `failed` jobs to those whose `name` contains the `--job` value, case-insensitively.
+- In `--check-flaky-tests` mode: include **all** jobs (not just failed ones) whose `name` contains the `--job` value, case-insensitively.
 
 ---
 
 ## Phase 2: Download and Filter Logs
 
-For each failing run ID:
+For each run ID to investigate:
 
 1. Show the run summary:
    ```bash
    gh run view <RUN_ID> [--repo <repo>] --json name,status,conclusion,jobs,url
    ```
 
-2. List failed jobs in the run:
-   ```bash
-   gh run view <RUN_ID> [--repo <repo>] --json jobs --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out") | {id,name,conclusion,url}'
-   ```
+2. List jobs to inspect:
+   - **Normal mode**: list failed jobs:
+     ```bash
+     gh run view <RUN_ID> [--repo <repo>] --json jobs --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out") | {id,name,conclusion,url}'
+     ```
+   - **`--check-flaky-tests` mode**: list all jobs (regardless of conclusion):
+     ```bash
+     gh run view <RUN_ID> [--repo <repo>] --json jobs --jq '.jobs[] | {id,name,conclusion,url}'
+     ```
+   - In both modes, if `--job` was specified, filter to jobs whose `name` contains the `--job` value (case-insensitive substring match).
 
-3. For each failed job, download the log:
-   ```bash
-   gh run view <RUN_ID> [--repo <repo>] --log-failed 2>/dev/null
-   ```
-   This outputs all failed-step logs to stdout. Capture and parse it.
-
-   **Alternative if `--log-failed` doesn't give enough detail**, download the full job log via the API. Get a GitHub token:
-   ```bash
-   GH_TOKEN=$(gh auth token)
-   ```
-   Then for each job ID:
-   ```bash
-   curl -s -L -H "Authorization: token $GH_TOKEN" \
-     "https://api.github.com/repos/<owner>/<repo>/actions/jobs/<JOB_ID>/logs"
-   ```
+3. For each selected job, download the log:
+   - Normal mode:
+     ```bash
+     gh run view <RUN_ID> [--repo <repo>] --log-failed 2>/dev/null
+     ```
+   - `--check-flaky-tests` mode (or when `--job` filtering is needed): download the full log for the specific job ID via the API:
+     ```bash
+     GH_TOKEN=$(gh auth token)
+     curl -s -L -H "Authorization: token $GH_TOKEN" \
+       "https://api.github.com/repos/<owner>/<repo>/actions/jobs/<JOB_ID>/logs"
+     ```
+   Capture and parse the output.
 
 4. **Filter the log for Maven Surefire test failures:**
 
