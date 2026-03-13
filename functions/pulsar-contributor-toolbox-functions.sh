@@ -197,6 +197,7 @@ function ptbx_docker_run() {
     local memory=6g
     local platform=""
     local no_host_net=0
+    local interactive=""
     while [ true ]; do
       if [[ "$1" =~ --cpus=.* ]]; then
         cpus="${1#*=}"
@@ -209,6 +210,9 @@ function ptbx_docker_run() {
         shift
       elif [[ "$1" == --no-host-net ]]; then
         no_host_net=1
+        shift
+      elif [[ "$1" == -it ]]; then
+        interactive="-it"
         shift
       else
         break
@@ -233,7 +237,7 @@ function ptbx_docker_run() {
       for gid in $(id -G); do
         additional_groups+=("--group-add=$gid")
       done
-      docker run $platform --env-file=<(printenv) --security-opt seccomp=unconfined --cap-add SYS_ADMIN --cpus=$cpus --memory=$memory -u "$UID:${GID:-"$(id -g)"}" "${additional_groups[@]}" $host_net_param -it --rm -v $HOME:$HOME -v /var/run/docker.sock:/var/run/docker.sock -w $PWD -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro ubuntu "$@"
+      docker run $platform --env-file=<(printenv) --security-opt seccomp=unconfined --cap-add SYS_ADMIN --cpus=$cpus --memory=$memory -u "$UID:${GID:-"$(id -g)"}" "${additional_groups[@]}" $host_net_param --rm -v $HOME:$HOME -v /var/run/docker.sock:/var/run/docker.sock -w $PWD -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro ubuntu "$@"
     elif [[ "$OSTYPE" == "darwin"* ]]; then
       local imagename="ubuntu_sdkman_${arch}"
       local imageid=$(docker images -q $imagename 2> /dev/null)
@@ -262,9 +266,9 @@ useradd -M -d $HOME -u $UID -g $GID -s /bin/bash $USER
 adduser $USER root
 EOS
 EOT
-        docker run $platform -e HOME=$HOME -e SDKMAN_DIR=$HOME/.sdkman_docker_${arch} -e GRADLE_USER_HOME=$HOME/.gradle_docker $host_net_param -it --rm -v $HOME:$HOME -u "$UID:${GID:-"$(id -g)"}" -v /var/run/docker.sock:/var/run/docker.sock -v $HOME/.bashrc_docker_${arch}:$HOME/.bashrc -w $PWD $imagename bash -c 'curl -s "https://get.sdkman.io" | bash; source $SDKMAN_DIR/bin/sdkman-init.sh; echo "sdkman_auto_answer=true" >> $SDKMAN_DIR/etc/config; sdk install java 17.0.17-amzn; sdk install maven; sdk install gradle'
+        docker run $interactive $platform -e HOME=$HOME -e SDKMAN_DIR=$HOME/.sdkman_docker_${arch} -e GRADLE_USER_HOME=$HOME/.gradle_docker $host_net_param --rm -v $HOME:$HOME -u "$UID:${GID:-"$(id -g)"}" -v /var/run/docker.sock:/var/run/docker.sock -v $HOME/.bashrc_docker_${arch}:$HOME/.bashrc -w $PWD $imagename bash -c 'curl -s "https://get.sdkman.io" | bash; source $SDKMAN_DIR/bin/sdkman-init.sh; echo "sdkman_auto_answer=true" >> $SDKMAN_DIR/etc/config; sdk install java 17.0.17-amzn; sdk install maven; sdk install gradle'
       fi
-      docker run $platform --env-file=<(printenv |egrep -v 'SDKMAN|HOME|MANPATH|INFOPATH|PATH') -e HOME=$HOME -e TERM=xterm -e SDKMAN_DIR=$HOME/.sdkman_docker_${arch} -e GRADLE_USER_HOME=$HOME/.gradle_docker -e DOCKER_HOST=unix:///var/run/docker.sock $testcontainers_param --privileged --security-opt seccomp=unconfined --cap-add SYS_ADMIN --cpus=$cpus --memory=$memory $host_net_param -it --rm -u "$UID:${GID:-"$(id -g)"}" --group-add 0 -v $HOME:$HOME -v /var/run/docker.sock:/var/run/docker.sock -v $HOME/.bashrc_docker_${arch}:$HOME/.bashrc -w $PWD $imagename "$@"
+      docker run $interactive $platform --env-file=<(printenv |egrep -v 'SDKMAN|HOME|MANPATH|INFOPATH|PATH') -e HOME=$HOME -e TERM=xterm -e SDKMAN_DIR=$HOME/.sdkman_docker_${arch} -e GRADLE_USER_HOME=$HOME/.gradle_docker -e DOCKER_HOST=unix:///var/run/docker.sock $testcontainers_param --privileged --security-opt seccomp=unconfined --cap-add SYS_ADMIN --cpus=$cpus --memory=$memory $host_net_param --rm -u "$UID:${GID:-"$(id -g)"}" --group-add 0 -v $HOME:$HOME -v /var/run/docker.sock:/var/run/docker.sock -v $HOME/.bashrc_docker_${arch}:$HOME/.bashrc -w $PWD $imagename "$@"
     else
       echo "Unsupported OS: $OSTYPE"
       return 1
@@ -1969,7 +1973,7 @@ function ptbx_run_pulsar_docker() {
 
   local extra_opts=$(ptbx_get_pulsar_extra_opts "${extra_opts_args[@]}")
 
-  docker run --rm -it --name pulsar-standalone-$datetime \
+  docker run --rm --name pulsar-standalone-$datetime \
     -e PULSAR_STANDALONE_USE_ZOOKEEPER=1 \
     -e PULSAR_EXTRA_OPTS="$extra_opts" \
     -p 8080:8080 -p 6650:6650 \
@@ -2338,7 +2342,7 @@ function ptbx_mvn_quickstart() {
 function ptbx_docker_allow_perfevents() {
   # configures docker container to allow perfevents
   # so that async-profiler can be run inside the container
-  docker run --rm -it --privileged --cap-add SYS_ADMIN --security-opt seccomp=unconfined \
+  docker run --rm --privileged --cap-add SYS_ADMIN --security-opt seccomp=unconfined \
     alpine sh -c "echo 1 > /proc/sys/kernel/perf_event_paranoid \
     && echo 0 > /proc/sys/kernel/kptr_restrict \
     && echo 1024 > /proc/sys/kernel/perf_event_max_stack \
