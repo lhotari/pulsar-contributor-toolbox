@@ -10,6 +10,20 @@ Use `/plugin` to interactively install
 
 github, code-review, code-simplifier and ralph-loop could be useful
 
+## Claude Code settings
+
+Enabling the use of tmux panes for multiple concurrent agents ([agent teams](https://code.claude.com/docs/en/agent-teams)):
+
+```shell
+jq '
+  .env = ((.env // {}) + {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+    "CLAUDE_CODE_SPAWN_BACKEND": "tmux"
+  }) |
+  .teammateMode = "tmux"
+' ~/.claude/settings.json > /tmp/settings.tmp && mv /tmp/settings.tmp ~/.claude/settings.json
+```
+
 ## Custom skills
 
 Useful for Pulsar development
