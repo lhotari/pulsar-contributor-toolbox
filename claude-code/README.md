@@ -5,7 +5,7 @@ Assuming Claude Code and IntelliJ are used
 ## Claude plugins
 
 Use `/plugin` to interactively install
-
+x
 * [Official plugins](https://github.com/anthropics/claude-plugins-official/tree/main/plugins)
 
 github, code-review, code-simplifier and ralph-loop could be useful
@@ -81,3 +81,14 @@ claude mcp add-json github '{"type":"http","url":"https://api.githubcopilot.com/
 ```
 
 Claude's /plugin command can also install a GitHub plugin. It seems to include the GitHub MCP server configuration.
+
+### Chrome
+
+[Blog post](https://developer.chrome.com/blog/chrome-devtools-mcp-debug-your-browser-session)
+
+Adding the mcp server
+```
+claude mcp add chrome-devtools --scope user -- npx chrome-devtools-mcp@latest --autoConnect
+```
+
+Go to chrome://inspect/#remote-debugging to enable.
