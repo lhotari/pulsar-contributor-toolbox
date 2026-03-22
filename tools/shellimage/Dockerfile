@@ -1,5 +1,6 @@
 FROM ubuntu:24.04
 ARG DEBIAN_FRONTEND=noninteractive
+ARG NONINTERACTIVE=1
 ARG USER_NAME=dev
 ARG USER_ID=1000
 ARG GROUP_NAME=mygroup
@@ -15,7 +16,7 @@ set -o pipefail
 apt-get update
 apt-get dist-upgrade -y
 apt-get install -y curl wget zip unzip wget ca-certificates \
-  git tig locales netcat-openbsd jq docker.io vim procps \
+  git tig locales netcat-openbsd jq docker.io vim procps htop \
   less netcat-openbsd dnsutils iputils-ping sudo tmux ripgrep build-essential
 locale-gen en_US.UTF-8
 groupadd -g $GROUP_ID $GROUP_NAME || true
@@ -44,11 +45,13 @@ sdk install maven
 sdk install gradle
 curl -LsSf https://astral.sh/uv/install.sh | sh
 curl -fsSL https://claude.ai/install.sh | bash
-NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 cat >> ~/.bashrc << 'EOF'
 eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
 EOF
 source $HOME/.local/bin/env
 uv python install 3.12
+eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+brew install gh
 EOS
 USER root
