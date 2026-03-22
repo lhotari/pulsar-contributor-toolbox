@@ -47,7 +47,8 @@ curl -fsSL https://claude.ai/install.sh | bash
 NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 cat >> ~/.bashrc << 'EOF'
 eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
-'EOF'
+EOF
+source $HOME/.local/bin/env
 uv python install 3.12
 EOS
 USER root
