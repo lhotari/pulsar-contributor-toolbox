@@ -1,0 +1,5 @@
+DOCKER_IMAGE=shellimage:latest
+docker volume create shellimage-cache >/dev/null
+docker volume create shellimage-home >/dev/null
+docker volume create shellimage-homebrew >/dev/null
+DOCKER_OPTS="-v shellimage-cache:/var/cache/shellimage -v shellimage-home:$HOME -v shellimage-homebrew:/home/linuxbrew -u "$UID:${GID:-"$(id -g)"}" --group-add 0"
