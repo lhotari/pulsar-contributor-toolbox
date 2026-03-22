@@ -26,6 +26,7 @@ mkdir -p /home/linuxbrew
 chown -R $USER_ID:$GROUP_ID /home/linuxbrew
 cd $HOME_DIR
 ln -s $MAVEN_CACHE .m2
+mkdir -p $HOME_DIR/.m2/repository
 useradd -M -d $HOME_DIR -u $USER_ID -g $GROUP_ID -s /bin/bash $USER_NAME
 adduser $USER_NAME root
 echo "$USER_NAME ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/$USER_NAME
