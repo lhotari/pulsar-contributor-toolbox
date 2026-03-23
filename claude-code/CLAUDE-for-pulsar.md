@@ -36,6 +36,8 @@ mvn -ntp -T 1C -DskipSourceReleaseAssembly=true -DskipBuildDistribution=true -Ds
 
 ### Unit Tests
 
+Before running the unit tests build the core-modules on the first run before executing the unit tests. If there are code changes in a module, only compile the changed module before running the unit tests. If only the test code changes, the unit tests can be run without rebuilding the module.
+
 ```shell
 mvn -DtestFailFast=false -DexcludedGroups='' --fail-at-end -DredirectTestOutputToFile=false -DtestRetryCount=0 test -pl <module> -Dtest=<TestClass>
 ```
