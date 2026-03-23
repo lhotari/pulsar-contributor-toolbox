@@ -54,5 +54,8 @@ source $HOME/.local/bin/env
 uv python install 3.12
 eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
 brew install gh
+# add a symlink to homebrew in /opt for macos compatibility
+cd /opt
+ln -s /home/linuxbrew/.linuxbrew homebrew
 EOS
 USER root
