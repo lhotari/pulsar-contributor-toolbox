@@ -48,6 +48,7 @@ Integration tests use [TestContainers](https://www.testcontainers.org/) and requ
 ```shell
 mvn -T 1C install -DskipTests -Dcheckstyle.skip=true -Dlicense.skip=true -Dspotbugs.skip=true -DintegrationTests -Dtest=NoneTest -DfailIfNoTests=false -am -pl tests/integration
 ```
+There is no need to run this command if only test classes have changed since the last build.
 
 **Run integration tests (uses `java-test-image`):**
 ```shell
@@ -76,6 +77,8 @@ To build with async profiler support:
 ./build/build_java_test_image.sh -Ddocker.install.asyncprofiler=true
 ```
 
+There is no need to rebuild the docker image if only test classes have changed since the last build.
+
 ### pulsar-test-latest-version image (full)
 
 Used by CI **system tests**: Tiered FileSystem, Tiered JCloud, Function, Schema, Pulsar Connectors (Thread/Process), Pulsar IO, Plugin, Pulsar IO Oracle. These tests require connectors, offloaders, and full server distribution.
@@ -85,6 +88,8 @@ Used by CI **system tests**: Tiered FileSystem, Tiered JCloud, Function, Schema,
 mvn clean install -DskipTests -Dspotbugs.skip=true -Dlicense.skip=true -Dcheckstyle.skip=true
 mvn -B -f tests/docker-images/pom.xml install -am -Pdocker -Dspotbugs.skip=true -DskipTests
 ```
+
+There is no need to rebuild the docker image if only test classes have changed since the last build.
 
 ## Coding Conventions
 
