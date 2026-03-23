@@ -17,7 +17,8 @@ apt-get update
 apt-get dist-upgrade -y
 apt-get install -y curl wget zip unzip wget ca-certificates \
   git tig locales netcat-openbsd jq docker.io vim procps htop \
-  less netcat-openbsd dnsutils iputils-ping sudo tmux ripgrep build-essential
+  less netcat-openbsd dnsutils iputils-ping sudo tmux ripgrep build-essential \
+  libseccomp-dev socat bubblewrap
 locale-gen en_US.UTF-8
 groupadd -g $GROUP_ID $GROUP_NAME || true
 mkdir -p $HOME_DIR
