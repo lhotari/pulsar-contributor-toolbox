@@ -1,8 +1,9 @@
 DOCKER_IMAGE=shellimage:latest
-docker volume create shellimage-cache >/dev/null
-docker volume create shellimage-home >/dev/null
-docker volume create shellimage-homebrew >/dev/null
+VOLUME_PREFIX=${VOLUME_PREFIX:-shellimage-}
+docker volume create ${VOLUME_PREFIX}cache >/dev/null
+docker volume create ${VOLUME_PREFIX}home >/dev/null
+docker volume create ${VOLUME_PREFIX}homebrew >/dev/null
 if [ ! -f ~/.tmux.conf ]; then
   touch ~/.tmux.conf
 fi
-DOCKER_OPTS="-v $HOME/.tmux.conf:$HOME/.tmux.conf -v shellimage-cache:/var/cache/shellimage -v shellimage-home:$HOME -v shellimage-homebrew:/home/linuxbrew -u "$UID:${GID:-"$(id -g)"}" --group-add 0"
+DOCKER_OPTS="-v $HOME/.tmux.conf:$HOME/.tmux.conf -v ${VOLUME_PREFIX}cache:/var/cache/shellimage -v ${VOLUME_PREFIX}home:$HOME -v ${VOLUME_PREFIX}homebrew:/home/linuxbrew -u "$UID:${GID:-"$(id -g)"}" --group-add 0"
