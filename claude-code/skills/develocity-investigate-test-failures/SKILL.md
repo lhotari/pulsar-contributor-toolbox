@@ -44,14 +44,23 @@ Build the search query. The Develocity advanced search syntax uses space-separat
 project:${DEVELOCITY_PROJECT} buildOutcome:failed
 ```
 
+**Always** filter by custom values to scope to the correct repository and branch:
+```
+value:"Git repository=${DEVELOCITY_GIT_REPOSITORY:-https://github.com/apache/pulsar}" value:"Git branch=${DEVELOCITY_GIT_BRANCH:-master}"
+```
+
 If `--tag` was specified, append `tag:${TAG}` to the query.
 
 **Important**: Time filtering uses the `fromInstant` query parameter (epoch milliseconds), NOT `buildStartTime>-Nd` in the query string.
 
+**Important**: The `models` query parameter uses hyphenated names (e.g. `gradle-attributes`), but the response JSON uses camelCase keys (e.g. `gradleAttributes`).
+
 Fetch failed builds with inline `gradle-attributes` model to avoid N+1 calls:
 
 ```bash
-QUERY="project:${DEVELOCITY_PROJECT} buildOutcome:failed"
+GIT_REPO="${DEVELOCITY_GIT_REPOSITORY:-https://github.com/apache/pulsar}"
+GIT_BRANCH="${DEVELOCITY_GIT_BRANCH:-master}"
+QUERY="project:${DEVELOCITY_PROJECT} buildOutcome:failed value:\"Git repository=${GIT_REPO}\" value:\"Git branch=${GIT_BRANCH}\""
 # append tag filter if specified
 if [ -n "${TAG}" ]; then
   QUERY="${QUERY} tag:${TAG}"
@@ -100,15 +109,15 @@ jq '.gradle.testFailures // []' "$TMPDIR/failures_${BUILD_ID}.json"
 jq '.gradle.buildFailures // []' "$TMPDIR/failures_${BUILD_ID}.json"
 ```
 
-**Fallback**: If the Failures API returns 404 (feature not enabled), fall back to the build-level `hasFailed` flag from `gradle-attributes` already fetched in Phase 2. Report that detailed failures are unavailable and suggest checking the build scan directly.
+**Fallback**: If the Failures API returns 404 (feature not enabled), fall back to the build-level `hasFailed` flag from `gradleAttributes` already fetched in Phase 2. Report that detailed failures are unavailable and suggest checking the build scan directly.
 
-Also extract metadata from the `gradle-attributes` model (already inlined in builds.json). Note: the model key is hyphenated `gradle-attributes`, so it must be quoted in jq:
+Also extract metadata from the `gradleAttributes` model (already inlined in builds.json). Note: the response JSON key is camelCase `gradleAttributes` (even though the query parameter uses hyphenated `gradle-attributes`):
 ```bash
 # GitHub Actions build URL
-jq -r '.models."gradle-attributes".model.links[]? | select(.label == "GitHub Actions build") | .url // empty' <<< "$BUILD_JSON"
+jq -r '.models.gradleAttributes.model.links[]? | select(.label == "GitHub Actions build") | .url // empty' <<< "$BUILD_JSON"
 
 # Custom values: CI workflow, CI run, Git branch, Git commit id
-jq -r '.models."gradle-attributes".model.values[]? | select(.name == "CI workflow" or .name == "CI run" or .name == "Git branch" or .name == "Git commit id") | "\(.name): \(.value)"' <<< "$BUILD_JSON"
+jq -r '.models.gradleAttributes.model.values[]? | select(.name == "CI workflow" or .name == "CI run" or .name == "Git branch" or .name == "Git commit id") | "\(.name): \(.value)"' <<< "$BUILD_JSON"
 ```
 
 ---
@@ -251,8 +260,9 @@ When the user asks to investigate a specific test failure deeper:
 
 - The build scan URL format is `${DEVELOCITY_SERVER}/s/<BUILD_ID>`
 - The Failures API (`/api/failures/builds/{id}`) is in Beta and may change in future versions
-- The `models` query parameter on `/api/builds` avoids N+1 API calls by inlining model data. Use hyphenated names like `gradle-attributes`, NOT camelCase like `gradleAttributes`
+- The `models` query parameter on `/api/builds` avoids N+1 API calls by inlining model data. The query parameter uses **hyphenated** names (`gradle-attributes`), but the response JSON uses **camelCase** keys (`gradleAttributes`)
+- Custom value filtering uses `value:"key=value"` syntax in the query string
 - TestFailure schema: `{ id: { workUnitName, suiteName, testName }, message, stacktrace }`
 - BuildFailure schema: `{ header, message, relevantLog, taskPath, stacktrace }`
-- Query syntax reference: `project:<name>`, `buildOutcome:failed`, `tag:<tag>`. Time filtering uses the `fromInstant` query parameter (epoch millis), NOT `buildStartTime>-Nd` in the query string
+- Query syntax reference: `project:<name>`, `buildOutcome:failed`, `tag:<tag>`, `value:"key=value"`. Time filtering uses the `fromInstant` query parameter (epoch millis), NOT `buildStartTime>-Nd` in the query string
 - All `jq` filters use `// []` or `// empty` to handle null fields gracefully
