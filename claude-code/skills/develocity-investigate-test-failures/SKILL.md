@@ -68,7 +68,7 @@ Check for errors:
 
 Display a summary of found builds:
 ```bash
-jq -r '.[] | "- \(.id) | \(.buildToolType) | \((.availableAt / 1000) | strftime("%Y-%m-%d %H:%M:%S UTC"))"' "$TMPDIR/builds.json"
+jq -r '.[] | "- \(.id) | \((.availableAt / 1000) | strftime("%Y-%m-%d %H:%M:%S UTC"))"' "$TMPDIR/builds.json"
 ```
 
 ---
@@ -86,19 +86,13 @@ curl -s -f \
   -o "$TMPDIR/failures_${BUILD_ID}.json"
 ```
 
-Extract failures based on `buildToolType` from the builds response. For Gradle builds:
+Extract Gradle failures from the response:
 ```bash
 # Test failures
 jq '.gradle.testFailures // []' "$TMPDIR/failures_${BUILD_ID}.json"
 
 # Build failures
 jq '.gradle.buildFailures // []' "$TMPDIR/failures_${BUILD_ID}.json"
-```
-
-For Maven builds (if any):
-```bash
-jq '.maven.testFailures // []' "$TMPDIR/failures_${BUILD_ID}.json"
-jq '.maven.buildFailures // []' "$TMPDIR/failures_${BUILD_ID}.json"
 ```
 
 **Fallback**: If the Failures API returns 404 (feature not enabled), fall back to the build-level `hasFailed` flag from `gradleAttributes` already fetched in Phase 2. Report that detailed failures are unavailable and suggest checking the build scan directly.
