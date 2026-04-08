@@ -41,24 +41,29 @@ MAX=${MAX:-10}
 Build the search query. The Develocity advanced search syntax uses space-separated field filters:
 
 ```
-project:${DEVELOCITY_PROJECT} buildOutcome:failed buildStartTime>-${DAYS}d
+project:${DEVELOCITY_PROJECT} buildOutcome:failed
 ```
 
 If `--tag` was specified, append `tag:${TAG}` to the query.
 
-Fetch failed builds with inline `gradleAttributes` model to avoid N+1 calls:
+**Important**: Time filtering uses the `fromInstant` query parameter (epoch milliseconds), NOT `buildStartTime>-Nd` in the query string.
+
+Fetch failed builds with inline `gradle-attributes` model to avoid N+1 calls:
 
 ```bash
-QUERY="project:${DEVELOCITY_PROJECT} buildOutcome:failed buildStartTime>-${DAYS}d"
+QUERY="project:${DEVELOCITY_PROJECT} buildOutcome:failed"
 # append tag filter if specified
 if [ -n "${TAG}" ]; then
   QUERY="${QUERY} tag:${TAG}"
 fi
 
+# Calculate fromInstant as epoch milliseconds for DAYS ago
+FROM_INSTANT=$(($(date +%s) * 1000 - ${DAYS} * 86400 * 1000))
+
 curl -s -f \
   -H "Authorization: Bearer ${DEVELOCITY_TOKEN}" \
   -H "Accept: application/json" \
-  "${DEVELOCITY_SERVER}/api/builds?$(python3 -c "import urllib.parse; print(urllib.parse.urlencode({'query': '${QUERY}', 'maxBuilds': ${MAX}, 'models': 'gradleAttributes'}))")" \
+  "${DEVELOCITY_SERVER}/api/builds?$(python3 -c "import urllib.parse; print(urllib.parse.urlencode({'query': '${QUERY}', 'fromInstant': str(${FROM_INSTANT}), 'maxBuilds': str(${MAX}), 'models': 'gradle-attributes'}))")" \
   -o "$TMPDIR/builds.json"
 ```
 
@@ -68,7 +73,7 @@ Check for errors:
 
 Display a summary of found builds:
 ```bash
-jq -r '.[] | "- \(.id) | \((.availableAt / 1000) | strftime("%Y-%m-%d %H:%M:%S UTC"))"' "$TMPDIR/builds.json"
+jq -r '.[] | "- \(.id) | \(.buildToolType) | \((.availableAt / 1000) | strftime("%Y-%m-%d %H:%M:%S UTC"))"' "$TMPDIR/builds.json"
 ```
 
 ---
@@ -95,15 +100,15 @@ jq '.gradle.testFailures // []' "$TMPDIR/failures_${BUILD_ID}.json"
 jq '.gradle.buildFailures // []' "$TMPDIR/failures_${BUILD_ID}.json"
 ```
 
-**Fallback**: If the Failures API returns 404 (feature not enabled), fall back to the build-level `hasFailed` flag from `gradleAttributes` already fetched in Phase 2. Report that detailed failures are unavailable and suggest checking the build scan directly.
+**Fallback**: If the Failures API returns 404 (feature not enabled), fall back to the build-level `hasFailed` flag from `gradle-attributes` already fetched in Phase 2. Report that detailed failures are unavailable and suggest checking the build scan directly.
 
-Also extract metadata from the `gradleAttributes` model (already inlined in builds.json):
+Also extract metadata from the `gradle-attributes` model (already inlined in builds.json). Note: the model key is hyphenated `gradle-attributes`, so it must be quoted in jq:
 ```bash
 # GitHub Actions build URL
-jq -r '.models.gradleAttributes.model.links[] | select(.label == "GitHub Actions build") | .url' <<< "$BUILD_JSON"
+jq -r '.models."gradle-attributes".model.links[]? | select(.label == "GitHub Actions build") | .url // empty' <<< "$BUILD_JSON"
 
 # Custom values: CI workflow, CI run, Git branch, Git commit id
-jq -r '.models.gradleAttributes.model.values[] | select(.name == "CI workflow" or .name == "CI run" or .name == "Git branch" or .name == "Git commit id") | "\(.name): \(.value)"' <<< "$BUILD_JSON"
+jq -r '.models."gradle-attributes".model.values[]? | select(.name == "CI workflow" or .name == "CI run" or .name == "Git branch" or .name == "Git commit id") | "\(.name): \(.value)"' <<< "$BUILD_JSON"
 ```
 
 ---
@@ -246,8 +251,8 @@ When the user asks to investigate a specific test failure deeper:
 
 - The build scan URL format is `${DEVELOCITY_SERVER}/s/<BUILD_ID>`
 - The Failures API (`/api/failures/builds/{id}`) is in Beta and may change in future versions
-- The `models` query parameter on `/api/builds` avoids N+1 API calls by inlining model data
+- The `models` query parameter on `/api/builds` avoids N+1 API calls by inlining model data. Use hyphenated names like `gradle-attributes`, NOT camelCase like `gradleAttributes`
 - TestFailure schema: `{ id: { workUnitName, suiteName, testName }, message, stacktrace }`
 - BuildFailure schema: `{ header, message, relevantLog, taskPath, stacktrace }`
-- Query syntax reference: `project:<name>`, `buildOutcome:failed`, `tag:<tag>`, `buildStartTime>-Nd`
+- Query syntax reference: `project:<name>`, `buildOutcome:failed`, `tag:<tag>`. Time filtering uses the `fromInstant` query parameter (epoch millis), NOT `buildStartTime>-Nd` in the query string
 - All `jq` filters use `// []` or `// empty` to handle null fields gracefully
