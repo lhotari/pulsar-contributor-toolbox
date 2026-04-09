@@ -69,25 +69,6 @@ Other JetBrains/IntelliJ MCP servers, possibly useful:
 * [Debugger MCP Server](https://plugins.jetbrains.com/plugin/29233-debugger-mcp-server)
   * https://github.com/hechtcarmel/jetbrains-debugger-mcp-plugin
 
-### GitHub
-
-* [GitHub MCP Server](https://github.com/github/github-mcp-server)
-
-Create a classic PAT token with these minimum permissions:
-
-* repo - Repository operations
-* read:packages - Docker image access
-* read:org - Organization team access
-
-For all functionality, it's necessary to add write permissions.
-
-```
- GITHUB_PAT=<your pat>
-claude mcp add-json github '{"type":"http","url":"https://api.githubcopilot.com/mcp","headers":{"Authorization":"Bearer '$GITHUB_PAT'"}}'
-```
-
-Claude's /plugin command can also install a GitHub plugin. It seems to include the GitHub MCP server configuration.
-
 ### Chrome
 
 [Blog post](https://developer.chrome.com/blog/chrome-devtools-mcp-debug-your-browser-session)
