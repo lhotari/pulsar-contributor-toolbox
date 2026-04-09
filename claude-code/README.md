@@ -30,6 +30,12 @@ Useful for Pulsar development
 
 * [skills directory](skills/)
 
+Installing skills with [`link-skills-to-claude.sh`](link-skills-to-claude.sh)
+
+```shell
+./link-skills-to-claude.sh
+```
+
 ## MCP servers
 
 ### Project architecture and high-level design
