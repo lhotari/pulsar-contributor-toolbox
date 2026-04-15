@@ -1751,11 +1751,11 @@ function ptbx_gh_update_milestone_in_merged_prs() {
 
 function ptbx_cherry_pick_add_picked() {
   (
-    local PR_NUMBERS="$@"    
+    local PR_NUMBERS=("$@")
     local CURRENTBRANCH=$(git rev-parse --abbrev-ref --symbolic-full-name HEAD)
     local RELEASE_BRANCH=$CURRENTBRANCH
     local SLUG=$(ptbx_gh_slug origin)
-    for PR_NUMBER in $PR_NUMBERS; do
+    for PR_NUMBER in "${PR_NUMBERS[@]}"; do
       echo "Editing PR: $PR_NUMBER, adding cherry-picked/$RELEASE_BRANCH label"
       gh pr edit "$PR_NUMBER" --add-label "cherry-picked/$RELEASE_BRANCH"  --repo "$SLUG"
     done
