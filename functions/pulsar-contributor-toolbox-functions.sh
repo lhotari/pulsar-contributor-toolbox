@@ -581,15 +581,27 @@ function ptbx_local_clone_cd() {
 # pushes all changes to repository named "forked"
 # useful when calling the github fork of a repository "forked"
 function ptbx_gitpush_to_forked() {
-  ptbx_gitpush_to_remote forked
+  if [[ "$1" == "--force" || "$1" == "-f" ]]; then
+    force_param="--force"
+    shift
+  else
+    force_param=""
+  fi
+  ptbx_gitpush_to_remote $force_param forked "$@"
 }
 
 function ptbx_gitpush_to_remote() {
   (
+    if [[ "$1" == "--force" || "$1" == "-f" ]]; then
+      force_param="--force"
+      shift
+    else
+      force_param=""
+    fi
     remote="${1?remote name required}"
     CURRENTBRANCH=$(git rev-parse --abbrev-ref --symbolic-full-name HEAD)
     if [ -n "$CURRENTBRANCH" ]; then
-      git push -f "$remote" "$CURRENTBRANCH:$CURRENTBRANCH"
+      git push $force_param "$remote" "$CURRENTBRANCH:$CURRENTBRANCH"
     fi
   )
 }
