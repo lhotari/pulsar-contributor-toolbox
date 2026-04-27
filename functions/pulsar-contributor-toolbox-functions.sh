@@ -1609,12 +1609,12 @@ function ptbx_cherry_pick_move_to_release() {
     local CURRENTBRANCH=$(git rev-parse --abbrev-ref --symbolic-full-name HEAD)
     local RELEASE_BRANCH=$CURRENTBRANCH
     local PR_QUERY="label:release/$RELEASE_NUMBER -label:cherry-picked/$RELEASE_BRANCH NOT $RELEASE_BRANCH in:title"
-    local PR_NUMBERS=$(gh pr list -L 100 --search "$PR_QUERY" --state all --json number,state --jq '[.[] | select(.state == "MERGED" or .state == "OPEN") | .number | tostring] | join(" ")')
-    if [[ -z "$PR_NUMBERS" ]]; then
+    local PR_NUMBERS=($(gh pr list -L 100 --search "$PR_QUERY" --state all --json number,state --jq '.[] | select(.state == "MERGED" or .state == "OPEN") | .number'))
+    if [[ ${#PR_NUMBERS[@]} -eq 0 ]]; then
       echo "No PRs found for query: '$PR_QUERY'"
       return 1
     fi
-    for PR_NUMBER in $PR_NUMBERS; do
+    for PR_NUMBER in "${PR_NUMBERS[@]}"; do
       echo "Editing PR: $PR_NUMBER"
       gh pr edit "$PR_NUMBER" --add-label "release/$NEXT_RELEASE" --remove-label "release/$RELEASE_NUMBER" --repo "$SLUG"
     done
@@ -1636,12 +1636,12 @@ function ptbx_cherry_pick_add_to_release() {
     local CURRENTBRANCH=$(git rev-parse --abbrev-ref --symbolic-full-name HEAD)
     local RELEASE_BRANCH=$CURRENTBRANCH
     local PR_QUERY="label:release/$RELEASE_NUMBER label:cherry-picked/$RELEASE_BRANCH -label:release/$ADD_TO_RELEASE -milestone:$TARGET_BRANCH_MILESTONE -label:cherry-picked/$ADD_TO_RELEASE NOT $RELEASE_BRANCH in:title"
-    local PR_NUMBERS=$(gh pr list -L 100 --search "$PR_QUERY" --state all --json number,state --jq '[.[] | select(.state == "MERGED" or .state == "OPEN") | .number | tostring] | join(" ")')
-    if [[ -z "$PR_NUMBERS" ]]; then
+    local PR_NUMBERS=($(gh pr list -L 100 --search "$PR_QUERY" --state all --json number,state --jq '.[] | select(.state == "MERGED" or .state == "OPEN") | .number'))
+    if [[ ${#PR_NUMBERS[@]} -eq 0 ]]; then
       echo "No PRs found for query: '$PR_QUERY'"
       return 1
     fi
-    for PR_NUMBER in $PR_NUMBERS; do
+    for PR_NUMBER in "${PR_NUMBERS[@]}"; do
       echo "Editing PR: $PR_NUMBER"
       gh pr edit "$PR_NUMBER" --add-label "release/$ADD_TO_RELEASE" --repo "$SLUG"
     done
@@ -1667,12 +1667,12 @@ function ptbx_gh_move_to_milestone() {
     echo "Moving PRs from milestone $FROM_MILESTONE to milestone $NEXT_MILESTONE"
     local SLUG=$(ptbx_gh_slug origin)
     local PR_QUERY="milestone:$FROM_MILESTONE"
-    local PR_NUMBERS=$(gh pr list -L 100 --search "$PR_QUERY" --state open --json number --jq '[.[].number | tostring] | join(" ")')
-    if [[ -z "$PR_NUMBERS" ]]; then
+    local PR_NUMBERS=($(gh pr list -L 100 --search "$PR_QUERY" --state open --json number --jq '.[].number'))
+    if [[ ${#PR_NUMBERS[@]} -eq 0 ]]; then
       echo "No PRs found for query: '$PR_QUERY'"
       return 1
     fi
-    for PR_NUMBER in $PR_NUMBERS; do
+    for PR_NUMBER in "${PR_NUMBERS[@]}"; do
       echo "Editing PR: $PR_NUMBER"
       gh pr edit "$PR_NUMBER" --milestone "$NEXT_MILESTONE" --repo "$SLUG"
       if [[ -n "$BACKPORT_RELEASE" ]]; then
@@ -1691,17 +1691,17 @@ function ptbx_gh_remove_release_labels_from_stale_prs() {
   (
     local SLUG=$(ptbx_gh_slug origin)
     local PR_QUERY="label:Stale"
-    local PR_NUMBERS=$(gh pr list -L 100 --repo "$SLUG" --search "$PR_QUERY" --state open --json number,labels --jq '[.[] | {number: .number | tostring, labels: [.labels[].name | select(startswith("release/"))]} | select(.labels | length > 0)] | map(.number) | join(" ")')
-    if [[ -z "$PR_NUMBERS" ]]; then
+    local PR_NUMBERS=($(gh pr list -L 100 --repo "$SLUG" --search "$PR_QUERY" --state open --json number,labels --jq '.[] | select([.labels[].name | select(startswith("release/"))] | length > 0) | .number'))
+    if [[ ${#PR_NUMBERS[@]} -eq 0 ]]; then
       echo "No stale PRs found with Stale label and release labels"
       return 0
     fi
-    for PR_NUMBER in $PR_NUMBERS; do
+    for PR_NUMBER in "${PR_NUMBERS[@]}"; do
       echo "Processing PR #$PR_NUMBER"
       # Get all release labels for this PR
-      local RELEASE_LABELS=$(gh pr view "$PR_NUMBER" --repo "$SLUG" --json labels --jq '.labels[].name | select(startswith("release/"))')
+      local RELEASE_LABELS=($(gh pr view "$PR_NUMBER" --repo "$SLUG" --json labels --jq '.labels[].name | select(startswith("release/"))'))
       # Remove each release label
-      for LABEL in $RELEASE_LABELS; do
+      for LABEL in "${RELEASE_LABELS[@]}"; do
         echo "Removing label $LABEL from PR #$PR_NUMBER"
         gh pr edit "$PR_NUMBER" --remove-label "$LABEL" --repo "$SLUG"
       done
@@ -1738,23 +1738,23 @@ function ptbx_gh_update_milestone_in_merged_prs() {
     local SLUG=$(ptbx_gh_slug origin)
     local PR_QUERY="is:pr is:merged base:$MASTER_BRANCH -milestone:$MILESTONE merged:$timestamp_of_first_commit_in_release..$timestamp_of_last_commit_in_release"
     while true; do
-      local PR_NUMBERS=$(gh pr list -L 100 --search "$PR_QUERY" --state all --json number --jq '[.[].number | tostring] | join(" ")')
-      if [[ -z "$PR_NUMBERS" ]]; then
+      local PR_NUMBERS=($(gh pr list -L 100 --search "$PR_QUERY" --state all --json number --jq '.[].number'))
+      if [[ ${#PR_NUMBERS[@]} -eq 0 ]]; then
         echo "No PRs found for query: '$PR_QUERY'"
         break
       fi
-      for PR_NUMBER in $PR_NUMBERS; do
+      for PR_NUMBER in "${PR_NUMBERS[@]}"; do
         gh pr edit "$PR_NUMBER" --milestone "$MILESTONE" --repo "$SLUG"
       done
     done
     # remove invalid milestone definition in PRs where base is not master
     PR_QUERY="is:pr is:merged -base:$MASTER_BRANCH milestone:$MILESTONE"
-    PR_NUMBERS=$(gh pr list -L 500 --search "$PR_QUERY" --state all --json number --jq '[.[].number | tostring] | join(" ")')
-    if [[ -z "$PR_NUMBERS" ]]; then
+    PR_NUMBERS=($(gh pr list -L 500 --search "$PR_QUERY" --state all --json number --jq '.[].number'))
+    if [[ ${#PR_NUMBERS[@]} -eq 0 ]]; then
       echo "No PRs found for query: '$PR_QUERY'"
       return 1
     fi
-    for PR_NUMBER in $PR_NUMBERS; do
+    for PR_NUMBER in "${PR_NUMBERS[@]}"; do
       echo "Removing milestone. Editing PR: $PR_NUMBER"
       gh pr edit "$PR_NUMBER" --remove-milestone --repo "$SLUG"
     done
@@ -1791,12 +1791,12 @@ function ptbx_cherry_pick_add_release_labels() {
     if [[ -n "$PR_NUMBERS" ]]; then
       GREP_RULE="-P --invert-grep --grep=$PR_NUMBERS"
     fi
-    local ALREADY_PICKED_NOT_IN_RELEASE=$(git log --oneline $GREP_RULE --reverse "${RELEASE_TAG_PREFIX}${PREV_RELEASE_NUMBER}..HEAD" | gawk 'match($0, /.*(\(#([0-9]+)\))/, a) {print substr(a[1], 3, length(a[1])-3)}')
-    if [[ -z "$ALREADY_PICKED_NOT_IN_RELEASE" ]]; then
+    local ALREADY_PICKED_NOT_IN_RELEASE=($(git log --oneline $GREP_RULE --reverse "${RELEASE_TAG_PREFIX}${PREV_RELEASE_NUMBER}..HEAD" | gawk 'match($0, /.*(\(#([0-9]+)\))/, a) {print substr(a[1], 3, length(a[1])-3)}'))
+    if [[ ${#ALREADY_PICKED_NOT_IN_RELEASE[@]} -eq 0 ]]; then
       echo "All PRs are already labeled with release/$RELEASE_NUMBER"
       return 1
     fi
-    for PR_NUMBER in $ALREADY_PICKED_NOT_IN_RELEASE; do
+    for PR_NUMBER in "${ALREADY_PICKED_NOT_IN_RELEASE[@]}"; do
       echo "Editing PR: $PR_NUMBER, adding release/$RELEASE_NUMBER and cherry-picked/$RELEASE_BRANCH labels, removing possible release/$PREV_RELEASE_NUMBER label"
       gh pr edit "$PR_NUMBER" --add-label "release/$RELEASE_NUMBER" --remove-label "release/$PREV_RELEASE_NUMBER" --add-label "cherry-picked/$RELEASE_BRANCH" --repo "$SLUG"
     done
