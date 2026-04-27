@@ -1677,9 +1677,8 @@ function ptbx_gh_move_to_milestone() {
       gh pr edit "$PR_NUMBER" --milestone "$NEXT_MILESTONE" --repo "$SLUG"
       if [[ -n "$BACKPORT_RELEASE" ]]; then
         local PR_DATA=$(gh pr view "$PR_NUMBER" --json labels,reviewDecision --jq '.')
-        local HAS_READY_TO_TEST=$(echo "$PR_DATA" | jq '.labels[] | select(.name == "ready-to-test") | length > 0')
         local IS_APPROVED=$(echo "$PR_DATA" | jq '.reviewDecision == "APPROVED"')
-        if [[ "$HAS_READY_TO_TEST" == "true" || "$IS_APPROVED" == "true" ]]; then
+        if [[ "$IS_APPROVED" == "true" ]]; then
           gh pr edit "$PR_NUMBER" --add-label "release/$BACKPORT_RELEASE" --repo "$SLUG"
         fi
       fi
