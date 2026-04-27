@@ -1686,6 +1686,32 @@ function ptbx_gh_move_to_milestone() {
   )
 }
 
+function ptbx_gh_add_to_release_by_milestone_and_other_release() {
+  (
+    local MILESTONE=$1
+    local RELEASE_TO_ADD=$2
+    local RELEASE_TO_ADD_BRANCH=$3
+    # if there's an any other release label and the milestone matches, add the release label to the PR unless it's already contains
+    # the label cherry-picked/$RELEASE_TO_ADD_BRANCH, which indicates that the PR has already been picked to the release branch
+    if [[ -z "$MILESTONE" || -z "$RELEASE_TO_ADD" || -z "$RELEASE_TO_ADD_BRANCH" ]]; then
+      echo "Usage: ptbx_gh_add_to_release_by_milestone_and_other_release <milestone> <release_to_add> <release_to_add_branch>"
+      return 1
+    fi
+    echo "Adding release/$RELEASE_TO_ADD to PRs in milestone $MILESTONE that already have another release/* label"
+    local SLUG=$(ptbx_gh_slug origin)
+    local PR_QUERY="milestone:$MILESTONE -label:release/$RELEASE_TO_ADD -label:cherry-picked/$RELEASE_TO_ADD_BRANCH"
+    local PR_NUMBERS=($(gh pr list -L 100 --repo "$SLUG" --search "$PR_QUERY" --state all --json number,state,labels --jq '.[] | select(.state == "MERGED" or .state == "OPEN") | select([.labels[].name | select(startswith("release/"))] | length > 0) | .number'))
+    if [[ ${#PR_NUMBERS[@]} -eq 0 ]]; then
+      echo "No PRs found for query: '$PR_QUERY'"
+      return 1
+    fi
+    for PR_NUMBER in "${PR_NUMBERS[@]}"; do
+      echo "Editing PR: $PR_NUMBER, adding release/$RELEASE_TO_ADD"
+      gh pr edit "$PR_NUMBER" --add-label "release/$RELEASE_TO_ADD" --repo "$SLUG"
+    done
+  )
+}
+
 function ptbx_gh_remove_release_labels_from_stale_prs() {
   (
     local SLUG=$(ptbx_gh_slug origin)
