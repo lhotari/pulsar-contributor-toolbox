@@ -1837,6 +1837,52 @@ function ptbx_gh_add_label() {
   )
 }
 
+function ptbx_gh_add_label_to_project_issues() {
+  (
+    local LABEL=${1:?"Pass the label to add as the first argument (e.g. area/scalable-topics)"}
+    local PROJECT_URL=${2:?"Pass the project URL as the second argument (e.g. https://github.com/orgs/apache/projects/617)"}
+    # Parse https://github.com/{orgs|users}/<owner>/projects/<number>
+    local PROJECT_PATH="${PROJECT_URL#https://github.com/}"
+    local OWNER=$(echo "$PROJECT_PATH" | awk -F/ '{print $2}')
+    local PROJECT_NUMBER=$(echo "$PROJECT_PATH" | awk -F/ '{print $4}')
+    if [[ -z "$OWNER" || -z "$PROJECT_NUMBER" ]]; then
+      echo "Could not parse owner and project number from URL: $PROJECT_URL"
+      echo "Expected format: https://github.com/orgs/<owner>/projects/<number>"
+      return 1
+    fi
+    echo "Listing items in project $OWNER/$PROJECT_NUMBER"
+    local ITEMS_JSON
+    ITEMS_JSON=$(gh project item-list "$PROJECT_NUMBER" --owner "$OWNER" --limit 1000 --format json) || return 1
+    local ISSUE_REFS=($(echo "$ITEMS_JSON" | jq -r '.items[] | select(.content.type == "Issue") | "\(.content.repository | sub("^https://github.com/"; ""))#\(.content.number)"'))
+    if [[ ${#ISSUE_REFS[@]} -eq 0 ]]; then
+      echo "No issues found in project $OWNER/$PROJECT_NUMBER"
+      return 1
+    fi
+    # Batch-fetch already-labeled issues per repo (one query per unique repo)
+    local UNIQUE_REPOS=($(printf '%s\n' "${ISSUE_REFS[@]}" | sed 's/#.*//' | sort -u))
+    local LABELED_REFS=""
+    for REPO in "${UNIQUE_REPOS[@]}"; do
+      echo "Querying $REPO for issues already labeled '$LABEL'"
+      local NUMS
+      NUMS=$(gh issue list --repo "$REPO" --label "$LABEL" --state all --limit 1000 --json number --jq '.[].number')
+      while IFS= read -r NUM; do
+        [[ -n "$NUM" ]] && LABELED_REFS+="${REPO}#${NUM}"$'\n'
+      done <<< "$NUMS"
+    done
+    echo "Processing ${#ISSUE_REFS[@]} issue(s) for label '$LABEL'"
+    for ISSUE_REF in "${ISSUE_REFS[@]}"; do
+      if grep -qFx "$ISSUE_REF" <<< "$LABELED_REFS"; then
+        echo "Skipping $ISSUE_REF, already has label '$LABEL'"
+        continue
+      fi
+      local REPO="${ISSUE_REF%#*}"
+      local ISSUE_NUMBER="${ISSUE_REF#*#}"
+      echo "Editing issue $REPO#$ISSUE_NUMBER, adding label '$LABEL'"
+      gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label "$LABEL"
+    done
+  )
+}
+
 function ptbx_gha_ci_trigger() {
   (
     local remote=${1:-origin}
