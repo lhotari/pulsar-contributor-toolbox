@@ -1657,17 +1657,22 @@ function ptbx_parse_gitlog_prnums() {
 
 function ptbx_gh_move_to_milestone() {
   (
+    local STATE_FILTER=open
+    if [[ "$1" == "--all" ]]; then
+      STATE_FILTER=all
+      shift
+    fi
     local FROM_MILESTONE=$1
     local NEXT_MILESTONE=$2
     local BACKPORT_RELEASE=$3
     if [[ -z "$FROM_MILESTONE" || -z "$NEXT_MILESTONE" ]]; then
-      echo "Usage: ptbx_gh_move_to_milestone <from_milestone> <next_milestone> [<backport_release>]"
+      echo "Usage: ptbx_gh_move_to_milestone [--all] <from_milestone> <next_milestone> [<backport_release>]"
       return 1
     fi
     echo "Moving PRs from milestone $FROM_MILESTONE to milestone $NEXT_MILESTONE"
     local SLUG=$(ptbx_gh_slug origin)
     local PR_QUERY="milestone:$FROM_MILESTONE"
-    local PR_NUMBERS=($(gh pr list -L 100 --search "$PR_QUERY" --state open --json number --jq '.[].number'))
+    local PR_NUMBERS=($(gh pr list -L 100 --search "$PR_QUERY" --state "$STATE_FILTER" --json number --jq '.[].number'))
     if [[ ${#PR_NUMBERS[@]} -eq 0 ]]; then
       echo "No PRs found for query: '$PR_QUERY'"
       return 1
