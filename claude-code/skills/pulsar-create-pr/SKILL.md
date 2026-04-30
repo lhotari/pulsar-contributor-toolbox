@@ -8,6 +8,14 @@ allowed-tools: Bash(gh *), Bash(find *), Bash(grep *), Read, Glob, Grep
 
 To create a pull request to the apache/pulsar repository, you can follow these steps:
 
+Precondition: Before creating a pull request, ensure that checkstyle and spotless check tasks pass locally. This can be done by running the following command in the root directory of the pulsar repository:
+
+```shell
+./gradlew spotlessCheck checkstyleMain checkstyleTest
+```
+
+Fix any checkstyle or spotless issues that arise before proceeding to create the pull request.
+
 1. Unless a specific branch other than master is provided, create a new branch for the changes.
    Follow the naming convention: `${PULSAR_PR_BRANCH_PREFIX}[fix|improve|feat]-[brief-description]`.
    - The `[fix|improve|feat]` prefix reflects the type of change, matching the semantic commit message types defined in @.github/workflows/ci-semantic-pull-request.yml.
