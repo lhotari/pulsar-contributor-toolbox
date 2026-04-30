@@ -33,3 +33,7 @@ Fix any checkstyle or spotless issues that arise before proceeding to create the
 3. Create a pull request using the GitHub CLI (`gh`). Follow the format described in @.github/PULL_REQUEST_TEMPLATE.md and ensure the title matches the semantic conventions defined in @.github/workflows/ci-semantic-pull-request.yml.
 4. If the `PULSAR_PR_REVIEWERS` environment variable is set, request reviews from the specified reviewers using the GitHub CLI (`gh`).
 5. When revisiting the PR later, update the description to reflect the latest changes and provide context for reviewers. Ensure it complies with @.github/PULL_REQUEST_TEMPLATE.md.
+
+When referencing a PIP in the PR description header, include the PIP number such as PIP: 460 in the pull request description to provide context for reviewers. Link this to the PIP in the pip directory of the pulsar repository for easy access (for example, `pip/pip-460.md`).
+
+When the PR is a fix for a specific issue, include the issue number in the PR description header (e.g., `Fixes: #1234`) to automatically link the PR to the issue on GitHub. If the issue is a task of an enhancement, use the format `Closes: #1234` to indicate that the PR will close the issue once merged.
