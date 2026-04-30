@@ -1660,7 +1660,7 @@ function ptbx_gh_move_to_milestone() {
     local FROM_MILESTONE=$1
     local NEXT_MILESTONE=$2
     local BACKPORT_RELEASE=$3
-    if [[ -z "$FROM_MILESTONE" || -z "$NEXT_MILESTONE" || -z "$BACKPORT_RELEASE" ]]; then
+    if [[ -z "$FROM_MILESTONE" || -z "$NEXT_MILESTONE" ]]; then
       echo "Usage: ptbx_gh_move_to_milestone <from_milestone> <next_milestone> [<backport_release>]"
       return 1
     fi
