@@ -1839,7 +1839,7 @@ function ptbx_cherry_pick_amend_commit_message() {
     git commit --amend \
       --author="$(git log -1 --format='%an <%ae>' $SHA)" \
       --date="$(git log -1 --format='%aI' $SHA)" \
-      -m "$(git log -1 --format='%B%n%n(cherry-pick from commit %H)' $SHA)" \
+      -m "$(git log -1 --format='%B%n%n(cherry picked from commit %H)' $SHA)" \
       --no-edit
   )
 }
