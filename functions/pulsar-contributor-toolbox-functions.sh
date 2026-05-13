@@ -1844,6 +1844,31 @@ function ptbx_cherry_pick_amend_commit_message() {
   )
 }
 
+# Parses the PR number from the last commit message (HEAD), locates the matching
+# commit in <upstream>/master (defaults to origin/master), and runs
+# ptbx_cherry_pick_amend_commit_message to fix the cherry-picked commit's author,
+# author date and commit message to match the original master commit.
+function ptbx_cherry_pick_amend_from_pr() {
+  (
+    local UPSTREAM=${1:-origin}
+    local PR_NUMBER=$(git log -1 --format='%s' | gawk 'match($0, /\(#([0-9]+)\)/, a) {print a[1]}')
+    if [[ -z "$PR_NUMBER" ]]; then
+      echo "Could not parse PR number from last commit message:"
+      git log -1 --oneline
+      return 1
+    fi
+    echo "Parsed PR number #$PR_NUMBER from last commit message"
+    local SHA=$(git log -1 -F --grep="(#${PR_NUMBER})" --format='%H' $UPSTREAM/master)
+    if [[ -z "$SHA" ]]; then
+      echo "Could not find commit for PR #$PR_NUMBER in $UPSTREAM/master"
+      return 1
+    fi
+    echo "Found commit in $UPSTREAM/master:"
+    git log -1 --oneline $SHA
+    ptbx_cherry_pick_amend_commit_message "$SHA"
+  )
+}
+
 function ptbx_gh_add_label() {
   (
     local label_name=${1:?label_name is required}
