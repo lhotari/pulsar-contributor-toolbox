@@ -1833,6 +1833,17 @@ function ptbx_cherry_pick_add_release_labels() {
  )
 }
 
+function ptbx_cherry_pick_amend_commit_message() {
+  (
+    local SHA=$1
+    git commit --amend \
+      --author="$(git log -1 --format='%an <%ae>' $SHA)" \
+      --date="$(git log -1 --format='%aI' $SHA)" \
+      -m "$(git log -1 --format='%B%n%n(cherry-pick from commit %H)' $SHA)" \
+      --no-edit
+  )
+}
+
 function ptbx_gh_add_label() {
   (
     local label_name=${1:?label_name is required}
