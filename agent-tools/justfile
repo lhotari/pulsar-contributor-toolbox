@@ -1,4 +1,3 @@
-#!/usr/bin/env -S just --justfile
 # List all available steps
 default:
     @just --list
@@ -9,8 +8,9 @@ install-tmux:
 install-tmupx:
     uv tool install tmuxp
 
-# Start tmux with multiple claude code agents.
 # AGENT_START_DIR pins the panes' working directory to where `just` was invoked from
-# (invocation_directory), not the justfile directory.
+# (invocation_directory), not the justfile directory. The wrapper builds the session
+# detached and labels each pane (see start-agents.sh for why a wrapper is needed).
+# Start tmux with multiple claude code agents.
 start-agents:
-    AGENT_START_DIR="{{invocation_directory()}}" tmuxp load {{justfile_directory()}}/claude-code-multi.yaml
+    AGENT_START_DIR="{{invocation_directory()}}" {{justfile_directory()}}/start-agents.sh
