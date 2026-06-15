@@ -1,0 +1,23 @@
+#!/usr/bin/env -S tmuxp load
+# tmuxp (https://tmuxp.git-pull.com/) configuration file, install tmuxp with "uv tool install tmuxp"
+session_name: claude-code-multi
+# Shared command line for all agents. Each window below appends its agent-specific part.
+environment:
+  CLAUDE_CMD: "claude --settings '{\"ultracode\":true}' --effort=xhigh --remote-control"
+# One window per agent, each with a single pane (the command string).
+windows:
+  - window_name: agent-1
+    panes:
+      - 'eval "$CLAUDE_CMD -n agent-1 --worktree=agent-1-worktree"'
+  - window_name: agent-2
+    panes:
+      - 'eval "$CLAUDE_CMD -n agent-2 --worktree=agent-2-worktree"'
+  - window_name: agent-3
+    panes:
+      - 'eval "$CLAUDE_CMD -n agent-3 --worktree=agent-3-worktree"'
+  - window_name: agent-4
+    panes:
+      - 'eval "$CLAUDE_CMD -n agent-4 --worktree=agent-4-worktree"'
+  - window_name: agent-5
+    panes:
+      - 'eval "$CLAUDE_CMD -n agent-5 --worktree=agent-5-worktree"'

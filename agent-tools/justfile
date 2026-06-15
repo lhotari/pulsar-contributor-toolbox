@@ -1,0 +1,14 @@
+#!/usr/bin/env -S just --justfile
+# List all available steps
+default:
+    @just --list
+
+install-tmux:
+    brew install tmux
+
+install-tmupx:
+    uv tool install tmuxp
+
+# Start tmux with multiple claude code agents
+start-agents:
+    tmuxp load {{justfile_directory()}}/claude-code-multi.yaml
