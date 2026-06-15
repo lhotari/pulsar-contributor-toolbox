@@ -1,13 +1,13 @@
 #!/usr/bin/env sh
-# Launch the claude-code-multi tmuxp session, then label each pane.
+# Launch the claude-code-multi tmuxp session, then title each pane "claude-N"/"shell-N".
 #
-# tmuxp has no native pane-title/-name option, and the obvious workarounds all race:
-#   - `select-pane -T` writes pane_title, which the shell prompt re-writes on every
-#     redraw, so the label gets clobbered.
-#   - targeting panes by index (.0/.1) is non-deterministic under `pane-base-index 1`.
-# The race-free approach is to address panes by their discovered pane_id and write a
-# custom user option (@label) that nothing else touches, after the session is built
-# (`tmuxp load -d`) so the panes already exist and no send-keys timing is involved.
+# tmuxp has no native pane-title option, so we set pane_title with `select-pane -T`
+# after the session is built (`tmuxp load -d`), addressing panes by their discovered
+# pane_id -- targeting by index (.0/.1) is non-deterministic under `pane-base-index 1`.
+# pane_title defaults to the hostname, and nothing in a Starship shell reclaims it, so the
+# title sticks (the claude pane may set its own title, which is fine). The user's
+# ~/.tmux.conf already renders #{pane_title} in the status bar and `set-titles-string "#T"`
+# in the terminal title, so setting pane_title is all we need -- no format overrides.
 set -eu
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
@@ -24,19 +24,20 @@ session=$(awk -F':' '/^session_name:/ { gsub(/^[ \t]+|[ \t]+$/, "", $2); print $
 # Build the session detached so every pane exists before we label it.
 tmuxp load -d "$CONFIG"
 
-# Label panes by pane_id (immune to pane-base-index) using a custom user option
-# (@label) that the shell prompt never overwrites (unlike pane_title).
+# Title each pane by pane_id (immune to pane-base-index). The status bar and the outer
+# terminal title both render #{pane_title} via the user's global ~/.tmux.conf, so setting
+# pane_title is all that is needed -- no per-window status/title format overrides.
 idx=0
 for win in $(tmux list-windows -t "$session" -F '#{window_id}'); do
     idx=$((idx + 1))
     tmux set-option -w -t "$win" pane-border-status top
-    tmux set-option -w -t "$win" pane-border-format '#{?#{!=:#{@label},},#{@label},#{pane_index}}'
+    tmux set-option -w -t "$win" pane-border-format ' #{pane_title} '
     # even-vertical stacks panes top->bottom in list order: first = claude, second = shell.
     tmux list-panes -t "$win" -F '#{pane_id}' | {
         read -r top
         read -r bottom
-        [ -n "${top:-}" ] && tmux set-option -p -t "$top" @label "claude-$idx"
-        [ -n "${bottom:-}" ] && tmux set-option -p -t "$bottom" @label "shell-$idx"
+        [ -n "${top:-}" ] && tmux select-pane -t "$top" -T "claude-$idx"
+        [ -n "${bottom:-}" ] && tmux select-pane -t "$bottom" -T "shell-$idx"
     }
 done
 
