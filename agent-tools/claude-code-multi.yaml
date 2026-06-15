@@ -1,6 +1,10 @@
 #!/usr/bin/env -S tmuxp load
 # tmuxp (https://tmuxp.git-pull.com/) configuration file, install tmuxp with "uv tool install tmuxp"
 session_name: claude-code-multi
+# Anchor all panes to the directory the launcher was invoked from (not the justfile
+# directory). `just start-agents` sets AGENT_START_DIR to the invocation directory.
+# For direct runs, export it yourself, e.g. AGENT_START_DIR="$PWD" ./claude-code-multi.yaml
+start_directory: "$AGENT_START_DIR"
 # Shared command line for all agents. Each window below appends its agent-specific part.
 environment:
   CLAUDE_CMD: "claude --settings '{\"ultracode\":true}' --effort=xhigh --remote-control"
