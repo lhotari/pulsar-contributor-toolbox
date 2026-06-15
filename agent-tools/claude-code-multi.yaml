@@ -4,20 +4,43 @@ session_name: claude-code-multi
 # Shared command line for all agents. Each window below appends its agent-specific part.
 environment:
   CLAUDE_CMD: "claude --settings '{\"ultracode\":true}' --effort=xhigh --remote-control"
-# One window per agent, each with a single pane (the command string).
+# One window per agent. Each window has two vertically stacked panes (top/bottom):
+#   1. the claude agent itself
+#   2. a plain shell, pre-typed to cd into the agent's worktree (not executed, since
+#      the worktree directory is created by claude and may not exist yet).
 windows:
   - window_name: agent-1
+    layout: even-vertical
     panes:
-      - 'eval "$CLAUDE_CMD -n agent-1 --worktree=agent-1-worktree"'
+      - 'eval "$CLAUDE_CMD -n agent-1 --worktree=agent-1"'
+      - shell_command:
+          - cmd: 'cd .claude/worktrees/agent-1'
+            enter: false
   - window_name: agent-2
+    layout: even-vertical
     panes:
-      - 'eval "$CLAUDE_CMD -n agent-2 --worktree=agent-2-worktree"'
+      - 'eval "$CLAUDE_CMD -n agent-2 --worktree=agent-2"'
+      - shell_command:
+          - cmd: 'cd .claude/worktrees/agent-2'
+            enter: false
   - window_name: agent-3
+    layout: even-vertical
     panes:
-      - 'eval "$CLAUDE_CMD -n agent-3 --worktree=agent-3-worktree"'
+      - 'eval "$CLAUDE_CMD -n agent-3 --worktree=agent-3"'
+      - shell_command:
+          - cmd: 'cd .claude/worktrees/agent-3'
+            enter: false
   - window_name: agent-4
+    layout: even-vertical
     panes:
-      - 'eval "$CLAUDE_CMD -n agent-4 --worktree=agent-4-worktree"'
+      - 'eval "$CLAUDE_CMD -n agent-4 --worktree=agent-4"'
+      - shell_command:
+          - cmd: 'cd .claude/worktrees/agent-4'
+            enter: false
   - window_name: agent-5
+    layout: even-vertical
     panes:
-      - 'eval "$CLAUDE_CMD -n agent-5 --worktree=agent-5-worktree"'
+      - 'eval "$CLAUDE_CMD -n agent-5 --worktree=agent-5"'
+      - shell_command:
+          - cmd: 'cd .claude/worktrees/agent-5'
+            enter: false
