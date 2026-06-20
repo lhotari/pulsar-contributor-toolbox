@@ -1,7 +1,7 @@
 ---
 name: develocity-investigate-test-failures
 description: Investigate test failures for a project using the Develocity REST API. Queries failed builds, extracts test and build failures with stacktraces.
-argument-hint: [--days N] [--max N] [--tag <tag>]
+argument-hint: "[--days N] [--max N] [--tag <tag>]"
 allowed-tools: Bash(curl *), Bash(jq *), Bash(python3 *), Bash(gh *), Bash(unzip *), Bash(find *), Read, Glob, Grep
 ---
 

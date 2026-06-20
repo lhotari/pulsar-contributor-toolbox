@@ -1,7 +1,7 @@
 ---
 name: fix-pulsar-flaky-tests
 description: Fix flaky tests in apache/pulsar. Investigates Develocity failures, analyzes root causes using git blame, fixes tests, verifies with invocationCount, and creates PRs.
-argument-hint: [--days N] [--max N] [--tag <tag>]
+argument-hint: "[--days N] [--max N] [--tag <tag>]"
 allowed-tools: Bash(*), Read, Write, Edit, Glob, Grep, Agent, Skill, SendMessage, WebFetch, TaskCreate, TaskUpdate
 ---
 

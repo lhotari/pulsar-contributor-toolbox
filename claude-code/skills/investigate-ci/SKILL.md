@@ -1,7 +1,7 @@
 ---
 name: investigate-ci
 description: Investigate failing GitHub Actions CI tests for a PR, a specific workflow run (by URL), or recent workflow runs. Auto-detects Maven vs Gradle for the target branch and parses failures in the right format. Downloads logs and optionally test report artifacts for deep analysis.
-argument-hint: [PR_NUMBER | GH_ACTIONS_URL] [--repo owner/repo] [--artifacts] [--workflow <name>] [--job <name>] [--check-flaky-tests]
+argument-hint: "[PR_NUMBER | GH_ACTIONS_URL] [--repo owner/repo] [--artifacts] [--workflow <name>] [--job <name>] [--check-flaky-tests]"
 allowed-tools: Bash(gh *), Bash(git *), Bash(python3 *), Bash(unzip *), Bash(find *), Bash(grep *), Bash(xmllint *), Bash(python *), Read, Glob, Grep
 ---
 
