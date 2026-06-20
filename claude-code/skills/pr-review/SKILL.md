@@ -1,7 +1,8 @@
 ---
 name: pr-review
 description: Review a GitHub PR locally using metadata and diff as context. Use when asked to review a pull request, check a PR, or analyze a PR. Outputs findings to terminal only — never posts GitHub comments.
-argument-hint: <PR_NUMBER> [--repo owner/repo] [--prompt "custom instructions"]
+argument-hint: |
+  <PR_NUMBER> [--repo owner/repo] [--prompt "custom instructions"]
 allowed-tools: Bash(gh pr view:*), Bash(gh pr diff:*)
 ---
 
@@ -12,11 +13,15 @@ Output all findings to the terminal only. Do not post any comments to GitHub.
 
 ## Steps
 
-1. **Parse arguments** from $ARGUMENTS:
-   - Extract the PR number (required, first positional argument)
-   - Extract `--repo <owner/repo>` if provided (pass as `--repo` flag to `gh` commands)
-   - Extract `--prompt <text>` if provided (use as custom review focus)
-   - If no PR number is found, respond: "Usage: /pr-review <PR_NUMBER> [--repo owner/repo] [--prompt 'custom instructions']" and stop.
+1. **Identify the PR and options**:
+   - In Claude Code slash-command usage, parse `$ARGUMENTS`:
+     - Extract the PR number (required, first positional argument)
+     - Extract `--repo <owner/repo>` if provided (pass as `--repo` flag to `gh` commands)
+     - Extract `--prompt <text>` if provided (use as custom review focus)
+   - In Codex or natural-language usage, infer the PR number, repository, and review focus from the user's request.
+     - Accept PR numbers, GitHub PR URLs, and phrases such as "review PR 123".
+     - If the repository is not provided, use the current git remote when it is clearly a GitHub repository.
+   - If no PR number can be found, respond: "Usage: /pr-review <PR_NUMBER> [--repo owner/repo] [--prompt 'custom instructions']" and stop.
 
 2. **Fetch PR metadata** using:
    ```bash
