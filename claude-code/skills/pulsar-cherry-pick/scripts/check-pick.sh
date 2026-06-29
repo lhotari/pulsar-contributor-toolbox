@@ -6,7 +6,9 @@
 # backport from master onto an slf4j/Maven release branch:
 #   1. leftover conflict markers
 #   2. leftover slog (structured logger) syntax that won't compile on slf4j branches
-#   3. added unguarded slf4j debug/trace (slog guards these automatically; slf4j does not)
+#   3. added unguarded *argument-bearing* slf4j debug/trace (slog guards these
+#      automatically; slf4j does not). Constant-message calls build nothing and are
+#      reported as informational only — they need no guard.
 #
 # Run it after resolving conflicts and before `cherry-pick --continue`, or right
 # after the pick commits. The file list comes from the source commit; the
@@ -67,19 +69,27 @@ for f in "${files[@]}"; do
 done
 [ "$slog_hits" -eq 0 ] && echo "  none" || issues=1
 
-echo "== 3. Added debug/trace (verify each is guarded by isDebugEnabled/isTraceEnabled) =="
+echo "== 3. Added debug/trace (argument-bearing must be guarded by isDebugEnabled/isTraceEnabled) =="
 added_dbg="$(git diff "${diff_range[@]}" -- '*.java' 2>/dev/null | grep -E '^\+' | grep -vE '^\+\+\+' | grep -E 'log\.(debug|trace)\(')"
-if [ -n "$added_dbg" ]; then
-  echo "$added_dbg" | sed 's/^/  /'
+# A line with a {} placeholder formats/boxes arguments on every call -> needs a guard.
+# A constant-message call (no {}) builds nothing -> needs no guard, informational only.
+arg_dbg="$(printf '%s\n' "$added_dbg" | grep -F '{}')"
+const_dbg="$(printf '%s\n' "$added_dbg" | grep -vF '{}' | grep -E 'log\.(debug|trace)\(')"
+if [ -n "$arg_dbg" ]; then
+  echo "$arg_dbg" | sed 's/^/  /'
   echo "  -> review: each must be inside an isDebugEnabled()/isTraceEnabled() guard"
   issues=1
 else
-  echo "  none added"
+  echo "  none added (argument-bearing)"
+fi
+if [ -n "$const_dbg" ]; then
+  echo "  constant-message debug/trace (no guard needed — informational):"
+  echo "$const_dbg" | sed 's/^/    /'
 fi
 
 echo
 if [ "$issues" -eq 0 ]; then
-  echo "OK — no markers, slog, or unguarded debug detected. Still run: mvn -pl <module> test-compile"
+  echo "OK — no markers, slog, or unguarded argument-bearing debug detected. Still run: mvn -pl <module> test-compile"
 else
   echo "REVIEW NEEDED — see findings above."
 fi

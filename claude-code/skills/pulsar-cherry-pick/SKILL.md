@@ -64,7 +64,7 @@ This is the most common and most error-prone adaptation. Full patterns and examp
 Two rules that are easy to get wrong:
 
 - **A trailing throwable gets no `{}` placeholder.** Both `.exceptionMessage(e)` and `.exception(e)` map to passing `e` as the final argument with no matching `{}` — that's what makes slf4j log the stack trace.
-- **Guard every debug/trace you convert.** slog evaluates `.debug()`/`.trace()` lazily, so it is implicitly cheap when the level is off. slf4j is **not** lazy — an unguarded `log.debug(...)` builds its arguments every call. Wrap converted debug/trace in `if (log.isDebugEnabled())` / `if (log.isTraceEnabled())` (Pulsar's coding convention also requires this). After finishing, verify the diff added no unguarded debug/trace: `git diff <base>..HEAD -- '*.java' | grep -E '^\+' | grep -E 'log\.(debug|trace)\('` should return nothing that isn't inside a guard.
+- **Guard every debug/trace you convert *that has arguments*.** slog evaluates `.debug()`/`.trace()` lazily, so it is implicitly cheap when the level is off. slf4j is **not** lazy — an unguarded `log.debug("x={}", v)` builds its argument array (and boxes primitives) every call. Wrap converted debug/trace that take arguments in `if (log.isDebugEnabled())` / `if (log.isTraceEnabled())` (Pulsar's coding convention also requires this). **A debug/trace whose only argument is a constant string needs no guard** — there is nothing to build, so `log.debug("Skipping read, pending task")` stays unguarded (matching how upstream wrote it). Don't add guards around constant-message calls; it's pure noise. After finishing, verify the diff added no unguarded *argument-bearing* debug/trace: `git diff <base>..HEAD -- '*.java' | grep -E '^\+' | grep -E 'log\.(debug|trace)\('` — each hit with a `{}` placeholder / arguments must sit inside a guard; constant-string hits are fine unguarded.
 
 ## Maven adaptation for Gradle-only commits
 
@@ -113,7 +113,7 @@ Before finishing each commit, confirm:
 - No slog leaked into any touched file (run `scripts/check-pick.sh <sha>`).
 - The changed module(s) compile.
 - The commit's added/modified tests pass.
-- Converted debug/trace calls are guarded.
+- Converted **argument-bearing** debug/trace calls are guarded; constant-string debug/trace calls are left unguarded (no guard needed when there's nothing to build).
 
 ## Notes & gotchas
 

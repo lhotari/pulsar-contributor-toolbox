@@ -100,33 +100,49 @@ if (log.isDebugEnabled()) {
 }
 ```
 
-## Debug and trace MUST be guarded
+## Debug and trace with arguments MUST be guarded
 
 This is the subtle one. slog's `.debug()` / `.trace()` are lazy: the message and
 attributes aren't built when the level is disabled, so an unguarded slog debug is
 already cheap. slf4j is **not** lazy — `log.debug("x={}", expensive())` evaluates
-`expensive()` and formats on every call regardless of level. Pulsar's coding
-conventions therefore require a guard, and converting slog → slf4j without one is a
-silent performance regression.
+`expensive()`, boxes primitives, and formats on every call regardless of level.
+Pulsar's coding conventions therefore require a guard, and converting an
+argument-bearing slog → slf4j without one is a silent performance regression.
 
 ```java
 // slog (implicitly guarded)
 log.debug().attr("count", positions.size()).log("Get scheduled messages");
 
-// slf4j (explicit guard)
+// slf4j (explicit guard — has an argument to build)
 if (log.isDebugEnabled()) {
     log.debug("Get scheduled messages count={}", positions.size());
 }
 ```
 
-Verify you introduced none unguarded. From the cherry-pick base to HEAD:
+**Exception: a constant-message debug/trace needs no guard.** When the only
+argument is a literal string there is nothing to build or box, so the guard buys
+nothing and is pure noise. Leave it unguarded — and crucially, **don't add a guard
+that upstream didn't have** just because the line is a `log.debug(...)`:
+
+```java
+// slog AND slf4j — identical, no guard, nothing to build
+log.debug("Skip the reading because there is a pending read task");
+```
+
+(If the constant message is so long it gets split with `+` string concatenation,
+that's still a compile-time constant — no guard needed.)
+
+Verify you introduced none unguarded *that have arguments*. From the cherry-pick
+base to HEAD:
 
 ```shell
 git diff <base>..HEAD -- '*.java' | grep -E '^\+' | grep -E 'log\.(debug|trace)\('
 ```
 
-Each hit must sit inside an `isDebugEnabled()` / `isTraceEnabled()` block (or be a
-line you took verbatim from the branch's already-guarded code).
+Each hit **with a `{}` placeholder or arguments** must sit inside an
+`isDebugEnabled()` / `isTraceEnabled()` block (or be a line you took verbatim from
+the branch's already-guarded code). Hits whose argument is a single constant string
+are fine unguarded.
 
 ## Worked examples from real backports
 
