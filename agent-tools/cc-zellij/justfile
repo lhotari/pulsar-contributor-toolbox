@@ -1,0 +1,13 @@
+# List all available steps
+default:
+    @just --list
+
+install-zellij:
+    brew install zellij
+
+# AGENT_START_DIR pins the panes' working directory to where `just` was invoked from
+# (invocation_directory), not the justfile directory. The wrapper exports CLAUDE_CMD
+# and creates or attaches the zellij session (see start-agents.sh).
+# Start zellij with multiple claude code agents.
+start-agents:
+    AGENT_START_DIR="{{invocation_directory()}}" {{justfile_directory()}}/start-agents.sh

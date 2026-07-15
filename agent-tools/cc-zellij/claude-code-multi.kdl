@@ -1,0 +1,72 @@
+// zellij (https://zellij.dev/) layout file, install zellij with "brew install zellij"
+// Port of ../cc-tmuxp/claude-code-multi.yaml.
+//
+// zellij layouts cannot expand environment variables, so start-agents.sh supplies
+// the two dynamic pieces:
+//   - working directory: the session is created from inside AGENT_START_DIR and
+//     panes without an explicit cwd inherit it
+//   - CLAUDE_CMD: shared command line for all agents; each claude pane below
+//     appends its agent-specific part. Command panes inherit the zellij server's
+//     environment, so exporting it before session creation is enough.
+// For direct runs without the wrapper, cd to the target directory and export
+// CLAUDE_CMD yourself, e.g.
+//   export CLAUDE_CMD="claude --settings '{\"ultracode\":true}' --effort=xhigh --remote-control"
+//   zellij --session claude-code-multi --layout ./claude-code-multi.kdl
+//
+// One tab per agent. Each tab has two vertically stacked panes (top/bottom):
+//   1. the claude agent itself (fails fast with a usage hint if CLAUDE_CMD is unset)
+//   2. a plain shell that cds into the agent's worktree after giving claude 2s to
+//      create it (the tmuxp sleep_before equivalent). If the worktree does not
+//      exist yet, the cd fails visibly and the shell stays in the start directory.
+layout {
+    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
+        children
+        pane size=2 borderless=true {
+            plugin location="zellij:status-bar"
+        }
+    }
+
+    tab name="agent-1" focus=true {
+        pane name="claude-1" command="sh" {
+            args "-c" ": \"${CLAUDE_CMD:?export CLAUDE_CMD or launch via start-agents.sh}\"; eval \"$CLAUDE_CMD -n agent-1 --worktree=agent-1\""
+        }
+        pane name="shell-1" command="sh" {
+            args "-c" "sleep 2; cd .claude/worktrees/agent-1; exec \"${SHELL:-zsh}\""
+        }
+    }
+    tab name="agent-2" {
+        pane name="claude-2" command="sh" {
+            args "-c" ": \"${CLAUDE_CMD:?export CLAUDE_CMD or launch via start-agents.sh}\"; eval \"$CLAUDE_CMD -n agent-2 --worktree=agent-2\""
+        }
+        pane name="shell-2" command="sh" {
+            args "-c" "sleep 2; cd .claude/worktrees/agent-2; exec \"${SHELL:-zsh}\""
+        }
+    }
+    tab name="agent-3" {
+        pane name="claude-3" command="sh" {
+            args "-c" ": \"${CLAUDE_CMD:?export CLAUDE_CMD or launch via start-agents.sh}\"; eval \"$CLAUDE_CMD -n agent-3 --worktree=agent-3\""
+        }
+        pane name="shell-3" command="sh" {
+            args "-c" "sleep 2; cd .claude/worktrees/agent-3; exec \"${SHELL:-zsh}\""
+        }
+    }
+    tab name="agent-4" {
+        pane name="claude-4" command="sh" {
+            args "-c" ": \"${CLAUDE_CMD:?export CLAUDE_CMD or launch via start-agents.sh}\"; eval \"$CLAUDE_CMD -n agent-4 --worktree=agent-4\""
+        }
+        pane name="shell-4" command="sh" {
+            args "-c" "sleep 2; cd .claude/worktrees/agent-4; exec \"${SHELL:-zsh}\""
+        }
+    }
+    tab name="agent-5" {
+        pane name="claude-5" command="sh" {
+            args "-c" ": \"${CLAUDE_CMD:?export CLAUDE_CMD or launch via start-agents.sh}\"; eval \"$CLAUDE_CMD -n agent-5 --worktree=agent-5\""
+        }
+        pane name="shell-5" command="sh" {
+            args "-c" "sleep 2; cd .claude/worktrees/agent-5; exec \"${SHELL:-zsh}\""
+        }
+    }
+}
