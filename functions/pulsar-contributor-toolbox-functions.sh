@@ -1759,14 +1759,24 @@ function ptbx_gh_update_milestone_in_merged_prs() {
   (
     local MILESTONE=${1:?Pass the milestone to move PRs to}
     local LAST_FORKED_BRANCH=${2:?Pass the last forked branch}
-    local RELEASE_BRANCH=${3:?Pass the release branch}
+    # when the release branch is omitted, the release hasn't been branched off yet and
+    # all PRs merged after the fork point of the last forked branch belong to the milestone
+    local RELEASE_BRANCH=${3:-}
     local MASTER_BRANCH=${4:-"master"}
-    local first_commit_in_release=$(ptbx_gh_first_commit_in_release $LAST_FORKED_BRANCH $RELEASE_BRANCH)
-    local timestamp_of_first_commit_in_release=$(git show -s --format=%cI $first_commit_in_release)
-    local first_commit_in_release_branch=$(ptbx_gh_first_commit_in_release $MASTER_BRANCH $RELEASE_BRANCH)
-    local timestamp_of_last_commit_in_release=$(git show -s --format=%cI $first_commit_in_release_branch)
+    local merged_range
+    if [[ -n "$RELEASE_BRANCH" ]]; then
+      local first_commit_in_release=$(ptbx_gh_first_commit_in_release $LAST_FORKED_BRANCH $RELEASE_BRANCH)
+      local timestamp_of_first_commit_in_release=$(git show -s --format=%cI $first_commit_in_release)
+      local first_commit_in_release_branch=$(ptbx_gh_first_commit_in_release $MASTER_BRANCH $RELEASE_BRANCH)
+      local timestamp_of_last_commit_in_release=$(git show -s --format=%cI $first_commit_in_release_branch)
+      merged_range="$timestamp_of_first_commit_in_release..$timestamp_of_last_commit_in_release"
+    else
+      local first_commit_in_release=$(ptbx_gh_first_commit_in_release $LAST_FORKED_BRANCH $MASTER_BRANCH)
+      local timestamp_of_first_commit_in_release=$(git show -s --format=%cI $first_commit_in_release)
+      merged_range=">=$timestamp_of_first_commit_in_release"
+    fi
     local SLUG=$(ptbx_gh_slug origin)
-    local PR_QUERY="is:pr is:merged base:$MASTER_BRANCH -milestone:$MILESTONE merged:$timestamp_of_first_commit_in_release..$timestamp_of_last_commit_in_release"
+    local PR_QUERY="is:pr is:merged base:$MASTER_BRANCH -milestone:$MILESTONE merged:$merged_range"
     while true; do
       local PR_NUMBERS=($(gh pr list -L 100 --search "$PR_QUERY" --state all --json number --jq '.[].number'))
       if [[ ${#PR_NUMBERS[@]} -eq 0 ]]; then
