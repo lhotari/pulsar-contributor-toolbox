@@ -36,6 +36,33 @@ Installing skills with [`link-skills-to-claude.sh`](link-skills-to-claude.sh)
 ./link-skills-to-claude.sh
 ```
 
+### Reviewing pull requests
+
+Two skills that work together:
+
+* [`pr-review`](skills/pr-review/) — reviews one PR. Claude Fable and Codex
+  `gpt-5.6-sol` review independently, the default model synthesizes and both
+  cross-validate the result. Terminal output only; it never posts to GitHub.
+* [`pr-review-track`](skills/pr-review-track/) — keeps up with a *backlog* of
+  PRs. Tracks every in-progress review under `~/.claude/pr-review-track`,
+  works out whether each author actually addressed earlier feedback, and drafts
+  the reply, inline comments and review resolution into a markdown file.
+  **Nothing reaches GitHub until you set `Status: ready` on line 1** — which is
+  also what keeps a human accountable for every review, as the
+  [ASF Generative Tooling guidance](https://www.apache.org/legal/generative-tooling.html)
+  requires.
+
+```shell
+# ranked PRs I have not looked at yet; merlimat first, then ASF members
+node ~/.claude/skills/pr-review-track/scripts/prt.mjs latest
+
+# what my in-progress reviews are waiting on
+node ~/.claude/skills/pr-review-track/scripts/prt.mjs sync && node ~/.claude/skills/pr-review-track/scripts/prt.mjs board
+```
+
+In Claude Code: `/pr-review-track re-review`, `/pr-review-track show-latest`,
+`/pr-review-track review latest`, `/pr-review-track cleanup`.
+
 ## MCP servers
 
 ### Project architecture and high-level design

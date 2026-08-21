@@ -1,8 +1,8 @@
 ---
 name: pr-review
-description: Review a GitHub PR locally using metadata and diff as context. Runs independent Claude Fable and Codex gpt-5.6-sol reviews concurrently, synthesizes a candidate review with the default Claude model, then cross-validates it with both before converging on the final review. Use when asked to review a pull request, check a PR, or analyze a PR. Outputs findings to terminal only — never posts GitHub comments.
+description: Review a GitHub PR locally using metadata and diff as context. Runs independent Claude Fable and Codex gpt-5.6-sol reviews concurrently, synthesizes a candidate review with the default Claude model, then cross-validates it with both before converging on the final review. Use when asked to review a pull request, check a PR, or analyze a PR. Outputs findings to terminal only — never posts GitHub comments. Pass --out to also emit machine-readable findings for the pr-review-track skill, and --since to review only what changed after a given commit.
 argument-hint: |
-  <PR_NUMBER> [--repo owner/repo] [--prompt "custom instructions"] [--solo]
+  <PR_NUMBER> [--repo owner/repo] [--prompt "custom instructions"] [--solo] [--since <sha>] [--out <dir>]
 allowed-tools: Bash(gh:*), Bash(git:*), Bash(node:*), Bash(mkdir:*), Read, Write, Glob, Grep, Agent
 ---
 
@@ -25,10 +25,12 @@ and only findings that survive make it into the final review.
   - Extract `--repo <owner/repo>` if provided (pass as `--repo` flag to `gh` commands)
   - Extract `--prompt <text>` if provided (use as custom review focus)
   - Extract `--solo` if provided (skip the multi-model pipeline; do steps 2 and 6 only)
+  - Extract `--since <sha>` if provided (review only `<sha>..<head>` — an incremental re-review)
+  - Extract `--out <dir>` if provided (also write machine-readable findings there; see step 8)
 - In Codex or natural-language usage, infer the PR number, repository, and review focus from the user's request.
   - Accept PR numbers, GitHub PR URLs, and phrases such as "review PR 123".
   - If the repository is not provided, use the current git remote when it is clearly a GitHub repository.
-- If no PR number can be found, respond: "Usage: /pr-review <PR_NUMBER> [--repo owner/repo] [--prompt 'custom instructions'] [--solo]" and stop.
+- If no PR number can be found, respond: "Usage: /pr-review <PR_NUMBER> [--repo owner/repo] [--prompt 'custom instructions'] [--solo] [--since <sha>] [--out <dir>]" and stop.
 
 ### 2. Gather shared context
 
@@ -44,13 +46,28 @@ read-only worktree at the PR head so reviewers get **full repo context**, not ju
 
 ```bash
 WORK="${TMPDIR:-/tmp}/pr-review-<PR_NUMBER>"; mkdir -p "$WORK"
-git fetch <remote> "pull/<PR_NUMBER>/head:refs/heads/pr-<PR_NUMBER>-head" "<baseRefName>:refs/heads/pr-<PR_NUMBER>-base" --force
-git worktree add --detach "$WORK/tree" "pr-<PR_NUMBER>-head"
+git fetch <remote> --force \
+  "pull/<PR_NUMBER>/head:refs/pr-review/<PR_NUMBER>/head" \
+  "<baseRefName>:refs/pr-review/<PR_NUMBER>/base"
+git worktree add --detach "$WORK/tree" "refs/pr-review/<PR_NUMBER>/head"
 ```
 
 `pull/<N>/head` resolves on the base repository, so this works for fork PRs too.
-If the local repo is not the PR's repo (or the fetch fails), skip the worktree and run
-diff-only reviews — note the reduced context in the final output.
+The refs live under `refs/pr-review/` rather than `refs/heads/`, so they never collide
+with — or clobber — a branch the user is working on, and several PRs can be reviewed
+concurrently. If the local repo is not the PR's repo (or the fetch fails), skip the
+worktree and run diff-only reviews — note the reduced context in the final output.
+
+**Incremental mode (`--since <sha>`)**: fetch that commit too and take the diff from it
+instead of from the base. Everything downstream is unchanged; the reviewers just see a
+smaller change set.
+
+```bash
+git fetch <remote> --force "<sha>:refs/pr-review/<PR_NUMBER>/since"
+git diff refs/pr-review/<PR_NUMBER>/since..refs/pr-review/<PR_NUMBER>/head
+```
+
+Say so in the output: an incremental review has not looked at the untouched parts of the PR.
 
 Write the shared brief to `$WORK/brief.md`: PR title/body/labels, author, change stats,
 existing comments worth knowing, the full diff, the custom `--prompt` focus if given, the
@@ -87,7 +104,7 @@ CODEX_COMPANION="$(ls -1dt "$HOME"/.claude/plugins/cache/openai-codex/codex/*/sc
 With a worktree, use Codex's native reviewer (best quality — it walks the repo itself):
 
 ```bash
-node "$CODEX_COMPANION" review --cwd "$WORK/tree" --base "pr-<PR_NUMBER>-base" --model gpt-5.6-sol
+node "$CODEX_COMPANION" review --cwd "$WORK/tree" --base "refs/pr-review/<PR_NUMBER>/base" --model gpt-5.6-sol
 ```
 
 Without a worktree — or when the native reviewer rejects the target — fall back to a
@@ -105,7 +122,7 @@ it completes.
 Notes:
 - `/codex:review` itself is `disable-model-invocation: true`, so invoke the companion script directly.
 - `review` accepts no custom focus text. If `--prompt` was given and you are on the native path,
-  pass the focus to Codex with `adversarial-review --cwd "$WORK/tree" --base "pr-<PR_NUMBER>-base" --model gpt-5.6-sol "<focus>"` instead.
+  pass the focus to Codex with `adversarial-review --cwd "$WORK/tree" --base "refs/pr-review/<PR_NUMBER>/base" --model gpt-5.6-sol "<focus>"` instead.
 
 **Degradation** (state it in the output, never silently skip): if the companion script is
 missing or Codex is not set up, continue with Fable + the default model. If subagents are
@@ -163,13 +180,57 @@ Finally, clean up:
 
 ```bash
 git worktree remove --force "$WORK/tree"
-git branch -D "pr-<PR_NUMBER>-head" "pr-<PR_NUMBER>-base"
+git update-ref -d "refs/pr-review/<PR_NUMBER>/head"
+git update-ref -d "refs/pr-review/<PR_NUMBER>/base"
+git update-ref -d "refs/pr-review/<PR_NUMBER>/since" 2>/dev/null || true
 ```
 
 ### 7. Do not
 
 Post any GitHub comments, use `gh pr comment`, call any GitHub write API, or modify the
 working tree of the PR. This holds for every reviewer and every round.
+
+Posting is deliberately somebody else's job. The **`pr-review-track`** skill turns a
+review into a markdown file a human edits and arms; its `prt submit` is the only thing
+in this toolbox that writes to GitHub. If the user wants the review posted, hand off to
+that skill rather than reaching for `gh` yourself.
+
+### 8. Machine-readable output (`--out <dir>`)
+
+When `--out` is given, also write `<dir>/findings.json` — the contract `pr-review-track`
+consumes to build an action file. Terminal output is unchanged; this is in addition to it.
+
+The full schema lives in `../pr-review-track/references/findings-schema.md`. In short:
+
+```json
+{
+  "schema": 1, "repo": "apache/pulsar", "pr": 26289, "head": "<sha>",
+  "kind": "initial",
+  "reviewers": ["Claude Fable", "Codex gpt-5.6-sol", "<adjudicator>"],
+  "coverage": "full-repo",
+  "summary": "<the Summary section, as markdown>",
+  "recommendedEvent": "COMMENT",
+  "recommendedEventWhy": "<one line>",
+  "findings": [{
+    "id": "i1", "severity": "BUG", "claim": "<the one-line claim>",
+    "path": "<file>", "line": 1015, "endLine": null, "side": "RIGHT", "subject": "line",
+    "body": "<evidence + failure scenario, as markdown — this is what gets posted>",
+    "confidence": "high", "agreement": "both reviewers", "crossValidation": "confirmed by both"
+  }],
+  "dropped": [{"claim": "…", "reason": "refuted because …"}]
+}
+```
+
+Rules that matter:
+
+- `path` / `line` / `side` must land on a line **this PR's diff** allows a comment on.
+  `node <skills>/pr-review-track/scripts/prt.mjs anchors <N>` lists them. A finding you
+  cannot anchor still belongs in the file — give it `"subject": "file"` or set
+  `"post": false` and explain in the body, rather than dropping it or guessing a line.
+- `body` is posted verbatim. No `[SEVERITY]` prefix — the generator adds the bold claim
+  line from `severity` + `claim`.
+- `coverage` must say `diff-only` when the worktree was unavailable, and `reviewers` must
+  list only the reviewers that actually ran.
 
 ## Output format
 

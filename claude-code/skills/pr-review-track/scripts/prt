@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Thin wrapper so `prt …` works from anywhere once this directory is on PATH.
+# Resolves through symlinks so the toolbox checkout can be linked into
+# ~/.claude/skills without breaking the relative import of scripts/lib.
+set -euo pipefail
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"
+  src="$(readlink "$src")"
+  [[ "$src" != /* ]] && src="$dir/$src"
+done
+dir="$(cd -P "$(dirname "$src")" && pwd)"
+exec node "$dir/prt.mjs" "$@"
