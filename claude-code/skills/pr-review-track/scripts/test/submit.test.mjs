@@ -69,6 +69,7 @@ function baseRules(extra = [], { prState = 'OPEN', head = HEAD, author = 'someon
     { when: { arg: 'pulls/1/reviews', args: ['--paginate'] }, stdout: '[[]]' },
     { when: { arg: 'pulls/1/comments', args: ['--paginate'] }, stdout: '[[]]' },
     { when: { arg: 'issues/1/comments', args: ['--paginate'] }, stdout: '[[]]' },
+    { when: { arg: 'actions/runs?head_sha=', args: ['--method', 'GET'] }, stdout: '{"workflow_runs":[]}' },
   ];
 }
 
@@ -190,6 +191,32 @@ test('Status ready authorises an APPROVE workflow without a second doc flag', ()
   const posts = calls(log).filter(isWrite);
   assert.equal(posts.length, 1);
   assert.equal(JSON.parse(posts[0].stdin).event, 'APPROVE');
+  assert.equal(fs.readFileSync(path.join(dir, 'review.md'), 'utf8').split('\n')[0], 'Status: submitted');
+});
+
+test('APPROVE also approves every action_required workflow run on the PR head', () => {
+  const dir = setupPr(actionFile({ event: 'APPROVE' }));
+  const log = path.join(ROOT, 'approve-runs.jsonl');
+  const pendingRuns = JSON.stringify({ workflow_runs: [
+    { id: 701, head_sha: HEAD, pull_requests: [{ number: PR }] },
+    { id: 702, head_sha: HEAD, pull_requests: [{ number: PR }] },
+    { id: 999, head_sha: HEAD, pull_requests: [{ number: 99 }] },
+  ] });
+  const scenario = writeScenario('approve-runs', baseRules([
+    { when: { args: ['--method', 'POST'], arg: 'pulls/1/reviews' }, stdout: '{"id":101,"state":"APPROVED","html_url":"https://x/1#r101"}' },
+    { when: { args: ['--method', 'GET'], arg: 'actions/runs?head_sha=' }, stdout: pendingRuns },
+    { when: { args: ['--method', 'POST'], arg: 'actions/runs/701/approve' }, stdout: '' },
+    { when: { args: ['--method', 'POST'], arg: 'actions/runs/702/approve' }, stdout: '' },
+  ]), log);
+
+  const r = runPrt(['submit', '1', '--repo', REPO], scenario);
+  assert.equal(r.status, 0, r.stderr);
+  const postTargets = calls(log).filter(isWrite).map((c) => c.args.find((x) => x.includes('repos/o/r/')));
+  assert.deepEqual(postTargets, [
+    'repos/o/r/pulls/1/reviews',
+    'repos/o/r/actions/runs/701/approve',
+    'repos/o/r/actions/runs/702/approve',
+  ]);
   assert.equal(fs.readFileSync(path.join(dir, 'review.md'), 'utf8').split('\n')[0], 'Status: submitted');
 });
 

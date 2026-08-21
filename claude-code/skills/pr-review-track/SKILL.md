@@ -53,7 +53,9 @@ each PR re-deciding. Tell the user which tier the batch ran at, and at `lean` or
    enforced rather than merely asked for — do not work around it.)
 3. **Never write `event: APPROVE`.** Recommend it in the file; the human types it.
    Once typed, `Status: ready` approves both that verdict and running the whole
-   workflow; do not require or invent a second approval marker.
+   workflow; this includes GitHub's separate **Approve workflows to run** action
+   for eligible fork PR runs on the approved head. Do not require or invent a
+   second approval marker.
 4. **Never overwrite a protected file** (`ready`/`queued`/`partial`/`hold`/
    `skip`). `prt draft` refuses by default — use `--to review.next.md`. Do not
    reach for `--force` to get past it: `--force` also overrides `ready` and

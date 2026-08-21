@@ -476,6 +476,28 @@ async function performAction(ctx, action, tx, journal = () => {}) {
       if (r.ok && c) return { ok: true, result: { commentDatabaseId: String(c.id), url: c.html_url } };
       return { ok: false, error: describeApiError(r), ambiguous: isAmbiguous(httpStatusOf(r)) };
     }
+    case 'approve-workflows': {
+      const runs = await pendingWorkflowRuns(repo, number, tx.preconditions.head);
+      const approvedWorkflowRunIds = [];
+      for (const run of runs) {
+        const r = await restRaw('POST', `repos/${repo}/actions/runs/${run.id}/approve`);
+        if (!r.ok) {
+          // The endpoint has no useful idempotent success response. Re-query:
+          // if the run is no longer action_required, this request or another
+          // maintainer already approved it and recovery can safely continue.
+          const stillPending = await pendingWorkflowRuns(repo, number, tx.preconditions.head);
+          if (!stillPending.some((x) => String(x.id) === String(run.id))) {
+            approvedWorkflowRunIds.push(String(run.id));
+            continue;
+          }
+          return { ok: false, error: describeApiError(r), ambiguous: isAmbiguous(httpStatusOf(r)) };
+        }
+        approvedWorkflowRunIds.push(String(run.id));
+        journal({ approvedWorkflowRunIds: [...approvedWorkflowRunIds] });
+        await sleep(MUTATION_SPACING_MS);
+      }
+      return { ok: true, result: { approvedWorkflowRunIds } };
+    }
     default:
       return { ok: false, error: `unknown action kind "${action.kind}"` };
   }
@@ -548,10 +570,27 @@ async function findExisting(ctx, action, tx) {
       const want = action.kind === 'thread-resolve';
       return !!t.isResolved === want ? { threadNodeId: t.id, isResolved: t.isResolved } : null;
     }
+
+    if (action.kind === 'approve-workflows') {
+      const remaining = await pendingWorkflowRuns(repo, number, tx.preconditions.head);
+      return remaining.length === 0 ? { approvedWorkflowRunIds: [] } : null;
+    }
   } catch {
     return null; // could not verify — the caller keeps the action `unknown`
   }
   return null;
+}
+
+/** Workflow runs for this PR head that show GitHub's "Approve workflows to run" gate. */
+async function pendingWorkflowRuns(repo, number, head) {
+  if (!head) return [];
+  const q = new URLSearchParams({ head_sha: head, status: 'action_required', event: 'pull_request', per_page: '100' });
+  const data = await rest('GET', `repos/${repo}/actions/runs?${q}`);
+  return (data?.workflow_runs ?? []).filter((run) => {
+    if (run.head_sha && run.head_sha !== head) return false;
+    const prs = run.pull_requests ?? [];
+    return prs.length === 0 || prs.some((pr) => Number(pr.number) === Number(number));
+  });
 }
 
 /**
@@ -646,6 +685,7 @@ export async function submitReady(ctx) {
         if (a.kind === 'thread-reply') return `reply in thread ${a.thread.threadNodeId} (${a.thread.body.length} chars)`;
         if (a.kind === 'thread-resolve') return `resolve thread ${a.thread.threadNodeId}`;
         if (a.kind === 'thread-unresolve') return `unresolve thread ${a.thread.threadNodeId}`;
+        if (a.kind === 'approve-workflows') return 'approve eligible GitHub Actions workflow runs for this PR head';
         return `${a.kind} (${a.body?.length ?? 0} chars)`;
       });
       return {

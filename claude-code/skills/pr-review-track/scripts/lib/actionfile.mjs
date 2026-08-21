@@ -352,6 +352,9 @@ export function planActions(parsed) {
     if (t.unresolve) actions.push({ kind: 'thread-unresolve', id: `${t.id}:unresolve`, thread: t });
   }
   for (const c of parsed.issueComments) actions.push({ kind: 'issue-comment', id: `${c.id}:comment`, body: c.body });
+  // Approving the PR also approves any GitHub Actions runs that are waiting for
+  // the maintainer's "Approve workflows to run" decision on this exact head.
+  if (parsed.event === 'APPROVE') actions.push({ kind: 'approve-workflows', id: 'approve-workflows' });
   return actions;
 }
 

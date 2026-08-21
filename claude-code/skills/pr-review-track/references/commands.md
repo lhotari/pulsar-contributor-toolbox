@@ -138,7 +138,9 @@ The verdict controls the action set. `REPLY` posts only replies to existing file
 review threads and leaves their resolved state and the review verdict untouched;
 ordinary PR-conversation replies are deferred. `APPROVE`, `REQUEST_CHANGES`,
 and `COMMENT` perform the normal complete pass. `Status: ready` is the single
-human authorisation for either workflow, including an `APPROVE` verdict.
+human authorisation for either workflow. An `APPROVE` verdict also performs
+GitHub's **Approve workflows to run** action for every eligible
+`action_required` workflow run associated with the PR's approved head SHA.
 
 ### `watch [--interval 20] [--quiesce 3] [--once] [--all-repos]`
 

@@ -104,6 +104,13 @@ event: COMMENT
 
 `APPROVE` · `REQUEST_CHANGES` · `COMMENT` · `REPLY` · `NONE`.
 
+`APPROVE` submits the approving PR review and then approves every workflow run
+on the same PR head that GitHub reports as `action_required` (the UI's
+**Approve workflows to run** action). If there are no eligible runs, that step
+is a successful no-op. Both mutations are journalled under the same transaction;
+if workflow approval fails after the review lands, the file becomes `partial`
+and `prt recover` safely re-queries and resumes the remaining runs.
+
 `REPLY` is a deliberately incomplete pass. It posts reply bodies from
 `prt:thread` blocks only. It does not create or submit a review, does not post
 the review body or new inline findings, does not resolve or unresolve threads,
