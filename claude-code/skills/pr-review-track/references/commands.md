@@ -14,6 +14,17 @@ machine-readable output — use it whenever a model consumes the result.
 
 ## Discovery
 
+### `approved`
+
+Scans open PRs in the repository and lists those whose configured reviewer has
+a current `APPROVED` verdict. It verifies the review history rather than relying
+only on GitHub's search qualifier: the reviewer's latest non-comment verdict
+must be `APPROVED`, so later standalone thread replies do not hide an approval
+and a later changes-requested or dismissed verdict excludes it.
+
+Human-readable output is a Markdown list of clickable PR links, titles, and
+authors. `--json` returns `{ repo, reviewer, rows }` for automation.
+
 ### `latest [--limit 10] [--pool 120] [--include-drafts] [--max-per-author 2]`
 
 Ranks open PRs the reviewer has **not** engaged with — not the author, not

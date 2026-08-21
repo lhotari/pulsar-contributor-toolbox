@@ -2,7 +2,7 @@
 name: pr-review-track
 description: Keep up with pull requests in a GitHub project (especially apache/pulsar) across many PRs and many rounds. Tracks every in-progress review under ~/.claude/pr-review-track, detects whether the author actually addressed earlier feedback, and drafts the reply, inline comments and review resolution into a markdown file the human edits and arms before anything is posted. Use for "re-review", "show latest PRs", "review latest", "what needs my attention", "cleanup closed PRs", or any request to manage a backlog of PR reviews. Invokes the pr-review skill to do the actual reviewing.
 argument-hint: |
-  re-review [N...] | show-latest | review-latest [--limit 10] | sync | board | submit | watch | cleanup | open [N...]
+  re-review [N...] | show-latest | approved | review-latest [--limit 10] | sync | board | submit | watch | cleanup | open [N...]
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, Agent, Monitor, Skill
 ---
 
@@ -80,6 +80,7 @@ Match the user's words — natural phrasing is expected, not just flags.
 |---|---|
 | "re-review", "what did the authors do with my feedback", "check my open reviews" | [Re-review](#re-review) |
 | "show latest", "what should I review next", "show-latest" | [Show latest](#show-latest) |
+| "show approved", "which PRs have I approved", "scan approved PRs" | `node "$PRT" approved` |
 | "review latest", "review the top 10" | [Review latest](#review-latest) |
 | "sync", "which PRs am I mid-review on" | `node "$PRT" sync` then `node "$PRT" board` |
 | "board", "what needs my attention" | `node "$PRT" board` |

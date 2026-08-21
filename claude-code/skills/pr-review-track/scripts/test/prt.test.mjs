@@ -17,6 +17,7 @@ import { scorePr, rankCandidates } from '../lib/rank.mjs';
 import { securityLint, diffFingerprint } from '../lib/submit.mjs';
 import { analyzePr, recommendEvent, assessNudge, THREAD_STATES } from '../lib/analyze.mjs';
 import { renderNudgeFile } from '../lib/render.mjs';
+import { isApprovedByReviewer } from '../lib/github.mjs';
 
 // --------------------------------------------------------------- action file
 
@@ -36,6 +37,21 @@ event: COMMENT
 Summary text.
 <!-- /prt -->
 `;
+
+test('approved scan uses the reviewer latest substantive verdict', () => {
+  const pr = {
+    latestOpinionatedReviews: { nodes: [
+      { author: { login: 'me' }, state: 'APPROVED', submittedAt: '2026-01-01T00:00:00Z' },
+      { author: { login: 'other' }, state: 'CHANGES_REQUESTED', submittedAt: '2026-01-02T00:00:00Z' },
+    ] },
+    reviews: { nodes: Array.from({ length: 60 }, (_, i) => ({
+      author: { login: 'me' }, state: 'COMMENTED', submittedAt: `2026-02-01T00:00:${String(i).padStart(2, '0')}Z`,
+    })) },
+  };
+  assert.equal(isApprovedByReviewer(pr, 'me'), true, 'thread-reply artifacts do not hide the approval');
+  pr.latestOpinionatedReviews.nodes[0].state = 'DISMISSED';
+  assert.equal(isApprovedByReviewer(pr, 'me'), false, 'a dismissed approval is not current');
+});
 
 test('status is read from and written to line 1', () => {
   assert.equal(parseStatus(MINIMAL), 'draft');

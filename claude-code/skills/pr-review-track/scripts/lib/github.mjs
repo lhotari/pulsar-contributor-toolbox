@@ -24,6 +24,9 @@ const PR_DETAIL = `
   reviews(last: 60) {
     nodes { author { login } state submittedAt url commit { oid } body }
   }
+  latestOpinionatedReviews(first: 100) {
+    nodes { author { login } state submittedAt url commit { oid } }
+  }
   reviewThreads(first: 100) {
     nodes {
       id isResolved isOutdated isCollapsed path line startLine originalLine diffSide
@@ -112,6 +115,27 @@ export async function searchEngagedPrs(repo, login) {
     }
   }
   return numbers;
+}
+
+/** Open PRs whose configured reviewer currently has an APPROVED verdict on them. */
+export async function approvedPrs(repo, login) {
+  const numbers = await searchPrNumbers(`repo:${repo} is:pr is:open reviewed-by:${login} -author:${login}`);
+  const details = await fetchPrsBatch(repo, numbers, { detail: true });
+  return numbers
+    .map((number) => details.get(number))
+    .filter((pr) => pr && isApprovedByReviewer(pr, login))
+    .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+}
+
+/** Whether the reviewer's latest non-comment verdict is still APPROVED. */
+export function isApprovedByReviewer(pr, login) {
+  // `latestOpinionatedReviews` is one current verdict per reviewer and does not
+  // get crowded out by GitHub's empty COMMENTED artifacts for thread replies.
+  const source = pr.latestOpinionatedReviews?.nodes ?? pr.reviews?.nodes ?? [];
+  const verdicts = source
+    .filter((r) => r.author?.login === login && r.state !== 'COMMENTED' && r.submittedAt)
+    .sort((a, b) => String(b.submittedAt).localeCompare(String(a.submittedAt)));
+  return verdicts[0]?.state === 'APPROVED';
 }
 
 /** Paginate a GitHub code-search-style issue search, returning PR numbers. */

@@ -16,7 +16,7 @@ import { spawn } from 'node:child_process';
 
 import { viewerLogin, resolveRepo, rateLimit, GhError } from './lib/gh.mjs';
 import {
-  fetchPr, fetchPrsBatch, searchEngagedPrs, recentOpenPrs, prDiff, compareDiff,
+  fetchPr, fetchPrsBatch, searchEngagedPrs, recentOpenPrs, approvedPrs, prDiff, compareDiff,
 } from './lib/github.mjs';
 import { analyzePr, fetchDelta, summarizeCounts, THREAD_STATES } from './lib/analyze.mjs';
 import { rankCandidates, scoreTracked } from './lib/rank.mjs';
@@ -110,6 +110,7 @@ COMMANDS.help = () => {
     sync [--limit N] [--prune]             reconcile GitHub <-> local tracking baseline
     board [--bucket B]                     the attention board (also writes BOARD.md)
     list [--status S]                      tracked PRs, one line each
+    approved                               open PRs currently approved by me
 
   Per PR
     track <N>...                           start tracking, fetch the baseline
@@ -226,6 +227,32 @@ COMMANDS.latest = async () => {
       say(`    ${r.reasons.slice(0, 4).join(', ')}`);
       say(`    ${r.url}`);
     }
+  }
+};
+
+COMMANDS.approved = async () => {
+  const base = await context();
+  const prs = await approvedPrs(base.repo, base.login);
+  const rows = prs.map((pr) => ({
+    number: pr.number,
+    title: pr.title,
+    url: pr.url,
+    author: pr.author?.login ?? null,
+    updatedAt: pr.updatedAt,
+  }));
+  emit({ repo: base.repo, reviewer: base.login, rows });
+  if (!JSON_OUT) {
+    if (!rows.length) {
+      say(`No open PRs in ${base.repo} are currently approved by ${base.login}.`);
+      return;
+    }
+    say(`Open PRs currently approved by ${base.login}:`);
+    say('');
+    for (const row of rows) {
+      say(`- [#${row.number}](${row.url}) ${row.title}${row.author ? ` — @${row.author}` : ''}`);
+    }
+    say('');
+    say(`${rows.length} approved PR(s).`);
   }
 };
 
