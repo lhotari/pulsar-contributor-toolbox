@@ -1,6 +1,6 @@
 ---
 name: pr-review
-description: Review a GitHub PR locally using its metadata and diff as context. Adapts the pipeline to how much Claude allowance is left — a full multi-model consensus review when there is headroom, and a Codex-led review adjudicated inline by Opus when there is not, since Codex bills against a separate quota. Use when asked to review a pull request, check a PR, or analyze a PR. Outputs findings to terminal only — never posts GitHub comments. Pass --out to also emit machine-readable findings for the pr-review-track skill, --since to review only what changed after a given commit, and --tier to override the budget decision.
+description: Review a GitHub PR locally using its metadata and diff as context. In Claude Code, adapts a Fable-and-Codex consensus pipeline to the remaining Claude allowance. In Codex, runs a Codex-only review and never invokes Claude models. Use when asked to review a pull request, check a PR, or analyze a PR. Outputs findings to terminal only — never posts GitHub comments. Pass --out to also emit machine-readable findings for the pr-review-track skill, --since to review only what changed after a given commit, and --tier to override the Claude Code budget decision.
 argument-hint: |
   <PR_NUMBER> [--repo owner/repo] [--prompt "custom instructions"] [--tier full|standard|lean|codex|solo] [--since <sha>] [--out <dir>]
 allowed-tools: Bash(gh:*), Bash(git:*), Bash(node:*), Bash(mkdir:*), Read, Write, Glob, Grep, Agent
@@ -11,8 +11,22 @@ allowed-tools: Bash(gh:*), Bash(git:*), Bash(node:*), Bash(mkdir:*), Read, Write
 Review a GitHub pull request locally using both its metadata and diff as context.
 Output all findings to the terminal only. Do not post any comments to GitHub.
 
-The pipeline is **multi-model by design and budget-aware by necessity**. Two facts
-shape it:
+Select the pipeline from the host that loaded this skill:
+
+- **Running in Codex:** use the Codex-only pipeline below. Never invoke Claude
+  Opus, Fable, the Claude `Agent` tool, or the Claude Code Codex companion. Do
+  not run the Claude allowance script. This rule also applies when `--tier
+  full` or `--tier standard` was passed by `pr-review-track`; those flags may
+  change review depth, but never the model family.
+- **Running in Claude Code:** use the budget-aware Fable/Codex pipeline. The
+  Fable ↔ Codex cross-review described here applies only in Claude Code.
+
+Do not identify the host from the repository path or the name of the skill
+directory. The current agent runtime and its available native tools determine
+the host.
+
+The Claude Code pipeline is **multi-model by design and budget-aware by
+necessity**. Two facts shape it:
 
 - **Codex bills against a separate quota.** When the Claude allowance is under
   pressure, moving work to Codex costs nothing that is scarce.
@@ -21,7 +35,24 @@ shape it:
   price. So "let Opus do it inline" is usually the *cheaper* option — the
   intuition that the bigger model always costs more does not hold here.
 
-## Step 0 — decide how much Claude to spend
+## Step 0 — select review depth
+
+### Codex host
+
+Skip the budget script and use tier `codex`. Perform one thorough review in the
+main session. When subagents are available, delegate an independent review to
+one Codex subagent and use the main session to verify and adjudicate its
+findings. For a large or high-risk PR, a second Codex subagent may independently
+look for missed bugs or try to refute the candidates; run independent reviewers
+in parallel. Give every subagent the same brief and require read-only work.
+
+`--solo` disables subagents. Other `--tier` values are only review-depth hints
+in Codex: `full`/`standard` request independent Codex review when available and
+`lean`/`codex` permit one reviewer plus main-session adjudication. Regardless of
+the flag, report the effective tier as `codex` (or `solo`) and list only the
+Codex reviewers that actually ran.
+
+### Claude Code host
 
 ```bash
 BUDGET=~/.claude/skills/pr-review/scripts/budget.mjs
@@ -45,8 +76,8 @@ script is missing or errors, use `standard` and note it.
 | `codex` | **Codex only** | Codex, varied effort as the adversary | Opus adjudicates a trimmed brief |
 | `solo` | none — one Opus pass inline | none | Opus inline only |
 
-`solo` is what `--solo` selects, and the fallback when subagents are unavailable
-(e.g. running inside Codex).
+`solo` is what `--solo` selects, and the fallback when the required reviewers
+are unavailable.
 
 **Take a tier down, never up**, when the PR is small: a diff under ~40 changed
 lines, or one touching only docs, version catalogs or generated files, does not
@@ -130,8 +161,12 @@ a reviewer that did not see a file cannot have reviewed it.
 
 ### 3. Round 1 — independent review
 
-**At `full` and `standard`: launch both reviewers in the same message** so they
-actually run in parallel. At `lean` and `codex`, run Codex alone — skip Reviewer A.
+On a **Codex host**, use native Codex subagents as described in step 0 and skip
+the rest of this section. Do not resolve or invoke the Claude Code companion.
+
+On a **Claude Code host**, at `full` and `standard`, launch both reviewers in the
+same message so they actually run in parallel. At `lean` and `codex`, run Codex
+alone — skip Reviewer A.
 
 **Reviewer A — Claude Fable** (`full` and `standard` only):
 
@@ -208,8 +243,10 @@ If a custom `--prompt` was provided, focus the review on that instruction instea
 
 ### 5. Rounds 2–3 — synthesize, then cross-validate
 
-**Round 2 — candidate review (Opus, in the main session; do not delegate).**
-The main session already holds this context; a subagent would pay to load it again.
+**Round 2 — candidate review (the host's main session; do not delegate).**
+In Claude Code this is Opus; in Codex it is the current Codex model. Never call
+Opus from a Codex host. The main session already holds this context; a subagent
+would pay to load it again.
 Merge the reviews: dedupe findings that describe the same defect, keep the sharpest
 evidence of each, and record which reviewer(s) raised it. Verify every finding against
 the actual diff and code yourself — drop anything you cannot anchor to a real code path,
@@ -217,6 +254,9 @@ keeping the reason. Write the result to `$WORK/candidate.md`.
 
 **Round 3 — cross-validation.** Who validates depends on the tier:
 
+- Codex host — a native Codex subagent, when warranted and available. Frame the
+  pass to refute the candidates and find material misses. Never use Fable or
+  Opus.
 - `full` — both reviewers, concurrently, neither seeing the other's verdict.
 - `standard` — Codex only.
 - `lean` / `codex` — Codex only, a second pass explicitly framed to *refute*:
@@ -250,9 +290,10 @@ Adjudicate in the main session, with the code open:
 With a single validator (`standard` and below) a lone REFUTE is not a majority —
 re-read the code and decide, rather than deferring to it.
 
-Run at most **one** extra targeted round, and only at `full`/`standard`, and only if
-cross-validation surfaced a new `[BUG]` or `[SECURITY]` finding — scope it to that
-finding alone. Then stop.
+Run at most **one** extra targeted round, and only at `full`/`standard` in Claude
+Code or when a Codex-hosted review used independent reviewers, and only if
+cross-validation surfaced a new `[BUG]` or `[SECURITY]` finding — scope it to
+that finding alone. Then stop.
 
 Finally, clean up:
 
@@ -326,7 +367,7 @@ Rules that matter:
 ### Findings
 1. [SEVERITY] <finding> — <file>:<line if known>
    <explanation + failure scenario>
-   Agreement: both / Fable only / Codex only  ·  Cross-validation: confirmed / refuted / single validator
+   Agreement: <which reviewers raised it>  ·  Cross-validation: confirmed / refuted / single validator
 
 ...
 
@@ -336,7 +377,8 @@ Rules that matter:
 No issues found. ✓  (if nothing survives)
 ```
 
-The **Tier** line is not decoration. A `lean` review saw one independent reviewer, not
-two, and the reader is entitled to know that before trusting it. Never present a thinner
-review as a full consensus one — and if the diff was capped or the worktree was
-unavailable, say that here too.
+The **Tier** line is not decoration. A `lean` Claude Code review saw one
+independent reviewer, not two; a Codex-hosted review used only the Codex
+reviewers listed. The reader is entitled to know that before trusting it. Never
+present a thinner review as a full consensus one — and if the diff was capped
+or the worktree was unavailable, say that here too.
