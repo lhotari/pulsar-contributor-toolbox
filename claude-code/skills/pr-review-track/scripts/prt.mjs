@@ -20,7 +20,7 @@ import {
 } from './lib/github.mjs';
 import { analyzePr, fetchDelta, summarizeCounts, THREAD_STATES } from './lib/analyze.mjs';
 import { rankCandidates, scoreTracked } from './lib/rank.mjs';
-import { renderActionFile, bucketOf, BUCKETS } from './lib/render.mjs';
+import { renderActionFile, renderNudgeFile, bucketOf, BUCKETS } from './lib/render.mjs';
 import { parseDiff, commentableAnchors, validateAnchor } from './lib/diff.mjs';
 import {
   parseActionFile, parseStatus, setStatus, contentHash, appendLog, planActions,
@@ -78,6 +78,14 @@ async function context() {
   return { root, repo, cfg, login: cfg.reviewer };
 }
 
+function nudgeOpts(base) {
+  return {
+    nudgeAfterDays: base.cfg.nudgeAfterDays,
+    nudgeCooldownDays: base.cfg.nudgeCooldownDays,
+    nudgeMaxAgeDays: base.cfg.nudgeMaxAgeDays,
+  };
+}
+
 function prCtx(base, number) {
   assertSafeNumber(number);
   const prPath = store.prDir(base.root, base.repo, number);
@@ -112,6 +120,7 @@ COMMANDS.help = () => {
     draft <N> [--findings f.json] [--kind initial|re-review]
                                            write review.md (never over a protected file)
     open <N>...                            open review.md in the configured editor
+    nudge [<N>...] [--limit 10]            draft reminders for unanswered feedback
 
   Posting  (the only commands that write to GitHub)
     validate <N>...                        parse + preflight without posting
@@ -249,7 +258,7 @@ COMMANDS.sync = async () => {
     const wasTracked = tracked.has(number);
     if (!wasTracked && !remote.has(number)) continue;
 
-    const analysis = analyzePr(pr, base.login);
+    const analysis = analyzePr(pr, base.login, nudgeOpts(base));
     const prev = wasTracked ? store.readState(base.root, base.repo, number) : null;
     const state = {
       schema: 1,
@@ -295,7 +304,7 @@ COMMANDS.track = async () => {
   for (const n of numbers) {
     const pr = await fetchPr(base.repo, n);
     if (!pr) { out.push({ number: n, error: 'not found' }); continue; }
-    const analysis = analyzePr(pr, base.login);
+    const analysis = analyzePr(pr, base.login, nudgeOpts(base));
     store.writeState(base.root, base.repo, n, {
       schema: 1,
       repo: base.repo,
@@ -331,7 +340,7 @@ COMMANDS.refresh = async () => {
     const pr = details.get(n);
     if (!pr) continue;
     const prev = store.readState(base.root, base.repo, n);
-    const analysis = analyzePr(pr, base.login);
+    const analysis = analyzePr(pr, base.login, nudgeOpts(base));
     store.writeState(base.root, base.repo, n, {
       ...(prev ?? {}),
       schema: 1,
@@ -368,9 +377,9 @@ COMMANDS.context = async () => {
   const pr = await fetchPr(base.repo, n);
   if (!pr) die(`${base.repo}#${n} not found`);
 
-  const analysis0 = analyzePr(pr, base.login);
+  const analysis0 = analyzePr(pr, base.login, nudgeOpts(base));
   const delta = await fetchDelta(base.repo, { reviewedOid: analysis0.myLastReview?.oid, headOid: pr.headRefOid });
-  const analysis = analyzePr(pr, base.login, { deltaDiff: delta.diff, newCommits: delta.commits });
+  const analysis = analyzePr(pr, base.login, { ...nudgeOpts(base), deltaDiff: delta.diff, newCommits: delta.commits });
 
   const fullDiff = await prDiff(base.repo, n);
   const files = parseDiff(fullDiff);
@@ -410,7 +419,7 @@ COMMANDS.diff = async () => {
   if (argv.flags.since || argv.flags.delta) {
     const pr = await fetchPr(base.repo, n);
     if (!pr) die(`${base.repo}#${n} not found`);
-    const a = analyzePr(pr, base.login);
+    const a = analyzePr(pr, base.login, nudgeOpts(base));
     const since = argv.flags.since === true || !argv.flags.since ? a.myLastReview?.oid : argv.flags.since;
     if (!since) die('no previous review of mine to diff against; omit --since for the full diff');
     process.stdout.write(await compareDiff(base.repo, since, pr.headRefOid));
@@ -466,9 +475,9 @@ COMMANDS.draft = async () => {
 
   const pr = await fetchPr(base.repo, n);
   if (!pr) die(`${base.repo}#${n} not found`);
-  const a0 = analyzePr(pr, base.login);
+  const a0 = analyzePr(pr, base.login, nudgeOpts(base));
   const delta = await fetchDelta(base.repo, { reviewedOid: a0.myLastReview?.oid, headOid: pr.headRefOid });
-  const analysis = analyzePr(pr, base.login, { deltaDiff: delta.diff, newCommits: delta.commits });
+  const analysis = analyzePr(pr, base.login, { ...nudgeOpts(base), deltaDiff: delta.diff, newCommits: delta.commits });
   const fullDiff = await prDiff(base.repo, n);
 
   // Anchors are validated at generation time as well as at submit time, so the
@@ -530,6 +539,95 @@ COMMANDS.draft = async () => {
   writeBoard(base);
   emit({ number: n, file: target, generation });
   say(`drafted ${target}`);
+};
+
+/**
+ * Propose reminders for authors who have not answered points I raised.
+ * Produces the same kind of draft as everything else: nothing is sent until a
+ * human reads it and sets `Status: ready`.
+ */
+COMMANDS.nudge = async () => {
+  const base = await context();
+  const explicit = argv._.slice(1).map(assertSafeNumber);
+  const numbers = explicit.length ? explicit : store.listTracked(base.root, base.repo);
+  const limit = Number(argv.flags.limit ?? 10);
+
+  const details = await fetchPrsBatch(base.repo, numbers, {
+    detail: true,
+    onProgress: (d, t) => { if (!JSON_OUT) process.stderr.write(`\r[prt] checking ${d}/${t} batches…`); },
+  });
+  if (!JSON_OUT) process.stderr.write('\r' + ' '.repeat(40) + '\r');
+
+  const due = [];
+  const skipped = [];
+  for (const n of numbers) {
+    const pr = details.get(n);
+    if (!pr) continue;
+    const analysis = analyzePr(pr, base.login, nudgeOpts(base));
+    if (!analysis.nudge?.due) {
+      skipped.push({
+        number: n,
+        author: analysis.author,
+        why: analysis.nudge?.reasonNotDue ?? 'not due',
+        abandoned: !!analysis.nudge?.abandoned,
+        oldestDays: analysis.nudge?.oldestUntouchedDays ?? null,
+      });
+      continue;
+    }
+    const existing = store.readActionFile(base.root, base.repo, n);
+    const st = existing ? parseStatus(existing) : null;
+    if (existing && PROTECTED_STATUSES.has(st) && !argv.flags.force) {
+      skipped.push({ number: n, why: `an action file is already "${st}"` });
+      continue;
+    }
+    due.push({ number: n, analysis });
+  }
+
+  const batch = explicit.length ? due : due.slice(0, limit);
+  const written = [];
+  for (const { number: n, analysis } of batch) {
+    const prev = store.readState(base.root, base.repo, n);
+    const generation = (prev?.tracking?.generation ?? 0) + 1;
+    if (store.readActionFile(base.root, base.repo, n)) store.archiveActionFile(base.root, base.repo, n);
+    const text = renderNudgeFile({ repo: base.repo, analysis, generation, reviewerLogin: base.login });
+    store.ensurePrDir(base.root, base.repo, n);
+    store.writeAtomic(store.actionFilePath(base.root, base.repo, n), text);
+    store.writeState(base.root, base.repo, n, {
+      ...(prev ?? {}), schema: 1, repo: base.repo, number: n,
+      title: analysis.title, url: analysis.url, author: analysis.author,
+      authorAssociation: analysis.authorAssociation, state: analysis.state,
+      isDraft: analysis.isDraft, headOid: analysis.headOid, baseRefName: analysis.baseRefName,
+      updatedAt: analysis.updatedAt, lastSyncAt: new Date().toISOString(), analysis,
+      tracking: { ...(prev?.tracking ?? { addedAt: new Date().toISOString(), addedBy: 'nudge' }), generation },
+    });
+    written.push({
+      number: n,
+      author: analysis.author,
+      unanswered: analysis.nudge.untouchedCount,
+      oldestDays: analysis.nudge.oldestUntouchedDays,
+      file: store.actionFilePath(base.root, base.repo, n),
+    });
+  }
+  writeBoard(base);
+  emit({ repo: base.repo, drafted: written, skipped, dueTotal: due.length });
+  if (!JSON_OUT) {
+    if (!written.length) {
+      say(`no reminders are due (checked ${numbers.length} PR(s), threshold ${base.cfg.nudgeAfterDays} days)`);
+    } else {
+      say(`drafted ${written.length} reminder(s)${due.length > written.length ? ` of ${due.length} due` : ''}:`);
+      for (const w of written) {
+        say(`  #${w.number}  ${w.author}  ${w.unanswered} unanswered, oldest ${w.oldestDays}d`);
+      }
+      say('');
+      say('Nothing is sent. Read each one, edit it, then set line 1 to "Status: ready".');
+    }
+    const abandoned = skipped.filter((x) => x.abandoned);
+    if (abandoned.length) {
+      say('');
+      say(`${abandoned.length} PR(s) are past the ${base.cfg.nudgeMaxAgeDays}-day limit — these need a decision, not a reminder:`);
+      for (const x of abandoned) say(`  #${x.number}  ${x.author}  oldest point ${x.oldestDays}d`);
+    }
+  }
 };
 
 COMMANDS.open = async () => {

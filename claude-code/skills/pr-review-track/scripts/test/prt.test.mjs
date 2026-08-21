@@ -15,7 +15,8 @@ import { parseDiff, commentableAnchors, validateAnchor, touchesAnchor } from '..
 import { renderActionFile, bucketOf } from '../lib/render.mjs';
 import { scorePr, rankCandidates } from '../lib/rank.mjs';
 import { securityLint, diffFingerprint } from '../lib/submit.mjs';
-import { analyzePr, recommendEvent, THREAD_STATES } from '../lib/analyze.mjs';
+import { analyzePr, recommendEvent, assessNudge, THREAD_STATES } from '../lib/analyze.mjs';
+import { renderNudgeFile } from '../lib/render.mjs';
 
 // --------------------------------------------------------------- action file
 
@@ -841,6 +842,96 @@ test('a range is validated against start-side and may not cross a hunk', () => {
 
   // start must precede end
   assert.equal(validateAnchor(a, { file: 'src/Modified.java', line: 13, endLine: 11, side: 'RIGHT' }).ok, false);
+});
+
+// --------------------------------------------------------------------- nudge
+
+const daysAgo = (n) => new Date(Date.now() - n * 86400000).toISOString();
+
+/** A PR with one thread of mine that nobody has answered for `age` days. */
+function unansweredPr({ age = 5, author = 'someone', state = 'OPEN', isDraft = false, extraComments = [] } = {}) {
+  return prFixture({
+    state,
+    isDraft,
+    author: { login: author },
+    reviews: { nodes: [{ author: { login: 'me' }, state: 'CHANGES_REQUESTED', body: 'please fix', submittedAt: daysAgo(age), commit: { oid: 'head'.padEnd(40, '0') } }] },
+    reviewThreads: { nodes: [thread({
+      comments: { nodes: [{ databaseId: 1, author: { login: 'me' }, body: 'my point', createdAt: daysAgo(age) }] },
+    })] },
+    comments: { nodes: extraComments },
+  });
+}
+
+function nudgeOf(pr, opts = {}) {
+  return analyzePr(pr, 'me', { nudgeAfterDays: 2, nudgeCooldownDays: 7, nudgeMaxAgeDays: 90, ...opts }).nudge;
+}
+
+test('a point unanswered past the threshold, with me quiet, is due', () => {
+  const n = nudgeOf(unansweredPr({ age: 9 }));
+  assert.equal(n.due, true, n.reasonNotDue);
+  assert.equal(n.untouchedCount, 1);
+  assert.equal(n.oldestUntouchedDays, 9);
+});
+
+test('nothing is due before the threshold', () => {
+  const n = nudgeOf(unansweredPr({ age: 1 }));
+  assert.equal(n.due, false);
+  assert.match(n.reasonNotDue, /unanswered for 2\+ days/);
+});
+
+test('a push since my review means re-review, not a reminder', () => {
+  // The thread is old and unanswered, but the author has been working.
+  const pr = unansweredPr({ age: 30 });
+  pr.headRefOid = 'moved'.padEnd(40, 'f');
+  const n = nudgeOf(pr);
+  assert.equal(n.due, false);
+  assert.match(n.reasonNotDue, /pushed since my review/);
+});
+
+test('the cooldown stops a second reminder, and reads GitHub rather than local state', () => {
+  // I said something on the PR yesterday, so I am not owed a reply yet.
+  const pr = unansweredPr({ age: 30, extraComments: [{ author: { login: 'me' }, body: 'ping', createdAt: daysAgo(1) }] });
+  const n = nudgeOf(pr);
+  assert.equal(n.due, false);
+  assert.match(n.reasonNotDue, /cooldown is 7/);
+  assert.equal(n.daysSinceMyLastWord, 1);
+});
+
+test('an ancient point needs a decision, not a reminder', () => {
+  const n = nudgeOf(unansweredPr({ age: 400 }));
+  assert.equal(n.due, false);
+  assert.equal(n.abandoned, true);
+  assert.match(n.reasonNotDue, /needs a decision, not a reminder/);
+});
+
+test('drafts, closed PRs and my own PRs are never nudged', () => {
+  assert.match(nudgeOf(unansweredPr({ age: 30, isDraft: true })).reasonNotDue, /draft/);
+  assert.match(nudgeOf(unansweredPr({ age: 30, state: 'CLOSED' })).reasonNotDue, /closed/);
+  assert.match(nudgeOf(unansweredPr({ age: 30, author: 'me' })).reasonNotDue, /my own PR/);
+});
+
+test('a thread the author replied to is not "unanswered"', () => {
+  const pr = unansweredPr({ age: 30 });
+  pr.reviewThreads.nodes[0].comments.nodes.push({ databaseId: 2, author: { login: 'someone' }, body: 'done', createdAt: daysAgo(3) });
+  const n = nudgeOf(pr);
+  assert.equal(n.untouchedCount, 0);
+  assert.equal(n.due, false);
+});
+
+test('a nudge file parses, and posts exactly one comment and no review', () => {
+  const a = analyzePr(unansweredPr({ age: 9 }), 'me', { nudgeAfterDays: 2, nudgeCooldownDays: 7 });
+  const text = renderNudgeFile({ repo: 'apache/pulsar', analysis: a, reviewerLogin: 'me' });
+
+  assert.equal(text.split('\n')[0], 'Status: draft', 'a nudge is a proposal like everything else');
+  const p = parseActionFile(text);
+  assert.deepEqual(p.errors, [], p.errors.join('; '));
+  assert.deepEqual(planActions(p).map((x) => x.kind), ['issue-comment']);
+  assert.equal(p.event, null, 'a nudge is not a review');
+
+  const body = p.issueComments[0].body;
+  assert.match(body, /@someone/);
+  assert.match(body, /a\/B\.java|src\/Modified\.java|Consumer\.java|\.java/, 'it names the actual open point');
+  assert.equal(/\bplease\s+(fix|address|respond)\b/i.test(body), false, 'the default wording must not read as chasing');
 });
 
 // ------------------------------------------------------------------ security

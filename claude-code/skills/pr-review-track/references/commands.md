@@ -55,6 +55,7 @@ urgent first:
 - `resolved-without-change` — marked done with no code behind it; verify
 - `new-commits-to-check` — the head moved since my review
 - `ready-to-approve` — every point I raised has a change behind it
+- `nudge-due` — unanswered for days, and I have been quiet too
 - `waiting-for-author` — my points are still open and untouched
 - `ci-blocking` — red CI; the author still has work
 - `stale` — nobody has touched it in months
@@ -100,6 +101,21 @@ arrives as `post: false` with the reason attached rather than wasting your edit.
 
 Opens the action files in the configured editor (`code -r` by default). With no
 numbers, opens everything in `draft`, `blocked`, `error`, or `partial`.
+
+### `nudge [<N>…] [--limit 10] [--force]`
+
+Drafts reminders for authors who have not answered points you raised. Produces
+an ordinary action file containing a single `prt:issue-comment` block — one
+notification for the author rather than one per thread — at `Status: draft`.
+
+Proposed only when a thread of yours has gone unanswered for `nudgeAfterDays`
+(2), the head has not moved since your review, you have said nothing on the PR
+within `nudgeCooldownDays` (7), and the PR is open, not a draft, and not yours.
+The cooldown is derived from GitHub rather than local state, so it holds across
+machines and survives a lost tracking directory.
+
+PRs whose oldest unanswered point exceeds `nudgeMaxAgeDays` (90) are listed
+separately and not drafted — they need a decision, not a reminder.
 
 ## Posting
 

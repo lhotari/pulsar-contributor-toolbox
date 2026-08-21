@@ -213,6 +213,11 @@ Not a review — a normal comment on the PR conversation.
 <!-- /prt -->
 ```
 
+This is what `prt nudge` produces: a single reminder naming the points an author
+has not answered, rather than a reply in each thread, so it costs them one
+notification. It is gated exactly like every other action — drafted, edited by
+you, and posted only once line 1 says `ready`.
+
 ### `prt:context` / `prt:notes` / `prt:log`
 
 Never posted. `context` holds the generated evidence, `notes` holds dropped
@@ -274,6 +279,9 @@ Disable with `"securityLint": false` in `config.json` — but consider why first
   "editorCmd": "code",
   "editorArgs": ["-r"],
   "priorityAuthors": ["merlimat"],
+  "nudgeAfterDays": 2,
+  "nudgeCooldownDays": 7,
+  "nudgeMaxAgeDays": 90,
   "ignoreAuthors": ["dependabot[bot]", "github-actions[bot]", "renovate[bot]"],
   "latestLimit": 10,
   "watchIntervalSeconds": 20,

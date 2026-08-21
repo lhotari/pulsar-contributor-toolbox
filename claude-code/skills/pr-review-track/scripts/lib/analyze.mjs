@@ -46,7 +46,8 @@ function idOf(comment) {
   return v === null || v === undefined ? null : String(v);
 }
 
-export function analyzePr(pr, login, { deltaDiff = null, newCommits = [], reviewedOidHint = null } = {}) {
+export function analyzePr(pr, login, options = {}) {
+  const { deltaDiff = null, newCommits = [], reviewedOidHint = null } = options;
   const mine = myReviews(pr, login);
   // GitHub creates an empty-bodied COMMENTED review object for every standalone
   // reply to a thread — including the ones this tool posts. Treating one of
@@ -105,6 +106,10 @@ export function analyzePr(pr, login, { deltaDiff = null, newCommits = [], review
       // that moved on yesterday.
       lastCommentId: idOf(last),
       myLastComment: myLast ? { body: myLast.body, createdAt: myLast.createdAt, url: myLast.url } : null,
+      // How long this point of mine has gone unanswered. Only meaningful for a
+      // thread nobody has touched; that is the only place it is read.
+      daysSinceMyLastComment: myLast ? Math.floor((Date.now() - Date.parse(myLast.createdAt)) / 86400000) : null,
+      url: (comments[0] ?? {}).url ?? null,
       lastComment: last
         ? { author: last.author?.login, body: last.body, createdAt: last.createdAt, url: last.url }
         : null,
@@ -128,6 +133,7 @@ export function analyzePr(pr, login, { deltaDiff = null, newCommits = [], review
   for (const t of threads) counts[t.state] = (counts[t.state] ?? 0) + 1;
 
   const headMoved = !!reviewedOid && reviewedOid !== headOid;
+  const nudge = assessNudge({ pr, login, threads, headMoved, options });
   const needsAttention =
     headMoved ||
     (counts[THREAD_STATES.AWAITING_MY_REPLY] ?? 0) > 0 ||
@@ -161,6 +167,7 @@ export function analyzePr(pr, login, { deltaDiff = null, newCommits = [], review
     newCommits,
     threads,
     threadCounts: counts,
+    nudge,
     newIssueComments: newIssueComments.map((c) => ({ author: c.author?.login, createdAt: c.createdAt, url: c.url, body: c.body })),
     newReviewsByOthers: newReviewsByOthers.map((r) => ({ author: r.author?.login, state: r.state, submittedAt: r.submittedAt })),
     needsAttention,
@@ -223,4 +230,82 @@ export function summarizeCounts(counts) {
     .sort((a, b) => attentionRank(a[0]) - attentionRank(b[0]))
     .map(([k, v]) => `${v} ${k}`)
     .join(', ') || 'none';
+}
+
+
+/**
+ * Should the author be reminded about points they have not answered?
+ *
+ * The bar is deliberately conservative. A nudge costs the author a
+ * notification and costs me goodwill if it is wrong, so every one of these
+ * conditions has to hold:
+ *
+ *   - at least one thread of mine has had no reply and no code change at its
+ *     anchor for longer than `afterDays`;
+ *   - the head has not moved since I reviewed — if the author pushed, they are
+ *     working, and the right response is to re-review, not to prod;
+ *   - I have not said anything on this PR inside the cooldown. This is the real
+ *     "do not nag" rule, and deriving it from GitHub rather than local state
+ *     means it holds across machines and survives a lost tracking directory;
+ *   - the PR is open, not a draft, and not mine.
+ *
+ * The result is a proposal either way: `due` PRs get a draft the human edits
+ * and arms, and `reasonNotDue` explains the silence for the ones that do not.
+ */
+export function assessNudge({ pr, login, threads, headMoved, options = {} }) {
+  const afterDays = options.nudgeAfterDays ?? 2;
+  const cooldownDays = options.nudgeCooldownDays ?? 7;
+  // Past this, a reminder stops being follow-up and becomes noise. A comment
+  // nobody answered in three months is not waiting on a nudge; the PR needs
+  // closing, reassigning, or a fresh review — decisions a person makes.
+  const maxAgeDays = options.nudgeMaxAgeDays ?? 90;
+  const now = Date.now();
+  const daysAgo = (iso) => (iso ? (now - Date.parse(iso)) / 86400000 : Infinity);
+
+  const untouched = threads.filter(
+    (t) => t.state === THREAD_STATES.UNTOUCHED && (t.daysSinceMyLastComment ?? 0) >= afterDays,
+  );
+
+  // The most recent thing I said anywhere on this PR: a review, an issue
+  // comment, or a thread comment.
+  const mySignals = [
+    ...(pr.reviews?.nodes ?? []).filter((r) => r.author?.login === login).map((r) => r.submittedAt),
+    ...(pr.comments?.nodes ?? []).filter((c) => c.author?.login === login).map((c) => c.createdAt),
+    ...threads.map((t) => t.myLastComment?.createdAt).filter(Boolean),
+  ].filter(Boolean).sort();
+  const lastWordByMe = mySignals[mySignals.length - 1] ?? null;
+  const quietDays = daysAgo(lastWordByMe);
+
+  const base = {
+    due: false,
+    afterDays,
+    cooldownDays,
+    untouchedCount: untouched.length,
+    oldestUntouchedDays: untouched.length ? Math.max(...untouched.map((t) => t.daysSinceMyLastComment ?? 0)) : null,
+    daysSinceMyLastWord: Number.isFinite(quietDays) ? Math.floor(quietDays) : null,
+    maxAgeDays,
+    lastWordByMe,
+    threads: untouched.map((t) => ({ id: t.id, path: t.path, line: t.line, url: t.url, days: t.daysSinceMyLastComment })),
+  };
+
+  if (pr.author?.login === login) return { ...base, reasonNotDue: 'it is my own PR' };
+  if (pr.state !== 'OPEN') return { ...base, reasonNotDue: `the PR is ${String(pr.state).toLowerCase()}` };
+  if (pr.isDraft) return { ...base, reasonNotDue: 'the PR is a draft — the author is still working' };
+  if (!untouched.length) {
+    return { ...base, reasonNotDue: `no thread of mine has been unanswered for ${afterDays}+ days` };
+  }
+  if (headMoved) {
+    return { ...base, reasonNotDue: 'the author has pushed since my review — re-review rather than prod' };
+  }
+  if (quietDays < cooldownDays) {
+    return { ...base, reasonNotDue: `I last commented ${Math.floor(quietDays)} day(s) ago; the cooldown is ${cooldownDays}` };
+  }
+  if (base.oldestUntouchedDays > maxAgeDays) {
+    return {
+      ...base,
+      reasonNotDue: `the oldest point is ${base.oldestUntouchedDays} days old (over the ${maxAgeDays}-day limit) — this needs a decision, not a reminder`,
+      abandoned: true,
+    };
+  }
+  return { ...base, due: true, reasonNotDue: null };
 }

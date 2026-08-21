@@ -36,6 +36,15 @@ export const DEFAULT_CONFIG = {
   // A file must be unmodified for this long before the watcher acts on it,
   // so a half-saved edit is never submitted.
   quiesceSeconds: 3,
+  // Remind an author about points they have not answered, once the oldest has
+  // gone unanswered this long.
+  nudgeAfterDays: 2,
+  // ...but never twice inside this many days, and never while I have said
+  // anything at all on the PR more recently than that.
+  nudgeCooldownDays: 7,
+  // Beyond this the PR needs a decision (close, reassign, re-review), not a
+  // reminder. `prt nudge` reports those separately instead of drafting one.
+  nudgeMaxAgeDays: 90,
   // Refuse to post text that looks like an undisclosed vulnerability report.
   // See CLAUDE.md critical rule 6 / SECURITY.md.
   securityLint: true,

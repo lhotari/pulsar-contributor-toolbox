@@ -29,6 +29,19 @@ node "$PRT" doctor      # confirms repo, reviewer, editor, and GraphQL budget
 
 If `doctor` fails, stop and report — every command below depends on it.
 
+**Check the budget before any batch.** Reviewing ten PRs is the most expensive
+thing this skill does, and the `pr-review` pipeline scales itself to what is
+left:
+
+```bash
+node ~/.claude/skills/pr-review/scripts/budget.mjs --json    # cached 60s
+```
+
+Pass the reported `tier` straight through to every `/pr-review` call
+(`--tier <tier>`) so the whole batch runs at one consistent depth rather than
+each PR re-deciding. Tell the user which tier the batch ran at, and at `lean` or
+`codex` say plainly that each PR got one independent reviewer rather than two.
+
 ## Invariants — never violate these
 
 1. **Never post to GitHub yourself.** No `gh pr review`, `gh pr comment`, no
@@ -70,6 +83,7 @@ Match the user's words — natural phrasing is expected, not just flags.
 | "submit", "post the ready ones" | `node "$PRT" submit --all-ready` |
 | "watch", or any batch of drafts | [Arm the watcher](#arm-the-watcher) |
 | "open #26289" | `node "$PRT" open 26289` |
+| "nudge", "remind the authors", "who hasn't replied" | [Nudge](#nudge) |
 
 Anything not listed: run `node "$PRT" help` and route from there. Do not invent
 subcommands.
@@ -108,7 +122,9 @@ and whether the author actually did what was asked.
    And for the delta as a whole: are there **new** problems in the commits since
    the last review? If the delta is substantial (new logic, not just the asked-for
    edits), invoke the **`pr-review` skill** scoped to the delta
-   (`/pr-review <N> --since <reviewed sha>`) and fold its findings in.
+   (`/pr-review <N> --since <reviewed sha> --tier <batch tier>`) and fold its
+   findings in. A delta that is only the edits you asked for does not need the
+   pipeline at all — read it yourself and say so.
 
    Write `cache/findings.json` per [findings-schema.md](references/findings-schema.md),
    then:
@@ -145,12 +161,12 @@ Full first-pass reviews of the top candidates, prepared for editing.
    time and API budget.
 3. `node "$PRT" track <N>…`
 4. For each PR, a subagent that:
-   - invokes the **`pr-review` skill** for the full multi-model consensus review
-     (`/pr-review <N> --out <prdir>/cache`)
+   - invokes the **`pr-review` skill** (`/pr-review <N> --out <prdir>/cache --tier <batch tier>`)
    - converts its findings to `cache/findings.json`
    - `node "$PRT" draft <N> --findings cache/findings.json --kind initial`
 
-   Cap concurrency at ~4: each `pr-review` run spawns its own reviewers.
+   Cap concurrency at ~4: each `pr-review` run spawns its own reviewers. At
+   `lean`/`codex` the concurrency limit that matters is Codex's, not Claude's.
 5. Open the batch, arm the watcher, report.
 
 If `pr-review` degrades (Codex unavailable, no worktree, diff-only), say so per
@@ -176,6 +192,42 @@ Stop it with `TaskStop` when the batch is done.
 
 The watcher dies with the session. For a longer-lived setup, `node "$PRT" watch`
 runs fine in a terminal of its own.
+
+## Nudge
+
+Remind authors who have not answered points you raised. The reminder is an
+action file like any other — it is drafted, you edit it, and nothing is sent
+until you set `Status: ready`.
+
+```bash
+node "$PRT" nudge                 # every tracked PR, drafts up to 10
+node "$PRT" nudge 26277 21498     # specific PRs
+```
+
+A PR is only proposed when **all** of these hold: a thread of yours has gone
+unanswered — no reply, no code change at the anchor — for at least
+`nudgeAfterDays` (2); the head has **not** moved since your review (if the author
+pushed, they are working, and the answer is to re-review, not to prod); you have
+said nothing at all on the PR within `nudgeCooldownDays` (7); and the PR is open,
+not a draft, and not yours.
+
+PRs whose oldest unanswered point is over `nudgeMaxAgeDays` (90) are reported
+separately and **not** drafted. A reminder about a six-month-old comment is not
+follow-up; that PR needs a decision — close it, hand it over, or review it afresh.
+
+When you present these:
+
+- Say how long each point has gone unanswered and link the threads.
+- Point out that the heuristic cannot see an answer given in the PR body, in a
+  commit message, or in a thread the reviewer does not own — so the human should
+  glance at one before arming it.
+- Draft the wording to be **specific and low-pressure**. This is a volunteer
+  project; a reminder that reads as chasing costs goodwill a review cannot buy
+  back. Name the open points, assume the author simply has not got to them, and
+  leave an exit that is not "do the work" — including handing it back.
+
+Never nudge on your own initiative. It is proposed only when the user asks, or
+when a `nudge-due` bucket on the board prompts them to.
 
 ## Cleanup
 

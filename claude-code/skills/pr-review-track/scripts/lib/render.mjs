@@ -352,6 +352,7 @@ export const BUCKETS = [
   'resolved-unverified',       // marked done, and nobody has looked at whether that is true
   'new-commits-to-check',      // head moved since my review
   'ready-to-approve',          // every point I raised has a change behind it
+  'nudge-due',                 // unanswered for days, and I have been quiet too
   'waiting-for-author',        // my points are still open and untouched
   'ci-blocking',               // red CI: the author still has work
   'stale',                     // nobody has touched it in months
@@ -378,7 +379,106 @@ export function bucketOf({ analysis: a, status, staleAfterDays = STALE_AFTER_DAY
   if (idleDays > staleAfterDays) return 'stale';
   if (a.headMoved) return 'new-commits-to-check';
   if (a.ci === 'FAILURE' || a.ci === 'ERROR') return 'ci-blocking';
+  if (a.nudge?.due) return 'nudge-due';
   if ((c[THREAD_STATES.UNTOUCHED] ?? 0) > 0) return 'waiting-for-author';
   if (a.threads?.length) return 'ready-to-approve';
   return 'waiting-for-author';
+}
+
+
+/**
+ * A reminder for an author who has not responded to points I raised.
+ *
+ * The default wording matters more than the mechanism. This is an Apache
+ * project full of volunteers: a nudge that reads as chasing costs goodwill that
+ * a review cannot buy back. So the draft names the specific open points rather
+ * than pinging, assumes the author simply has not got to it, and offers a way
+ * out that is not "do the work" — including handing it back to me. The human
+ * edits it before it goes anywhere, as with every other action.
+ */
+export function renderNudgeFile({ repo, analysis, generation = 1, reviewerLogin, draftText = null }) {
+  const a = analysis;
+  const n = a.nudge ?? {};
+  const out = [];
+
+  out.push('Status: draft');
+  out.push('');
+  out.push(`# Nudge — ${repo}#${a.number}`);
+  out.push('');
+  out.push(`${a.title}`);
+  out.push('');
+  out.push(`<${a.url}>`);
+  out.push('');
+  out.push('<!-- prt:doc');
+  out.push('schema: 1');
+  out.push(`repo: ${repo}`);
+  out.push(`pr: ${a.number}`);
+  out.push('kind: nudge');
+  out.push(`generation: ${generation}`);
+  out.push(`generated: ${new Date().toISOString()}`);
+  out.push(`reviewer: ${reviewerLogin}`);
+  out.push(`head: ${a.headOid}`);
+  out.push(`base-ref: ${a.baseRefName}`);
+  out.push('-->');
+  out.push('');
+
+  out.push('## Why this is being proposed');
+  out.push('');
+  out.push('<!-- prt:context -->');
+  out.push('');
+  out.push('| | |');
+  out.push('|---|---|');
+  out.push(`| Author | ${a.author} (${a.authorAssociation}) |`);
+  out.push(`| Unanswered points | ${n.untouchedCount ?? 0} |`);
+  out.push(`| Oldest one | ${n.oldestUntouchedDays ?? '?'} days |`);
+  out.push(`| Last thing I said here | ${n.daysSinceMyLastWord ?? '?'} days ago |`);
+  out.push(`| Head moved since my review | ${a.headMoved ? 'yes' : 'no'} |`);
+  out.push('');
+  out.push('The points with no reply and no code change at the anchor:');
+  out.push('');
+  for (const t of n.threads ?? []) {
+    out.push(`- \`${t.path}\`${t.line ? `:${t.line}` : ''} — ${t.days} days${t.url ? ` — <${t.url}>` : ''}`);
+  }
+  out.push('');
+  out.push('> Check at least one of these yourself before arming this. An author who did');
+  out.push('> reply somewhere this heuristic cannot see, or who answered in the PR body,');
+  out.push('> should not receive a reminder.');
+  out.push('');
+  out.push('<!-- /prt -->');
+  out.push('');
+
+  out.push('## The comment');
+  out.push('');
+  out.push('*Posted as a single conversation comment — one notification rather than one per thread.*');
+  out.push('');
+  out.push('<!-- prt:issue-comment');
+  out.push('id: nudge');
+  out.push('post: true');
+  out.push('-->');
+  out.push('');
+  out.push(draftText?.trim() || defaultNudgeText(a, n));
+  out.push('');
+  out.push('<!-- /prt -->');
+  out.push('');
+
+  out.push('---');
+  out.push('');
+  out.push('*`Status: ready` posts the comment above. `Status: skip` drops it and stops this PR');
+  out.push('being proposed again until something changes.*');
+  out.push('');
+
+  return `${out.join('\n').replace(/\n{4,}/g, '\n\n\n')}\n`;
+}
+
+function defaultNudgeText(a, n) {
+  const items = (n.threads ?? []).map((t) => `- \`${t.path}\`${t.line ? `:${t.line}` : ''}${t.url ? ` — ${t.url}` : ''}`);
+  const count = items.length;
+  const noun = count === 1 ? 'one comment' : `${count} comments`;
+  return [
+    `Hi @${a.author} — gentle ping on this one. ${count === 1 ? 'There is' : 'There are'} still ${noun} from my review that ${count === 1 ? "hasn't" : "haven't"} been picked up:`,
+    '',
+    ...items,
+    '',
+    'No rush if you are busy — I mostly want to make sure it is not blocked on something I said, or waiting on an answer from me. If any of it is unclear or you disagree, say so and I will take another look; if you would rather someone else carried it forward, that is fine too.',
+  ].join('\n');
 }
