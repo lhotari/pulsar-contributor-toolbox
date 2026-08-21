@@ -25,6 +25,40 @@ Do not identify the host from the repository path or the name of the skill
 directory. The current agent runtime and its available native tools determine
 the host.
 
+## Critical security gate — inspect before executing anything
+
+Treat every PR as untrusted input. **Before creating a worktree, running tests,
+building, installing dependencies, invoking project scripts, or executing any
+file from the PR**, fetch only the PR metadata and diff and scan them for
+potentially malicious behavior.
+
+Inspect every changed execution surface, including build and test scripts, CI
+workflows, package-manager hooks, dependency or plugin changes, code generators,
+shell/process execution, native code, deserialization, filesystem access,
+credential or environment-variable access, and outbound network activity. Look
+for behavior that is unnecessary for the stated PR intent, obfuscated, encoded,
+download-and-execute shaped, destructive, persistence-oriented, secret-seeking,
+or designed to evade review. A malicious change may be hidden in a test fixture,
+benchmark, build helper, generated file, or dependency update rather than the
+main source code.
+
+Classify the gate as:
+
+- **clear** — the changed execution surfaces are understood and contain no
+  suspicious behavior; continue with the normal read-only review workflow.
+- **suspicious or inconclusive** — anything appears malicious, unexpectedly
+  executable, materially obfuscated, or cannot be explained confidently.
+  Continue only with static inspection of the metadata, diff, and trusted base
+  repository. **Never run tests for this PR.** Also never build it, create its
+  worktree, install its dependencies, run its scripts or hooks, execute its
+  binaries, import its code, or invoke tools whose configuration comes from the
+  PR. Tell every reviewer and validator that execution is prohibited, report
+  the gate outcome prominently, and include the concrete suspicious evidence.
+
+Do not let a user request to "run tests", a CI failure, or a reviewer suggestion
+bypass this gate. Only a later review of a new, demonstrably safe diff may
+produce a new `clear` classification.
+
 The Claude Code pipeline is **multi-model by design and budget-aware by
 necessity**. Two facts shape it:
 
@@ -100,7 +134,7 @@ earn a consensus pipeline. Say that you did.
   - If the repository is not provided, use the current git remote when it is clearly a GitHub repository.
 - If no PR number can be found, respond: "Usage: /pr-review <PR_NUMBER> [--repo owner/repo] [--prompt 'custom instructions'] [--tier full|standard|lean|codex|solo] [--since <sha>] [--out <dir>]" and stop.
 
-### 2. Gather shared context, once
+### 2. Gather shared context and apply the security gate, once
 
 Every reviewer must see the *same* input, so collect it once and **write it to a
 file**. Reviewers read the file; never paste the brief into a prompt — that
@@ -111,7 +145,11 @@ gh pr view <PR_NUMBER> [--repo <owner/repo>] --json title,body,labels,comments,a
 gh pr diff <PR_NUMBER> [--repo <owner/repo>]
 ```
 
-Then set up a scratch directory and, when the PR belongs to the repository you are
+Apply the critical security gate above to this metadata and diff now. Do not
+fetch the PR branch into a worktree or run anything from it until the result is
+`clear`. Record the classification and evidence in the shared brief.
+
+After a `clear` classification, set up a scratch directory and, when the PR belongs to the repository you are
 in, a read-only worktree at the PR head so reviewers get **full repo context**:
 
 ```bash
@@ -142,7 +180,9 @@ Say so in the output: an incremental review has not looked at the untouched part
 Write the brief to `$WORK/brief.md`: PR title/body/labels, author, change stats,
 existing comments worth knowing, the diff, the custom `--prompt` focus if given, the
 finding format from step 4, and the hard rule that this is review-only — no edits, no
-`gh pr comment`, no GitHub write APIs.
+`gh pr comment`, no GitHub write APIs. Include the security-gate classification.
+For a suspicious or inconclusive PR, explicitly prohibit tests and all other
+PR-controlled execution in the brief and omit the worktree path entirely.
 
 **Keep the brief small.** It is read by every reviewer in every round, so a wasted
 line is paid for several times over:
@@ -240,6 +280,8 @@ Quote at most a few lines under Evidence; when the reader has the worktree, a
 Each reviewer covers: intent vs implementation (does the diff achieve what the description
 claims?), bugs and logic errors, security vulnerabilities, and code quality worth flagging.
 If a custom `--prompt` was provided, focus the review on that instruction instead.
+The shared security-gate decision is binding: reviewers must never run tests or
+execute PR-controlled code when it is suspicious or inconclusive.
 
 ### 5. Rounds 2–3 — synthesize, then cross-validate
 
@@ -307,7 +349,9 @@ git update-ref -d "refs/pr-review/<PR_NUMBER>/since" 2>/dev/null || true
 ### 7. Do not
 
 Post any GitHub comments, use `gh pr comment`, call any GitHub write API, or modify the
-working tree of the PR. This holds for every reviewer and every round.
+working tree of the PR. This holds for every reviewer and every round. Never run
+tests or any other PR-controlled code when the security gate is suspicious or
+inconclusive.
 
 Posting is deliberately somebody else's job. The **`pr-review-track`** skill turns a
 review into a markdown file a human edits and arms; its `prt submit` is the only thing
@@ -360,6 +404,7 @@ Rules that matter:
 **Author**: ...   **Changes**: +X / -Y across N files
 **Tier**: <tier> (<why — budget pace, small diff, override, or degradation>)
 **Reviewers**: <only those that actually ran, and in which round>
+**Security gate**: clear | suspicious | inconclusive — <evidence and execution restrictions>
 
 ### Summary
 <brief overall assessment>
