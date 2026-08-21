@@ -26,11 +26,14 @@ export const STATUSES = [
   'error',      // posting failed before anything was posted.
   'hold',       // parked by the human. sync/re-review will not regenerate over it.
   'skip',       // the human decided not to review this PR.
-  'superseded', // replaced by a newer generation (kept in history/).
 ];
 
 /** Statuses whose file a generator must never overwrite. */
-export const PROTECTED_STATUSES = new Set(['ready', 'queued', 'partial', 'submitted', 'hold', 'skip']);
+// `submitted` is deliberately NOT protected: the approved bytes and the posted
+// URLs are preserved in history/ and outbox/, so the next round's draft has
+// nothing to destroy. Protecting it would make `--force` a routine habit — and
+// `--force` also overrides `ready` and `hold`, which must never be routine.
+export const PROTECTED_STATUSES = new Set(['ready', 'queued', 'partial', 'hold', 'skip']);
 
 /** Statuses that need reconciliation before cleanup may archive the PR. */
 export const IN_FLIGHT_STATUSES = new Set(['queued', 'partial']);
@@ -77,7 +80,10 @@ function parseSentinelFields(lines) {
  * block is discarded — by design.
  */
 export function tokenize(text) {
-  const lines = text.split('\n');
+  // The one sanctioned deviation from byte-for-byte: strip a BOM and normalise
+  // CRLF to LF. A stray \r inside a ```suggestion block corrupts the code
+  // GitHub offers to apply, and editors introduce them without being asked.
+  const lines = text.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').split('\n');
   const out = [];
   let i = 0;
   while (i < lines.length) {
@@ -122,9 +128,21 @@ export function tokenize(text) {
   return out;
 }
 
-function truthy(v, dflt = false) {
+const TRUE_WORDS = new Set(['y', 'yes', 'true', '1', 'on']);
+const FALSE_WORDS = new Set(['n', 'no', 'false', '0', 'off']);
+
+/**
+ * Booleans are strict on purpose. `post: ture` silently meaning `false` would
+ * drop a comment the human believed was armed — in a tool whose whole contract
+ * is "post exactly what was approved", a typo must stop the run, not change it.
+ */
+function truthy(v, dflt = false, onError = null, where = '') {
   if (v === undefined || v === '') return dflt;
-  return /^(y|yes|true|1|on)$/i.test(String(v).trim());
+  const t = String(v).trim().toLowerCase();
+  if (TRUE_WORDS.has(t)) return true;
+  if (FALSE_WORDS.has(t)) return false;
+  if (onError) onError(`${where}: "${v}" is not yes or no`);
+  return dflt;
 }
 
 /**
@@ -133,7 +151,8 @@ function truthy(v, dflt = false) {
  * balance, so flag it rather than silently posting a truncated comment.
  */
 function fenceWarning(body, where) {
-  const fences = (body.match(/^```/gm) ?? []).length;
+  // CommonMark allows ~~~ fences and up to three leading spaces.
+  const fences = (body.match(/^ {0,3}(?:```|~~~)/gm) ?? []).length;
   if (fences % 2 === 1) {
     return `${where}: unbalanced \`\`\` fence — a column-0 \`<!-- /prt -->\` inside a code block ends the block early. Indent it by one space to keep it as text.`;
   }
@@ -165,6 +184,7 @@ export function parseActionFile(text) {
   if (r.status === null) r.errors.push('line 1 must be `Status: <draft|ready|hold|skip>`');
   if (r.status && !STATUSES.includes(r.status)) r.errors.push(`unknown status "${r.status}"`);
 
+  const bad = (msg) => r.errors.push(msg);
   const seenIds = new Set();
   const claimId = (id, where) => {
     if (!id) { r.errors.push(`${where}: missing \`id:\``); return; }
@@ -202,7 +222,7 @@ export function parseActionFile(text) {
       case 'issue-comment': {
         const body = b.body.trim();
         claimId(b.fields.id, where);
-        if (truthy(b.fields.post, true) && body) {
+        if (truthy(b.fields.post, true, bad, `${where} post`) && body) {
           r.issueComments.push({ id: b.fields.id, body, startLine: b.startLine });
         }
         break;
@@ -214,7 +234,7 @@ export function parseActionFile(text) {
         const startLine = parseIntOrNull(b.fields['start-line']);
         const c = {
           id: b.fields.id,
-          post: truthy(b.fields.post, true),
+          post: truthy(b.fields.post, true, bad, `${where} post`),
           subject: (b.fields.subject || (b.fields.line ? 'line' : 'file')).toLowerCase(),
           path: b.fields.path || null,
           line,
@@ -251,13 +271,13 @@ export function parseActionFile(text) {
         claimId(b.fields.id, where);
         const t = {
           id: b.fields.id,
-          post: truthy(b.fields.post, true),
+          post: truthy(b.fields.post, true, bad, `${where} post`),
           threadNodeId: b.fields.thread || null,
           // REST integer id of the thread's FIRST comment, kept as a string.
           replyToCommentId: b.fields['reply-to'] || null,
-          resolve: truthy(b.fields.resolve),
-          unresolve: truthy(b.fields.unresolve),
-          expectResolved: b.fields['expect-resolved'] === undefined ? null : truthy(b.fields['expect-resolved']),
+          resolve: truthy(b.fields.resolve, false, bad, `${where} resolve`),
+          unresolve: truthy(b.fields.unresolve, false, bad, `${where} unresolve`),
+          expectResolved: b.fields['expect-resolved'] === undefined ? null : truthy(b.fields['expect-resolved'], false, bad, `${where} expect-resolved`),
           expectLastCommentId: b.fields['expect-last-comment'] || null,
           body: b.body.replace(/^\n+/, '').replace(/\s+$/, ''),
           sourceLine: b.startLine,
@@ -290,6 +310,13 @@ export function parseActionFile(text) {
 
   // A review is only created when there is something to say.
   const liveInline = r.inline.filter((c) => c.post);
+  // Posting a review payload with no `event` creates an UNSUBMITTED (pending)
+  // review that nobody but the author can see — and that then blocks every
+  // later submit on this PR. A deleted verdict block must be an error, not a
+  // silent fall-through.
+  if (!r.event && (r.body || liveInline.length > 0)) {
+    r.errors.push('there is a review body or inline comments but no `<!-- prt:verdict --> event:` block — restore it, or set `event: NONE` and `post: false`');
+  }
   if (r.event && r.event !== 'NONE' && !r.body && liveInline.length === 0 && r.event === 'COMMENT') {
     r.errors.push('event is COMMENT but there is no review body and no inline comments — use `event: NONE` to post only replies');
   }
@@ -351,9 +378,11 @@ export function appendLog(text, entry) {
   const base = text.replace(/\s*$/, '');
   const marker = /^<!--\s*prt:log[^>]*-->\s*$/m;
   if (marker.test(base)) {
-    const idx = base.lastIndexOf('<!-- /prt -->');
+    // The FIRST terminator after the log sentinel — not the file's last one,
+    // which may belong to a block someone appended below the log.
     const logIdx = base.search(marker);
-    if (idx > logIdx) return `${base.slice(0, idx)}${line}\n${base.slice(idx)}\n`;
+    const idx = base.indexOf('<!-- /prt -->', logIdx);
+    if (idx !== -1) return `${base.slice(0, idx)}${line}\n${base.slice(idx)}\n`;
     return `${base}\n${line}\n`;
   }
   // The heading lives INSIDE the block so `contentHash` can cut the whole log

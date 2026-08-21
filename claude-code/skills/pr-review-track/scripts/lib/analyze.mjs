@@ -3,13 +3,14 @@
 // each thing I asked for?
 
 import { parseDiff, touchesAnchor } from './diff.mjs';
-import { myReviews, myThreads, compareDiff, compareCommits } from './github.mjs';
+import { myReviews, myThreads, compareDiff, comparePr } from './github.mjs';
 
 /** Thread verdicts, ordered by how much attention they need. */
 export const THREAD_STATES = {
   AWAITING_MY_REPLY: 'awaiting-my-reply',
   RESOLVED_WITHOUT_CHANGE: 'resolved-without-code-change',
   CODE_CHANGED: 'code-changed',
+  RESOLVED_UNVERIFIED: 'resolved-but-unverified',
   UNTOUCHED: 'untouched',
   RESOLVED_BY_ME: 'resolved-by-me',
   RESOLVED_WITH_CHANGE: 'resolved-with-code-change',
@@ -18,6 +19,7 @@ export const THREAD_STATES = {
 const ATTENTION_ORDER = [
   THREAD_STATES.AWAITING_MY_REPLY,
   THREAD_STATES.RESOLVED_WITHOUT_CHANGE,
+  THREAD_STATES.RESOLVED_UNVERIFIED,
   THREAD_STATES.UNTOUCHED,
   THREAD_STATES.CODE_CHANGED,
   THREAD_STATES.RESOLVED_WITH_CHANGE,
@@ -33,6 +35,10 @@ export function attentionRank(state) {
  * Analyse one PR against the viewer's review history.
  * `deltaDiff` is optional; pass it to get code-change evidence per thread.
  */
+function normalize(s) {
+  return String(s ?? '').replace(/\r\n/g, '\n').trim();
+}
+
 /** REST database id of a review comment, as a decimal string. */
 function idOf(comment) {
   if (!comment) return null;
@@ -40,11 +46,17 @@ function idOf(comment) {
   return v === null || v === undefined ? null : String(v);
 }
 
-export function analyzePr(pr, login, { deltaDiff = null, newCommits = [] } = {}) {
+export function analyzePr(pr, login, { deltaDiff = null, newCommits = [], reviewedOidHint = null } = {}) {
   const mine = myReviews(pr, login);
-  const lastReview = mine[0] ?? null;
+  // GitHub creates an empty-bodied COMMENTED review object for every standalone
+  // reply to a thread — including the ones this tool posts. Treating one of
+  // those as "where I last reviewed" would move the watermark to today's head
+  // and make every later re-review report "nothing changed" for code nobody
+  // re-read. Only a review that actually said something sets the watermark.
+  const substantiveMine = mine.filter((r) => normalize(r.body) !== '' || r.state !== 'COMMENTED');
+  const lastReview = substantiveMine[0] ?? mine[0] ?? null;
   const lastSubstantive = mine.find((r) => r.state !== 'COMMENTED') ?? null;
-  const reviewedOid = lastReview?.commit?.oid ?? null;
+  const reviewedOid = reviewedOidHint ?? substantiveMine[0]?.commit?.oid ?? null;
   const headOid = pr.headRefOid;
   const deltaFiles = deltaDiff ? parseDiff(deltaDiff) : null;
 
@@ -60,7 +72,11 @@ export function analyzePr(pr, login, { deltaDiff = null, newCommits = [] } = {})
       const resolvedByMe = t.resolvedBy?.login === login;
       if (resolvedByMe) state = THREAD_STATES.RESOLVED_BY_ME;
       else if (codeChanged === false && !t.isOutdated) state = THREAD_STATES.RESOLVED_WITHOUT_CHANGE;
-      else state = THREAD_STATES.RESOLVED_WITH_CHANGE;
+      else if (codeChanged === true || t.isOutdated) state = THREAD_STATES.RESOLVED_WITH_CHANGE;
+      // codeChanged === null means no delta was fetched (every sync/refresh).
+      // "Resolved" on its own is not evidence the point was addressed, and
+      // guessing the calm answer is the unsafe direction.
+      else state = THREAD_STATES.RESOLVED_UNVERIFIED;
     } else if (last && last.author?.login !== login && (!myLast || last.createdAt > myLast.createdAt)) {
       state = THREAD_STATES.AWAITING_MY_REPLY;
     } else if (t.isOutdated || codeChanged) {
@@ -156,11 +172,21 @@ export async function fetchDelta(repo, analysisInput) {
   const { reviewedOid, headOid } = analysisInput;
   if (!reviewedOid || reviewedOid === headOid) return { diff: null, commits: [] };
   try {
-    const [diff, commits] = await Promise.all([
-      compareDiff(repo, reviewedOid, headOid),
-      compareCommits(repo, reviewedOid, headOid),
-    ]);
-    return { diff, commits };
+    const cmp = await comparePr(repo, reviewedOid, headOid);
+    // The branch was rebased or force-pushed: the commit I reviewed is no longer
+    // an ancestor of head. A merge-base diff here would show every upstream
+    // commit as if the author had made it, which reads as "they addressed
+    // everything" — the most dangerous possible wrong answer.
+    if (cmp.mergeBase && cmp.mergeBase !== reviewedOid) {
+      return {
+        diff: null,
+        commits: [],
+        error: `the branch was rebased or force-pushed: the commit I reviewed (${reviewedOid.slice(0, 8)}) is no longer an ancestor of head (merge base is ${cmp.mergeBase.slice(0, 8)}, ${cmp.behindBy} commit(s) behind)`,
+        forcePushed: true,
+      };
+    }
+    const diff = await compareDiff(repo, reviewedOid, headOid);
+    return { diff, commits: cmp.commits, status: cmp.status };
   } catch (e) {
     // Force-push / rebase can make the reviewed SHA unreachable from head — but
     // so can a transient API failure, and silently degrading to "no delta" would

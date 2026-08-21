@@ -67,6 +67,21 @@ function isRetryable(res) {
   return false;
 }
 
+/**
+ * Parse the body of a raw `gh api` response. `gh` prints the response body on
+ * stdout even for a 4xx, but it can also print nothing at all (network error),
+ * so never assume the output is JSON.
+ */
+export function parseBody(text) {
+  const t = String(text ?? '').trim();
+  if (!t) return null;
+  try {
+    return JSON.parse(t);
+  } catch {
+    return null;
+  }
+}
+
 export async function gh(args, opts = {}) {
   const attempts = opts.attempts ?? 4;
   let last;
@@ -107,13 +122,23 @@ export async function graphql(query, vars = {}, opts = {}) {
     if (typeof v === 'string') args.push('-f', `${k}=${v}`);
     else args.push('-F', `${k}=${v}`);
   }
-  const data = await ghJson(args, opts);
+  // `gh api graphql` exits 1 whenever the response carries an `errors` array,
+  // even when `data` holds everything we asked for except one bad alias
+  // (verified 2026-08-21). Without recovering the body here, a single deleted or
+  // transferred PR among 189 tracked numbers would kill an entire batch — and
+  // `cleanup`, the command that would drop that number, would die on it too.
+  let data;
+  try {
+    data = await ghJson(args, opts);
+  } catch (e) {
+    const partial = parseBody(e.stdout);
+    if (!partial?.data) throw e;
+    data = partial;
+  }
   if (data?.errors?.length) {
-    // Partial data with errors is common (e.g. one aliased PR is inaccessible).
-    // Surface the errors but keep whatever resolved.
-    const msgs = data.errors.map((e) => e.message).join('; ');
+    const msgs = data.errors.map((x) => x.message).join('; ');
     if (!data.data) throw new GhError(`GraphQL error: ${msgs}`);
-    process.stderr.write(`[prt] GraphQL partial errors: ${msgs}\n`);
+    process.stderr.write(`[prt] GraphQL partial errors (continuing with the data that resolved): ${msgs}\n`);
   }
   return data?.data ?? null;
 }
@@ -129,18 +154,16 @@ export async function rest(method, path, body, opts = {}) {
 }
 
 /**
- * Parse the body of a raw `gh api` response. `gh` prints the response body on
- * stdout even for a 4xx, but it can also print nothing at all (network error),
- * so never assume the output is JSON.
+ * Every page of a REST collection. Single-page reads are a real hazard here:
+ * a long-running PR can hold more than 100 reviews (GitHub creates one review
+ * object per standalone reply), and a pending review sitting on page 2 would
+ * escape the very preflight check that exists to catch it.
  */
-export function parseBody(text) {
-  const t = String(text ?? '').trim();
-  if (!t) return null;
-  try {
-    return JSON.parse(t);
-  } catch {
-    return null;
-  }
+export async function restAll(path, opts = {}) {
+  const sep = path.includes('?') ? '&' : '?';
+  const out = await gh(['api', '--paginate', `${path}${sep}per_page=100`, '--slurp'], opts);
+  const pages = JSON.parse(out.trim() || '[]');
+  return pages.flat();
 }
 
 /** REST call that returns the raw error so the caller can inspect a 422 body. */

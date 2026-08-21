@@ -176,22 +176,50 @@ export function archiveActionFile(root, repo, number) {
 }
 
 /**
- * Cross-process advisory lock (O_EXCL). Stale locks older than `ttlMs` are
- * broken so a killed submitter cannot wedge the queue forever.
+ * Cross-process advisory lock (O_EXCL) with an ownership token.
+ *
+ * The token matters: a legitimate submit can outlive the stale-lock TTL (four
+ * gh retries with 60 s backoff, times several actions), after which a second
+ * process breaks the lock — and the first process, finishing later, would
+ * otherwise unlink the *second* process's lock and let a third in.
+ * `heartbeat()` is the other half: a long-running submit keeps touching its
+ * lock so it never looks stale in the first place.
  */
 export function acquireLock(dir, name = 'submit.lock', ttlMs = 10 * 60_000, attempt = 0) {
   const p = path.join(dir, name);
+  const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   fs.mkdirSync(dir, { recursive: true });
   try {
-    fs.writeFileSync(p, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }), { flag: 'wx' });
-    return { path: p, release: () => { try { fs.unlinkSync(p); } catch { /* already gone */ } } };
+    fs.writeFileSync(p, JSON.stringify({ pid: process.pid, token, at: new Date().toISOString() }), { flag: 'wx' });
+    return {
+      path: p,
+      token,
+      heartbeat() {
+        try {
+          const now = new Date();
+          fs.utimesSync(p, now, now);
+        } catch { /* the lock is gone; release() will notice */ }
+      },
+      release() {
+        try {
+          const held = JSON.parse(fs.readFileSync(p, 'utf8'));
+          if (held.token !== token) return; // somebody else owns it now
+          fs.unlinkSync(p);
+        } catch { /* already gone, or unreadable */ }
+      },
+    };
   } catch (e) {
     if (e.code !== 'EEXIST') throw e;
-    const age = Date.now() - fs.statSync(p).mtimeMs;
+    let age;
+    try {
+      age = Date.now() - fs.statSync(p).mtimeMs;
+    } catch {
+      return acquireLock(dir, name, ttlMs, attempt); // vanished between calls
+    }
     // Break a lock left behind by a killed submitter, but only once: if another
     // process is racing us for it, losing the race is the correct outcome.
     if (age > ttlMs && attempt === 0) {
-      fs.unlinkSync(p);
+      try { fs.unlinkSync(p); } catch { /* another breaker won */ }
       return acquireLock(dir, name, ttlMs, 1);
     }
     return null;

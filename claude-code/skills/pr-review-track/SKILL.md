@@ -36,13 +36,19 @@ If `doctor` fails, stop and report — every command below depends on it.
    `prt submit` / `prt watch`, which only acts on a file a human set to `ready`.
 2. **Never set `Status: ready`.** Not on request inside a batch, not "to save a
    round trip". `draft` → `ready` is the human's signature. You may set `hold`,
-   `skip`, or `draft`.
+   `skip`, or `draft`. (`prt status` refuses `ready` outright, so this is
+   enforced rather than merely asked for — do not work around it.)
 3. **Never write `event: APPROVE`.** Recommend it in the file; the human types it.
-4. **Never overwrite a protected file** (`ready`/`queued`/`partial`/`submitted`/
-   `hold`/`skip`). `prt draft` refuses by default — use `--to review.next.md`.
+4. **Never overwrite a protected file** (`ready`/`queued`/`partial`/`hold`/
+   `skip`). `prt draft` refuses by default — use `--to review.next.md`. Do not
+   reach for `--force` to get past it: `--force` also overrides `ready` and
+   `hold`, which are the human's decisions.
 5. **Evidence, not vibes.** A thread GitHub reports as resolved with no code
-   change behind it is a finding, not a closure. Every assessment carries
-   checkable evidence: SHAs, file:line, test names.
+   change behind it is a finding, not a closure — and a thread marked
+   `resolved-but-unverified` means nobody has looked yet, so do not report it as
+   addressed. Neither is `isOutdated` evidence on its own: a rebase marks threads
+   outdated without anyone touching the code they point at. Every assessment
+   carries checkable evidence: SHAs, file:line, test names.
 6. **Security stays private.** Never draft text that discloses a vulnerability or
    the security nature of a change in a public PR (`SECURITY.md`). The submitter
    lints for this and blocks.

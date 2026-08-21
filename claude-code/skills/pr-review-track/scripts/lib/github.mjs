@@ -4,7 +4,7 @@
 // requests in ONE request that costs ONE rate-limit point, which is what makes
 // syncing 100+ tracked PRs cheap.
 
-import { graphql, gh, rest, restRaw, parseBody, viewerLogin } from './gh.mjs';
+import { graphql, gh, rest, restAll, restRaw, parseBody, viewerLogin } from './gh.mjs';
 
 const PR_CORE = `
   id number title url state isDraft merged mergedAt closedAt createdAt updatedAt
@@ -192,15 +192,41 @@ export async function compareDiff(repo, base, head) {
   return gh(['api', `repos/${repo}/compare/${base}...${head}`, '-H', 'Accept: application/vnd.github.v3.diff']);
 }
 
-/** Commits added between two SHAs on a PR. */
-export async function compareCommits(repo, base, head) {
+/**
+ * Compare two commits, keeping the fields that reveal a force-push.
+ *
+ * `compare/A...B` is a MERGE-BASE comparison. After a rebase, A is stranded on
+ * an abandoned branch, the merge base falls back to the old fork point, and the
+ * "delta" balloons to include every upstream commit since then — which would
+ * make every review thread look like the author touched it. `merge_base_commit`
+ * is what tells us that happened: on an honest fast-forward it equals A.
+ */
+export async function comparePr(repo, base, head) {
   const data = await rest('GET', `repos/${repo}/compare/${base}...${head}?per_page=100`);
-  return (data?.commits ?? []).map((c) => ({
-    oid: c.sha,
-    message: c.commit.message.split('\n')[0],
-    author: c.author?.login ?? c.commit.author?.name,
-    date: c.commit.author?.date,
-  }));
+  return {
+    status: data?.status ?? null,
+    mergeBase: data?.merge_base_commit?.sha ?? null,
+    aheadBy: data?.ahead_by ?? 0,
+    behindBy: data?.behind_by ?? 0,
+    commits: (data?.commits ?? []).map((c) => ({
+      oid: c.sha,
+      message: c.commit.message.split('\n')[0],
+      author: c.author?.login ?? c.commit.author?.name,
+      date: c.commit.author?.date,
+    })),
+  };
+}
+
+/**
+ * HTTP status of a failed `gh api` call. GitHub echoes it in the error body
+ * (`"status": "422"`), and `gh` also prints it on stderr.
+ */
+export function httpStatusOf(res) {
+  const body = parseBody(res.stdout);
+  const fromBody = body?.status ?? body?.statusCode;
+  if (fromBody && /^\d{3}$/.test(String(fromBody))) return Number(fromBody);
+  const m = /\bHTTP (\d{3})\b/.exec(`${res.stderr ?? ''}`);
+  return m ? Number(m[1]) : null;
 }
 
 /** Turn a failed `gh api` result into a message that names what GitHub objected to. */
@@ -231,7 +257,7 @@ export async function createPendingReview(repo, number, payload) {
   const res = await restRaw('POST', `repos/${repo}/pulls/${number}/reviews`, body);
   const parsed = parseBody(res.stdout);
   if (res.ok && parsed) return { ok: true, review: parsed };
-  return { ok: false, error: describeApiError(res), raw: res.stdout };
+  return { ok: false, error: describeApiError(res), status: httpStatusOf(res), raw: res.stdout };
 }
 
 export async function addFileThread({ reviewNodeId, pullRequestNodeId, path, body }) {
@@ -258,7 +284,7 @@ export async function submitPendingReview(repo, number, reviewId, { event, body 
   const res = await restRaw('POST', `repos/${repo}/pulls/${number}/reviews/${reviewId}/events`, payload);
   const parsed = parseBody(res.stdout);
   if (res.ok && parsed) return { ok: true, review: parsed };
-  return { ok: false, error: describeApiError(res), raw: res.stdout };
+  return { ok: false, error: describeApiError(res), status: httpStatusOf(res), raw: res.stdout };
 }
 
 export async function discardPendingReview(repo, number, reviewId) {
@@ -271,15 +297,18 @@ export async function submitReview(repo, number, payload) {
   const res = await restRaw('POST', `repos/${repo}/pulls/${number}/reviews`, payload);
   const body = parseBody(res.stdout);
   if (res.ok && body) return { ok: true, review: body };
-  return { ok: false, error: describeApiError(res), raw: res.stdout };
+  return { ok: false, error: describeApiError(res), status: httpStatusOf(res), raw: res.stdout };
 }
 
-/** Reply inside an existing review thread (REST id of the thread's FIRST comment). */
+/**
+ * Reply inside an existing review thread. `commentId` must be the REST id of
+ * the thread's FIRST (top-level) comment — replying to a reply's id fails.
+ */
 export async function replyToComment(repo, number, commentId, body) {
   const res = await restRaw('POST', `repos/${repo}/pulls/${number}/comments/${commentId}/replies`, { body });
   const parsed = parseBody(res.stdout);
   if (res.ok && parsed) return { ok: true, comment: parsed };
-  return { ok: false, error: describeApiError(res), raw: res.stdout };
+  return { ok: false, error: describeApiError(res), status: httpStatusOf(res), raw: res.stdout };
 }
 
 export async function resolveThread(threadId, resolve = true) {
@@ -298,7 +327,7 @@ export async function resolveThread(threadId, resolve = true) {
 /** Any PENDING (unsubmitted) review the viewer left behind on this PR. */
 export async function pendingReviews(repo, number) {
   const login = await viewerLogin();
-  const data = await rest('GET', `repos/${repo}/pulls/${number}/reviews?per_page=100`);
+  const data = await restAll(`repos/${repo}/pulls/${number}/reviews`);
   return (data ?? []).filter((r) => r.state === 'PENDING' && r.user?.login === login);
 }
 

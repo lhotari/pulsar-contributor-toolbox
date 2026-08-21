@@ -61,7 +61,7 @@ test('a body is preserved byte for byte, including markdown that looks structura
     '',
     ' <!-- /prt --> (indented, so it stays text)',
   ].join('\n');
-  const file = `Status: draft\n\n<!-- prt:body -->\n${body}\n<!-- /prt -->\n`;
+  const file = `Status: draft\n\n<!-- prt:verdict\nevent: COMMENT\n-->\n\n<!-- prt:body -->\n${body}\n<!-- /prt -->\n`;
   const p = parseActionFile(file);
   assert.equal(p.errors.length, 0, p.errors.join('; '));
   assert.equal(p.body, body);
@@ -273,10 +273,60 @@ test('unknown blocks warn but never post', () => {
 });
 
 test('protected statuses are the ones a generator must not clobber', () => {
-  for (const s of ['ready', 'queued', 'partial', 'submitted', 'hold', 'skip']) {
+  for (const s of ['ready', 'queued', 'partial', 'hold', 'skip']) {
     assert.equal(PROTECTED_STATUSES.has(s), true, s);
   }
   assert.equal(PROTECTED_STATUSES.has('draft'), false);
+  // `submitted` is deliberately NOT protected: the approved bytes live on in
+  // history/ and outbox/, and protecting it would make `--force` — which also
+  // overrides `ready` and `hold` — a routine part of every re-review round.
+  assert.equal(PROTECTED_STATUSES.has('submitted'), false);
+});
+
+test('a review with no verdict block is an error, not a pending review', () => {
+  // Omitting `event` from POST /pulls/{n}/reviews creates an UNSUBMITTED review
+  // that nobody can see and that blocks every later submit on the PR.
+  const noVerdict = `Status: draft\n\n<!-- prt:body -->\nSummary.\n<!-- /prt -->\n`;
+  assert.match(parseActionFile(noVerdict).errors.join(' '), /no `<!-- prt:verdict --> event:` block/);
+
+  const noVerdictInline = `Status: draft
+<!-- prt:inline
+id: i1
+path: a
+line: 1
+-->
+x
+<!-- /prt -->
+`;
+  assert.match(parseActionFile(noVerdictInline).errors.join(' '), /prt:verdict/);
+});
+
+test('an unrecognised boolean is an error, never a silent false', () => {
+  const typo = `Status: draft
+<!-- prt:verdict
+event: NONE
+-->
+<!-- prt:thread
+id: t1
+thread: PRRT_x
+reply-to: 1
+resolve: reslove
+-->
+reply
+<!-- /prt -->
+`;
+  assert.match(parseActionFile(typo).errors.join(' '), /"reslove" is not yes or no/);
+  // `post: ture` silently meaning false would drop a comment the human armed.
+  const postTypo = typo.replace('resolve: reslove', 'post: ture');
+  assert.match(parseActionFile(postTypo).errors.join(' '), /"ture" is not yes or no/);
+});
+
+test('CRLF is normalised so a suggestion block is not corrupted', () => {
+  const crlf = 'Status: draft\r\n<!-- prt:verdict\r\nevent: COMMENT\r\n-->\r\n<!-- prt:body -->\r\n```suggestion\r\nint x = 1;\r\n```\r\n<!-- /prt -->\r\n';
+  const p = parseActionFile(crlf);
+  assert.deepEqual(p.errors, []);
+  assert.equal(p.body.includes('\r'), false, 'a stray CR inside a suggestion breaks the applied patch');
+  assert.equal(p.body, '```suggestion\nint x = 1;\n```');
 });
 
 // ---------------------------------------------------------------------- diff
@@ -549,6 +599,18 @@ test('board buckets put an author waiting on me above everything else', () => {
   };
   assert.equal(bucketOf(ancient), 'stale', 'a four-year-old PR is not really waiting on me');
 
+  // An unverified resolution must never reach ready-to-approve just because
+  // nothing contradicted it — nothing has looked.
+  const unverified = {
+    analysis: fixtureAnalysis({
+      headMoved: false,
+      threads: [{ id: 'T' }],
+      threadCounts: { [THREAD_STATES.RESOLVED_UNVERIFIED]: 2 },
+    }),
+    status: 'none',
+  };
+  assert.equal(bucketOf(unverified), 'resolved-unverified');
+
   assert.equal(bucketOf({ analysis: fixtureAnalysis(), status: 'ready' }), 'my-queue');
   assert.equal(bucketOf({ analysis: fixtureAnalysis(), status: 'blocked' }), 'my-queue');
   assert.equal(bucketOf({ analysis: fixtureAnalysis(), status: 'hold' }), 'parked');
@@ -717,6 +779,68 @@ test('threads are ordered by how much attention they need', () => {
     ] },
   });
   assert.equal(analyzePr(pr, 'me').threads[0].id, 'loud');
+});
+
+test('a resolved thread with no delta fetched is unverified, not "addressed"', () => {
+  // sync/refresh never fetch a delta, so codeChanged is null for every thread
+  // they classify. Guessing the calm answer there is the unsafe direction: it
+  // feeds the APPROVE recommendation with no evidence at all.
+  const pr = prFixture({ reviewThreads: { nodes: [thread({ isResolved: true, resolvedBy: { login: 'author' } })] } });
+  const a = analyzePr(pr, 'me');
+  assert.equal(a.threads[0].state, THREAD_STATES.RESOLVED_UNVERIFIED);
+  assert.notEqual(a.threads[0].state, THREAD_STATES.RESOLVED_WITH_CHANGE);
+});
+
+test('an empty COMMENTED review does not move the "where I last reviewed" watermark', () => {
+  // GitHub creates one of these for every standalone reply — including the
+  // replies this tool posts. Letting one set the watermark would make the next
+  // re-review report "nothing changed" for code nobody re-read.
+  const realReview = { author: { login: 'me' }, state: 'CHANGES_REQUESTED', submittedAt: '2026-01-01T00:00:00Z', body: 'please fix', commit: { oid: 'old'.padEnd(40, '0') } };
+  const replyArtifact = { author: { login: 'me' }, state: 'COMMENTED', submittedAt: '2026-02-01T00:00:00Z', body: '', commit: { oid: 'new'.padEnd(40, '0') } };
+  const pr = prFixture({ headRefOid: 'new'.padEnd(40, '0'), reviews: { nodes: [realReview, replyArtifact] } });
+
+  const a = analyzePr(pr, 'me');
+  assert.equal(a.myLastReview.oid, 'old'.padEnd(40, '0'));
+  assert.equal(a.headMoved, true, 'the head moved past my real review, and that must stay visible');
+});
+
+test('an explicit hint overrides the derived review watermark', () => {
+  const pr = prFixture({ reviews: { nodes: [{ author: { login: 'me' }, state: 'COMMENTED', submittedAt: '2026-01-01T00:00:00Z', body: 'x', commit: { oid: 'a'.repeat(40) } }] } });
+  const a = analyzePr(pr, 'me', { reviewedOidHint: 'b'.repeat(40) });
+  assert.equal(a.headMoved, true);
+});
+
+test('a range is validated against start-side and may not cross a hunk', () => {
+  const a = commentableAnchors(parseDiff(DIFF));
+
+  // LICENSE-style file with two separate hunks: 10-15 and (none) — use Modified,
+  // which has one hunk, plus a synthetic two-hunk file.
+  const twoHunks = parseDiff([
+    'diff --git a/T.java b/T.java',
+    '--- a/T.java',
+    '+++ b/T.java',
+    '@@ -10,2 +10,2 @@',
+    ' a',
+    '+b',
+    '@@ -50,2 +50,2 @@',
+    ' c',
+    '+d',
+    '',
+  ].join('\n'));
+  const ta = commentableAnchors(twoHunks);
+  assert.equal(validateAnchor(ta, { file: 'T.java', line: 10, endLine: 11, side: 'RIGHT' }).ok, true);
+  const crossing = validateAnchor(ta, { file: 'T.java', line: 10, endLine: 51, side: 'RIGHT' });
+  assert.equal(crossing.ok, false);
+  assert.match(crossing.reason, /more than one diff hunk/);
+
+  // A range whose start sits on the other side must be checked against that side.
+  const mixed = validateAnchor(a, { file: 'src/Modified.java', line: 11, endLine: 13, side: 'RIGHT', startSide: 'LEFT' });
+  assert.equal(mixed.ok, true, 'LEFT 11 and RIGHT 13 both exist in the same hunk');
+  const badStartSide = validateAnchor(a, { file: 'src/Added.java', line: 1, endLine: 3, side: 'RIGHT', startSide: 'LEFT' });
+  assert.equal(badStartSide.ok, false, 'a new file has no LEFT side for the range to start on');
+
+  // start must precede end
+  assert.equal(validateAnchor(a, { file: 'src/Modified.java', line: 13, endLine: 11, side: 'RIGHT' }).ok, false);
 });
 
 // ------------------------------------------------------------------ security

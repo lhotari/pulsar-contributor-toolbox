@@ -19,10 +19,10 @@ import { createHash } from 'node:crypto';
 import { parseActionFile, planActions, contentHash, payloadHash, setStatus, appendLog } from './actionfile.mjs';
 import { parseDiff, commentableAnchors, validateAnchor } from './diff.mjs';
 import {
-  prDiff, fetchPr, submitReview, replyToComment, resolveThread, pendingReviews, describeApiError,
+  prDiff, fetchPr, submitReview, replyToComment, resolveThread, pendingReviews, describeApiError, httpStatusOf,
   createPendingReview, addFileThread, submitPendingReview,
 } from './github.mjs';
-import { rest, restRaw, parseBody, viewerLogin } from './gh.mjs';
+import { rest, restAll, restRaw, parseBody, viewerLogin } from './gh.mjs';
 import { writeAtomic, acquireLock, archiveActionFile } from './store.mjs';
 
 const MUTATION_SPACING_MS = 1200; // GitHub asks for >=1s between mutating requests
@@ -203,6 +203,7 @@ export async function preflight(ctx, parsed, tx) {
       line: c.subject === 'range' ? c.startLine : c.line,
       endLine: c.line,
       side: c.side,
+      startSide: c.startSide,
     });
     if (!v.ok) anchorProblems.push({ c, reason: v.reason, nearest: v.nearest });
   }
@@ -261,11 +262,17 @@ export function securityLint(parsed) {
 }
 
 /**
- * A failure is "ambiguous" when the request may well have reached GitHub. Those
- * are never retried blindly — reconciliation looks for the post first.
+ * Did the request definitely NOT reach GitHub?
+ *
+ * Only a 4xx proves that: GitHub looked at the request and refused it. Anything
+ * else — a timeout, a killed process, an empty stderr, a 5xx — may have been
+ * applied before the connection died. For content-creating calls the safe
+ * default is therefore "unknown, go and look" rather than "failed, retry",
+ * because a wrong retry is a duplicate comment on someone's PR.
  */
-function isAmbiguous(text) {
-  return /timeout|ETIMEDOUT|ECONNRESET|EAI_AGAIN|HTTP 5\d\d|socket hang up/i.test(String(text ?? ''));
+function isAmbiguous(status) {
+  if (typeof status === 'number') return !(status >= 400 && status < 500);
+  return true;
 }
 
 function short(sha) {
@@ -308,7 +315,7 @@ export async function execute(ctx, parsed, txState) {
 
     if (entry.state === 'calling' || entry.state === 'unknown') {
       // A previous run may have completed this on GitHub without recording it.
-      const found = await findExisting(ctx, action);
+      const found = await findExisting(ctx, action, tx);
       if (found) {
         entry.state = 'done';
         entry.result = found;
@@ -323,6 +330,7 @@ export async function execute(ctx, parsed, txState) {
     entry.state = 'calling';
     entry.startedAt = new Date().toISOString();
     writeTx(file, tx);
+    ctx.lock?.heartbeat?.();
 
     let res;
     try {
@@ -333,7 +341,7 @@ export async function execute(ctx, parsed, txState) {
         writeTx(file, tx);
       });
     } catch (e) {
-      res = { ok: false, error: e.message };
+      res = { ok: false, error: e.message, ambiguous: true };
     }
 
     if (res.ok) {
@@ -385,21 +393,27 @@ async function performAction(ctx, action, tx, journal = () => {}) {
         });
       }
 
+      // Belt to the parser's brace: an eventless review payload is a PENDING
+      // review, which is invisible and wedges the next submit. Never send one.
+      if (!action.event || action.event === 'NONE') {
+        return { ok: false, error: 'refusing to post a review with no event — that would create an invisible pending review' };
+      }
+
       // Fast path: no file-level comments, so one request does everything.
       if (fileComments.length === 0) {
-        if (action.event && action.event !== 'NONE') payload.event = action.event;
+        payload.event = action.event;
         const r = await submitReview(repo, number, payload);
         if (r.ok) {
           return { ok: true, result: { reviewDatabaseId: String(r.review.id), url: r.review.html_url, state: r.review.state } };
         }
-        return { ok: false, error: r.error, ambiguous: isAmbiguous(r.error) };
+        return { ok: false, error: r.error, ambiguous: isAmbiguous(r.status) };
       }
 
       // Three-step path: PENDING review -> GraphQL file threads -> submit.
       // Journal the pending review id the moment it exists, so an interrupted
       // run leaves something recoverable rather than an orphan.
       const created = await createPendingReview(repo, number, payload);
-      if (!created.ok) return { ok: false, error: created.error, ambiguous: isAmbiguous(created.error) };
+      if (!created.ok) return { ok: false, error: created.error, ambiguous: isAmbiguous(created.status) };
       const reviewId = String(created.review.id);
       const reviewNodeId = created.review.node_id;
       journal({ pendingReviewId: reviewId, pendingReviewNodeId: reviewNodeId });
@@ -428,13 +442,13 @@ async function performAction(ctx, action, tx, journal = () => {}) {
         ok: false,
         error: `${submitted.error} (pending review ${created.review.html_url} still holds the comments)`,
         pendingReviewId: reviewId,
-        ambiguous: isAmbiguous(submitted.error),
+        ambiguous: isAmbiguous(submitted.status),
       };
     }
     case 'thread-reply': {
       const r = await replyToComment(repo, number, action.thread.replyToCommentId, action.thread.body);
       if (r.ok) return { ok: true, result: { commentDatabaseId: String(r.comment.id), url: r.comment.html_url } };
-      return { ok: false, error: r.error, ambiguous: isAmbiguous(r.error) };
+      return { ok: false, error: r.error, ambiguous: isAmbiguous(r.status) };
     }
     case 'thread-resolve':
     case 'thread-unresolve': {
@@ -445,7 +459,7 @@ async function performAction(ctx, action, tx, journal = () => {}) {
       const r = await restRaw('POST', `repos/${repo}/issues/${number}/comments`, { body: action.body });
       const c = parseBody(r.stdout);
       if (r.ok && c) return { ok: true, result: { commentDatabaseId: String(c.id), url: c.html_url } };
-      return { ok: false, error: describeApiError(r), ambiguous: isAmbiguous(r.stderr) };
+      return { ok: false, error: describeApiError(r), ambiguous: isAmbiguous(httpStatusOf(r)) };
     }
     default:
       return { ok: false, error: `unknown action kind "${action.kind}"` };
@@ -453,35 +467,66 @@ async function performAction(ctx, action, tx, journal = () => {}) {
 }
 
 /**
- * Recovery: has this exact action already landed on GitHub? Because the
- * submitter posts bodies verbatim, byte equality of the body is a reliable
- * fingerprint without needing to embed tracking markers in the posted text.
+ * Recovery: has this exact action already landed on GitHub?
+ *
+ * Body equality alone is NOT enough, and getting this wrong is expensive in
+ * both directions — a false match silently drops content the human approved, a
+ * false miss double-posts. So every match is additionally constrained by:
+ *
+ *   - time: it must have been created at or after this transaction started;
+ *   - target: a reply must sit in the thread we meant to reply to;
+ *   - substance: an empty body never matches anything. GitHub creates an
+ *     empty-bodied COMMENTED review object for every standalone reply, so
+ *     "review with no body" would otherwise match one of those.
  */
-async function findExisting(ctx, action) {
+async function findExisting(ctx, action, tx) {
   const { repo, number } = ctx;
   const login = await viewerLogin();
+  // 120s of slack: GitHub timestamps at second resolution and clocks drift.
+  const floor = Date.parse(tx.createdAt) - 120_000;
+  const atOrAfterFloor = (iso) => !!iso && Date.parse(iso) >= floor;
+
   try {
     if (action.kind === 'review') {
-      const reviews = await rest('GET', `repos/${repo}/pulls/${number}/reviews?per_page=100`);
       const want = normalizeBody(action.body);
-      const hit = (reviews ?? []).find(
-        (r) => r.user?.login === login && r.state !== 'PENDING' && normalizeBody(r.body) === want,
-      );
+      const reviews = await restAll(`repos/${repo}/pulls/${number}/reviews`);
+      const hit = (reviews ?? []).find((r) => {
+        if (r.user?.login !== login || r.state === 'PENDING') return false;
+        if (!atOrAfterFloor(r.submitted_at)) return false;
+        if (want) return normalizeBody(r.body) === want;
+        // A body-less review is only ours if it landed on the commit we pinned.
+        return !normalizeBody(r.body) && r.commit_id === tx.preconditions.head;
+      });
       return hit ? { reviewDatabaseId: String(hit.id), url: hit.html_url, state: hit.state } : null;
     }
+
     if (action.kind === 'thread-reply') {
-      const comments = await rest('GET', `repos/${repo}/pulls/${number}/comments?per_page=100`);
       const want = normalizeBody(action.thread.body);
-      const hit = (comments ?? []).find((c) => c.user?.login === login && normalizeBody(c.body) === want);
+      if (!want) return null;
+      const comments = await restAll(`repos/${repo}/pulls/${number}/comments`);
+      const hit = (comments ?? []).find(
+        (c) =>
+          c.user?.login === login &&
+          atOrAfterFloor(c.created_at) &&
+          // The reply must be in the thread we targeted, not merely say the same words.
+          String(c.in_reply_to_id ?? '') === String(action.thread.replyToCommentId ?? '') &&
+          normalizeBody(c.body) === want,
+      );
       return hit ? { commentDatabaseId: String(hit.id), url: hit.html_url } : null;
     }
+
     if (action.kind === 'issue-comment') {
-      const comments = await rest('GET', `repos/${repo}/issues/${number}/comments?per_page=100`);
       const want = normalizeBody(action.body);
-      const hit = (comments ?? []).find((c) => c.user?.login === login && normalizeBody(c.body) === want);
+      if (!want) return null;
+      const comments = await restAll(`repos/${repo}/issues/${number}/comments`);
+      const hit = (comments ?? []).find(
+        (c) => c.user?.login === login && atOrAfterFloor(c.created_at) && normalizeBody(c.body) === want,
+      );
       return hit ? { commentDatabaseId: String(hit.id), url: hit.html_url } : null;
     }
+
     if (action.kind === 'thread-resolve' || action.kind === 'thread-unresolve') {
+      // Resolution is idempotent and observable, so state equality is enough.
       const pr = await fetchPr(repo, number);
       const t = (pr?.reviewThreads?.nodes ?? []).find((x) => x.id === action.thread.threadNodeId);
       if (!t) return null;
@@ -489,7 +534,7 @@ async function findExisting(ctx, action) {
       return !!t.isResolved === want ? { threadNodeId: t.id, isResolved: t.isResolved } : null;
     }
   } catch {
-    return null; // could not verify — caller keeps the action `unknown`
+    return null; // could not verify — the caller keeps the action `unknown`
   }
   return null;
 }
@@ -503,11 +548,22 @@ export async function submitReady(ctx) {
   const { prPath, actionPath } = ctx;
   const lock = acquireLock(prPath);
   if (!lock) return { ok: false, status: null, message: 'another submitter holds the lock for this PR' };
+  ctx = { ...ctx, lock };
   try {
-    let text = fs.readFileSync(actionPath, 'utf8');
-
-    // Resume an interrupted transaction before starting a new one.
     const open = findOpenTx(prPath);
+
+    // A dry run must never touch GitHub, and resuming does. Report and stop.
+    if (open && ctx.dryRun) {
+      return {
+        ok: false,
+        status: 'would-block',
+        dryRun: true,
+        plan: [],
+        reasons: [`transaction ${open.tx.txId} is open in state "${open.tx.state}" — resolve it before submitting`],
+        message: `would BLOCK: an open transaction (${open.tx.txId}, state ${open.tx.state}) must be resolved first — run \`prt recover ${ctx.number}\``,
+      };
+    }
+
     if (open && open.tx.state === 'needs-manual-resolution') {
       const stuck = open.tx.actions.filter((a) => a.state === 'needs-manual-resolution');
       return {
@@ -517,34 +573,49 @@ export async function submitReady(ctx) {
         txId: open.tx.txId,
       };
     }
+
     if (open) {
-      if (open.tx.state === 'captured') {
-        // Captured but never executed: nothing reached GitHub, so it is safe to
-        // retire it and let the current file be captured afresh.
-        open.tx.state = 'abandoned';
-        open.tx.note = 'captured but never executed; superseded by a newer run';
+      // Resume from the SNAPSHOT, whatever phase it died in. A `captured` tx
+      // crashed during preflight — nothing was posted, but the live file is now
+      // `queued`, which `capture()` rejects. Re-running preflight from
+      // approved.md is the only way out that neither wedges the PR nor posts
+      // anything unchecked.
+      const live = await fetchPr(ctx.repo, ctx.number);
+      if (live && live.state !== 'OPEN') {
+        open.tx.state = 'blocked';
+        open.tx.blockedReasons = [`the PR is ${live.state.toLowerCase()}; the remaining actions were not posted`];
         writeTx(open.file, open.tx);
-      } else {
-        const live = await fetchPr(ctx.repo, ctx.number);
-        if (live && live.state !== 'OPEN') {
-          open.tx.state = 'blocked';
-          open.tx.blockedReasons = [`the PR is ${live.state.toLowerCase()}; the remaining actions were not posted`];
-          writeTx(open.file, open.tx);
-          const t = appendLog(setStatus(fs.readFileSync(actionPath, 'utf8'), 'blocked'),
-            `resume abandoned: the PR is ${live.state.toLowerCase()}`);
-          writeAtomic(actionPath, t);
-          return { ok: false, status: 'blocked', message: `the PR is ${live.state.toLowerCase()}` };
-        }
-        const parsed = parseActionFile(fs.readFileSync(path.join(open.dir, 'approved.md'), 'utf8'));
-        const tx = await execute(ctx, parsed, open);
-        return finish(ctx, tx, `resumed transaction ${tx.txId}`);
+        const t = appendLog(setStatus(fs.readFileSync(actionPath, 'utf8'), 'blocked'),
+          `resume abandoned: the PR is ${live.state.toLowerCase()}`);
+        writeAtomic(actionPath, t);
+        return { ok: false, status: 'blocked', message: `the PR is ${live.state.toLowerCase()}` };
       }
+
+      const parsed = parseActionFile(fs.readFileSync(path.join(open.dir, 'approved.md'), 'utf8'));
+
+      if (open.tx.state === 'captured') {
+        // Nothing has been posted yet, so every precondition still applies.
+        const pre = await preflight(ctx, parsed, open.tx);
+        if (pre.reasons.length) {
+          open.tx.state = 'blocked';
+          open.tx.blockedReasons = pre.reasons;
+          writeTx(open.file, open.tx);
+          let out = setStatus(fs.readFileSync(actionPath, 'utf8'), 'blocked');
+          out = appendLog(out, `BLOCKED on resume — nothing was posted:\n${pre.reasons.map((x) => `  - ${x}`).join('\n')}`);
+          writeAtomic(actionPath, out);
+          return { ok: false, status: 'blocked', message: pre.reasons.join('; '), reasons: pre.reasons };
+        }
+      }
+
+      const tx = await execute(ctx, parsed, open);
+      return finish(ctx, tx, `resumed transaction ${tx.txId}`);
     }
 
     const captured = await capture(ctx);
     if (!ctx.dryRun) {
-      text = setStatus(text, 'queued');
-      writeAtomic(actionPath, text);
+      // Stamp the status onto the bytes we captured, never onto an earlier read:
+      // an edit landing in between would otherwise be silently reverted on disk.
+      writeAtomic(actionPath, setStatus(captured.text, 'queued'));
     }
 
     const pre = await preflight(ctx, captured.parsed, captured.tx);

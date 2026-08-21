@@ -22,11 +22,20 @@ tooling is allowed to do.
 | `error` | Posting failed before anything was posted. | submitter |
 | `hold` | Parked by the human. `sync` / `re-review` will not regenerate over it. | human |
 | `skip` | The human decided not to review this PR. `cleanup` may archive it. | human |
-| `superseded` | Replaced by a newer generation; the old copy lives in `history/`. | generator |
 
-`ready`, `queued`, `partial`, `submitted`, `hold`, `skip` are **protected**: a
-generator refuses to overwrite the file. Use `prt draft <N> --to review.next.md`
-to produce a proposal alongside it instead.
+`ready`, `queued`, `partial`, `hold`, `skip` are **protected**: a generator
+refuses to overwrite the file. Use `prt draft <N> --to review.next.md` to
+produce a proposal alongside it instead.
+
+`submitted` is deliberately *not* protected — the approved bytes and the posted
+URLs already live in `history/` and `outbox/`, so the next round's draft has
+nothing to destroy. Protecting it would make `--force` part of every re-review
+round, and `--force` also overrides `ready` and `hold`.
+
+**Only you can write `ready`.** `prt status <N> ready` refuses; open the file and
+change line 1. That is not politeness — it is the gate, enforced by the tool
+rather than by an agent's good manners. `prt status` also refuses every status
+the submitter owns (`queued`, `submitted`, `partial`, `blocked`, `error`).
 
 ## Block syntax
 
@@ -48,7 +57,11 @@ Rules:
   indent it by one space.
 - The body is taken byte for byte. It may contain `##` headings, `---`, fenced
   code, YAML, or HTML comments of its own. It is never trimmed, reflowed, or
-  prefixed before posting.
+  prefixed before posting. The one exception: a BOM is stripped and CRLF is
+  normalised to LF, because a stray `\r` inside a ```suggestion block corrupts
+  the code GitHub offers to apply.
+- Booleans are strict. `post: ture` is an error, not a silent `false` — a typo
+  must stop the run rather than quietly drop a comment you armed.
 - `prt:doc` and `prt:verdict` are attribute-only: the opening sentinel is the
   whole block, no `<!-- /prt -->`.
 - Every block that produces a post needs a unique `id:`.
@@ -93,8 +106,14 @@ event: COMMENT
 `APPROVE` · `REQUEST_CHANGES` · `COMMENT` · `NONE`.
 
 `NONE` means "post no review at all" — use it when the file only replies to
-threads or resolves them. With `NONE`, the review body and every inline comment
-must be `post: false`.
+threads or resolves them. With `NONE`, delete the review-body text and set
+`post: false` on every inline comment; anything left over is a parse error
+rather than a silent omission.
+
+**The verdict block is mandatory whenever there is anything to review.** Deleting
+it does not mean "no event" — a review POST without an event creates an
+*unsubmitted* review that only you can see and that then blocks every later
+submit on the PR. The parser refuses, and so does the submitter.
 
 ### `prt:body` — the review's summary comment
 
@@ -178,9 +197,10 @@ Reply markdown.
   comment of the thread, not a reply.
 - `resolve: yes` resolves the thread after the reply lands. `unresolve: yes` is
   the inverse.
-- `expect-resolved` / `expect-last-comment` are preconditions: if someone posted
-  in the thread after this draft was generated, the submitter blocks so you
-  re-read before replying into changed context.
+- `expect-resolved` / `expect-last-comment` are preconditions the generator
+  fills in from the thread as it stood: if someone posted in it after this draft
+  was written, the submitter blocks so you re-read before replying into changed
+  context.
 - A block with no body, no `resolve` and no `unresolve` is a no-op.
 
 ### `prt:issue-comment` — a plain PR conversation comment
@@ -217,10 +237,22 @@ findings, `log` is the append-only activity record the submitter writes.
 3. **Execute** — actions run one at a time, ≥1.2 s apart, each journalled as
    `calling` *before* the request and reconciled after.
 4. **Reconcile** — `submitted` if everything landed, `partial` if some did.
-   `prt recover <N>` resumes a `partial` or interrupted run; it verifies against
-   GitHub by exact body match before retrying, so it never double-posts. An
-   action marked `needs-manual-resolution` in `tx.json` is never retried at all —
-   the log says what to finish on GitHub.
+
+`prt recover <N>` resumes an interrupted run. Before re-running any action it
+asks GitHub whether that action already landed, matching on **body *and* the
+thread it was addressed to *and* a timestamp at or after this transaction
+started** — a body match alone would mistake an older look-alike comment for
+this one. An empty body never matches anything, because GitHub creates an
+empty-bodied review object for every standalone reply and one of those would
+otherwise look like a body-less review of ours.
+
+A failure is only treated as "definitely did not happen" when GitHub answered
+with a 4xx. A timeout, a killed process, or a 5xx leaves the action `unknown`,
+which means reconcile-then-decide rather than retry — a wrong retry is a
+duplicate comment on somebody's pull request.
+
+An action marked `needs-manual-resolution` is never retried at all; the log says
+what to finish on GitHub.
 
 ## The security lint
 

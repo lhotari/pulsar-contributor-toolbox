@@ -16,7 +16,7 @@ import { spawn } from 'node:child_process';
 
 import { viewerLogin, resolveRepo, rateLimit, GhError } from './lib/gh.mjs';
 import {
-  fetchPr, fetchPrsBatch, searchEngagedPrs, recentOpenPrs, prDiff, compareDiff, compareCommits,
+  fetchPr, fetchPrsBatch, searchEngagedPrs, recentOpenPrs, prDiff, compareDiff,
 } from './lib/github.mjs';
 import { analyzePr, fetchDelta, summarizeCounts, THREAD_STATES } from './lib/analyze.mjs';
 import { rankCandidates, scoreTracked } from './lib/rank.mjs';
@@ -24,8 +24,11 @@ import { renderActionFile, bucketOf, BUCKETS } from './lib/render.mjs';
 import { parseDiff, commentableAnchors, validateAnchor } from './lib/diff.mjs';
 import {
   parseActionFile, parseStatus, setStatus, contentHash, appendLog, planActions,
-  PROTECTED_STATUSES, IN_FLIGHT_STATUSES,
+  PROTECTED_STATUSES, IN_FLIGHT_STATUSES, STATUSES,
 } from './lib/actionfile.mjs';
+
+/** Statuses only the submitter may write. */
+const MACHINE_ONLY_STATUSES = new Set(['queued', 'submitting', 'submitted', 'partial', 'blocked', 'error', 'superseded']);
 import { submitReady, diffFingerprint, findOpenTx } from './lib/submit.mjs';
 import * as store from './lib/store.mjs';
 
@@ -174,7 +177,12 @@ COMMANDS.latest = async () => {
     if (pr.author?.login === base.login) return false;
     if (base.cfg.ignoreAuthors.includes(pr.author?.login)) return false;
     if (tracked.has(pr.number)) return false;
-    if (engaged.has(pr.number)) return false;
+    // Exclude only PRs I have actually engaged with. A PR where my review was
+    // *requested* and I have not answered is the single most relevant thing
+    // this command can surface — filtering it out as "engaged" hid exactly the
+    // PRs most explicitly waiting on me.
+    const why = engaged.get(pr.number);
+    if (why && (why.has('reviewed') || why.has('commented'))) return false;
     return true;
   });
 
@@ -642,6 +650,17 @@ COMMANDS.status = async () => {
     say(s);
     return;
   }
+  if (!STATUSES.includes(next)) {
+    die(`"${next}" is not a status. Valid: ${STATUSES.join(', ')}`);
+  }
+  if (MACHINE_ONLY_STATUSES.has(next)) {
+    die(`"${next}" is written by the submitter, not by hand.`);
+  }
+  if (next === 'ready') {
+    // Arming a file is the human's signature. Making it unreachable through the
+    // CLI means invariant 2 rests on the tool, not on an agent's good manners.
+    die(`prt will not set "ready" — that is the approval signature.\n  Open ${file} and change line 1 yourself.`);
+  }
   const text = setStatus(fs.readFileSync(file, 'utf8'), next);
   store.writeAtomic(file, text);
   emit({ number: n, status: next });
@@ -665,7 +684,8 @@ COMMANDS.validate = async () => {
         const anchors = commentableAnchors(parseDiff(await prDiff(base.repo, n)));
         for (const c of parsed.inline.filter((x) => x.post && x.subject !== 'file')) {
           const v = validateAnchor(anchors, {
-            file: c.path, line: c.subject === 'range' ? c.startLine : c.line, endLine: c.line, side: c.side,
+            file: c.path, line: c.subject === 'range' ? c.startLine : c.line,
+            endLine: c.line, side: c.side, startSide: c.startSide,
           });
           if (!v.ok) row.errors.push(`inline "${c.id}": ${v.reason}${v.nearest ? ` (nearest ${v.nearest})` : ''}`);
         }
@@ -701,7 +721,12 @@ COMMANDS.submit = async () => {
     if (!fs.existsSync(ctx.actionPath)) { results.push({ number: n, ok: false, message: 'no review.md' }); continue; }
     const status = parseStatus(fs.readFileSync(ctx.actionPath, 'utf8'));
     const dryRun = !!argv.flags['dry-run'];
-    if (!dryRun && status !== 'ready' && !['queued', 'partial'].includes(status)) {
+    // An open transaction outranks the status line. A crash mid-flight leaves
+    // the file saying `error` while a captured snapshot still needs finishing;
+    // refusing to look at it because line 1 is not "ready" would strand the PR
+    // with no way forward but hand-editing.
+    const hasOpenTx = !!findOpenTx(ctx.prPath);
+    if (!dryRun && !hasOpenTx && status !== 'ready' && !['queued', 'partial'].includes(status)) {
       results.push({ number: n, ok: false, status, message: `status is "${status}", not "ready"` });
       continue;
     }
@@ -709,9 +734,12 @@ COMMANDS.submit = async () => {
     try {
       res = await submitReady({ ...ctx, dryRun });
     } catch (e) {
-      res = { ok: false, status: 'error', message: e.message };
-      const t = appendLog(setStatus(fs.readFileSync(ctx.actionPath, 'utf8'), 'error'), `submit failed: ${e.message}`);
-      store.writeAtomic(ctx.actionPath, t);
+      res = { ok: false, status: dryRun ? 'would-block' : 'error', message: e.message };
+      // A dry run answers a question; it never changes the answer.
+      if (!dryRun) {
+        const t = appendLog(setStatus(fs.readFileSync(ctx.actionPath, 'utf8'), 'error'), `submit failed: ${e.message}`);
+        store.writeAtomic(ctx.actionPath, t);
+      }
     }
     results.push({ number: n, ...res });
     if (!JSON_OUT) {
@@ -755,7 +783,8 @@ COMMANDS.watch = async () => {
   const once = !!argv.flags.once;
   const repos = argv.flags['all-repos'] ? store.listRepos(base.root) : [base.repo];
 
-  const seen = new Map(); // "repo#n" -> mtimeMs when first seen ready
+  const seen = new Map();     // "repo#n" -> {mtime, at} when first seen ready
+  const failures = new Map(); // "repo#n" -> {count, until} exponential backoff
   let running = true;
   for (const sig of ['SIGINT', 'SIGTERM']) {
     process.on(sig, () => { running = false; console.log(`[prt] watch stopping (${sig})`); });
@@ -764,7 +793,10 @@ COMMANDS.watch = async () => {
   console.log(`[prt] watching ${repos.join(', ')} every ${interval / 1000}s — set "Status: ready" on line 1 to post`);
   while (running) {
     for (const repo of repos) {
-      const rbase = { ...base, repo };
+      // Each repo carries its own repo.json overrides; applying the cwd repo's
+      // settings to all of them would silently change behaviour per repo.
+      const rcfg = store.repoConfig(store.loadConfig(base.root), repo);
+      const rbase = { ...base, repo, cfg: { ...rcfg, reviewer: base.login } };
       for (const n of store.listTracked(base.root, repo)) {
         const file = store.actionFilePath(base.root, repo, n);
         if (!fs.existsSync(file)) continue;
@@ -774,7 +806,18 @@ COMMANDS.watch = async () => {
         const key = `${repo}#${n}`;
         if (!['ready', 'queued', 'partial'].includes(status)) { seen.delete(key); continue; }
 
-        const mtime = fs.statSync(file).mtimeMs;
+        // cleanup (or anything else) can rename this directory out from under
+        // the poll. A watcher that dies here stops posting approved reviews
+        // silently — the exact failure polling was chosen to avoid.
+        let mtime;
+        try {
+          mtime = fs.statSync(file).mtimeMs;
+        } catch {
+          seen.delete(key);
+          continue;
+        }
+        const backoff = failures.get(key);
+        if (backoff && Date.now() < backoff.until) continue;
         const first = seen.get(key);
         if (first === undefined || first.mtime !== mtime) {
           seen.set(key, { mtime, at: Date.now() });
@@ -783,16 +826,30 @@ COMMANDS.watch = async () => {
         if (Date.now() - first.at < quiesce) continue;
 
         console.log(`[prt] ${key} is ${status} — submitting`);
+        let failed = false;
         try {
           const res = await submitReady(prCtx(rbase, n));
           const icon = res.ok ? '✅' : res.status === 'blocked' ? '⛔' : '⚠️';
           console.log(`${icon} [prt] ${key} → ${res.status}: ${String(res.message).split('\n')[0]}`);
           for (const u of res.urls ?? []) console.log(`[prt] ${key} posted ${u}`);
+          failed = !res.ok && res.status !== 'blocked';
         } catch (e) {
           console.log(`⚠️ [prt] ${key} submit threw: ${e.message}`);
+          failed = true;
+        }
+        if (failed) {
+          // Without backoff a PR that cannot succeed (outage, wedged state) is
+          // retried every tick forever, burning preflight calls and drowning
+          // the chat in identical lines.
+          const n2 = (failures.get(key)?.count ?? 0) + 1;
+          const waitMs = Math.min(30 * 60_000, interval * 2 ** n2);
+          failures.set(key, { count: n2, until: Date.now() + waitMs });
+          console.log(`[prt] ${key} failed ${n2}x — next attempt in ${Math.round(waitMs / 1000)}s`);
+        } else {
+          failures.delete(key);
         }
         seen.delete(key);
-        writeBoard(rbase);
+        try { writeBoard(rbase); } catch { /* a board write must never kill the watch */ }
       }
     }
     if (once) break;
@@ -820,9 +877,14 @@ COMMANDS.cleanup = async () => {
     const status = text ? parseStatus(text) : null;
 
     if (!isClosed) { kept.push(n); continue; }
-    if (IN_FLIGHT_STATUSES.has(status)) {
+    if (IN_FLIGHT_STATUSES.has(status) || status === 'ready') {
+      // `ready` is a human signature that never got posted. Archiving it would
+      // throw that approval away silently.
       kept.push(n);
-      say(`#${n} is ${prState} but its action file is "${status}" — reconcile it first (\`prt recover ${n}\`)`);
+      const why = status === 'ready'
+        ? 'you approved it but it was never posted'
+        : 'a transaction is still open';
+      say(`#${n} is ${prState} but its action file is "${status}" — ${why}. Run \`prt recover ${n}\`, or \`prt status ${n} skip\` to let cleanup take it.`);
       continue;
     }
     const dir = store.prDir(base.root, base.repo, n);

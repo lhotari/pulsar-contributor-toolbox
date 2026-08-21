@@ -14,11 +14,17 @@ machine-readable output — use it whenever a model consumes the result.
 
 ## Discovery
 
-### `latest [--limit 10] [--pool 120] [--include-drafts]`
+### `latest [--limit 10] [--pool 120] [--include-drafts] [--max-per-author 2]`
 
-Ranks open PRs the reviewer has **not** engaged with (not the author, not
-tracked, no review or comment by them). Prints the score and the reasons behind
-it, so the ordering is auditable.
+Ranks open PRs the reviewer has **not** engaged with — not the author, not
+tracked, no review or comment by them. A PR where their review was *requested*
+and never given stays in the pool: that is the most relevant thing this command
+can surface, not something to filter out as "engaged". Prints the score and the
+reasons behind it, so the ordering is auditable.
+
+Beyond `--max-per-author` a contributor's remaining PRs are demoted below
+everyone else's first picks rather than dropped — a shortlist where one person
+holds six of ten slots is a worse queue.
 
 Ranking inputs, highest first: authors on `priorityAuthors` (`merlimat` by
 default) · an explicit review request · ASF `MEMBER` authorship · nobody has
@@ -41,13 +47,17 @@ batching means one request covers many PRs for one rate-limit point.
 
 ### `board` · `list [--status draft,ready,…]`
 
-`board` regenerates and prints `BOARD.md`, grouped into attention buckets:
+`board` regenerates and prints `BOARD.md`, grouped into attention buckets, most
+urgent first:
 
-- `action-needed-from-me` — the author replied, a thread was resolved with no
-  code change behind it, new commits since my review, or a file needs submitting
+- `my-queue` — a file of mine is `ready`, `blocked`, `partial` or `error`
+- `author-replied-to-me` — someone is waiting on my answer
+- `resolved-without-change` — marked done with no code behind it; verify
+- `new-commits-to-check` — the head moved since my review
+- `ready-to-approve` — every point I raised has a change behind it
 - `waiting-for-author` — my points are still open and untouched
-- `ready-to-approve` — every thread I opened has a code change behind it
 - `ci-blocking` — red CI; the author still has work
+- `stale` — nobody has touched it in months
 - `parked` — `hold` / `skip`
 
 `list` is the one-line-per-PR form, sorted by the same urgency score.
@@ -98,10 +108,15 @@ numbers, opens everything in `draft`, `blocked`, `error`, or `partial`.
 Parses the action file, plans the actions, and checks every anchor against the
 live diff. Never contacts GitHub for writes. Exit code 1 if anything is wrong.
 
-### `submit <N>… | --all-ready`
+### `submit <N>… | --all-ready [--dry-run]`
 
 Runs the transaction for files whose line 1 says `ready` (also resumes `queued`
-and `partial`). See `action-file.md` for the protocol.
+and `partial`, and any PR with an open transaction whatever its status — an
+interrupted run must be finishable). See `action-file.md` for the protocol.
+
+`--dry-run` runs capture and the full preflight against live GitHub and reports
+exactly what would be posted, without writing anything — to GitHub or to the
+file. It refuses to resume an open transaction, since resuming posts.
 
 ### `watch [--interval 20] [--quiesce 3] [--once] [--all-repos]`
 
@@ -115,20 +130,28 @@ runs under the `Monitor` tool.
 
 ### `recover <N>`
 
-Resumes an interrupted transaction. Verifies against GitHub by exact body match
-before retrying, so a crash between "posted" and "recorded" cannot double-post.
+Resumes an interrupted transaction. Before re-running an action it asks GitHub
+whether that action already landed — matching body, target thread, and a
+timestamp at or after the transaction started — so a crash between "posted" and
+"recorded" does not double-post. See `action-file.md` for what counts as a
+match and why an empty body never does.
 
 ## Housekeeping
 
 ### `cleanup [--purge] [--dry-run]`
 
 Archives the tracking directory of every closed or merged PR to
-`_archive/<owner>/<repo>/pr-<N>/`. `--purge` deletes instead. A PR whose action
-file is `queued` or `partial` is kept back and reported — reconcile it first.
+`_archive/<owner>/<repo>/pr-<N>/`. `--purge` deletes instead.
+
+Held back and reported rather than archived: a PR whose action file is `queued`
+or `partial` (a transaction is open), or `ready` — a `ready` file is an approval
+that never got posted, and archiving it would throw that approval away silently.
 
 ### `status <N> [<new status>]` · `doctor`
 
-`status` reads or sets line 1. `doctor` prints the resolved repo, reviewer,
+`status` reads line 1, and can set `draft`, `hold` or `skip`. It refuses to set
+`ready` — that is your approval signature, so you write it in the file — and it
+refuses every status the submitter owns. `doctor` prints the resolved repo, reviewer,
 editor, GraphQL budget, and how many PRs are tracked per repo.
 
 ## Environment

@@ -10,6 +10,7 @@ import { THREAD_STATES, summarizeCounts, recommendEvent } from './analyze.mjs';
 const EVIDENCE_LABEL = {
   [THREAD_STATES.AWAITING_MY_REPLY]: 'the author replied and is waiting on me',
   [THREAD_STATES.RESOLVED_WITHOUT_CHANGE]: 'resolved, but I see no code change behind it — verify',
+  [THREAD_STATES.RESOLVED_UNVERIFIED]: 'resolved — but nothing has checked whether the code actually changed',
   [THREAD_STATES.UNTOUCHED]: 'no reply, no code change at the anchor',
   [THREAD_STATES.CODE_CHANGED]: 'the code at the anchor changed',
   [THREAD_STATES.RESOLVED_WITH_CHANGE]: 'resolved and the code changed',
@@ -109,8 +110,11 @@ export function renderActionFile({
   out.push('');
 
   if (delta?.error) {
-    out.push(`> **The reviewed commit is no longer reachable from head** (force-push or rebase): ${delta.error}`);
-    out.push('> The incremental diff below is unavailable — treat this as a full re-review.');
+    out.push(`> **No usable incremental diff.** ${delta.error}`);
+    out.push('>');
+    out.push('> There is no "what changed since I looked" for this PR — treat it as a full re-review,');
+    out.push('> and do not read a thread being `isOutdated` as evidence the author addressed it: a');
+    out.push('> rebase marks threads outdated without anyone touching the code they point at.');
     out.push('');
   }
 
@@ -291,6 +295,7 @@ export function renderActionFile({
       out.push(`line: ${f.line}`);
     }
     out.push(`side: ${f.side || 'RIGHT'}`);
+    if (f.startSide && f.startSide !== (f.side || 'RIGHT')) out.push(`start-side: ${f.startSide}`);
     out.push('-->');
     out.push('');
     out.push(`**[${f.severity ?? 'NOTE'}] ${f.claim ?? ''}**`.replace(/\*\*\s*\*\*/, ''));
@@ -344,6 +349,7 @@ export const BUCKETS = [
   'my-queue',                  // a file of mine is ready / blocked / partial — finish it
   'author-replied-to-me',      // the sharpest signal: someone is waiting on my answer
   'resolved-without-change',   // marked done with no code behind it — verify before trusting
+  'resolved-unverified',       // marked done, and nobody has looked at whether that is true
   'new-commits-to-check',      // head moved since my review
   'ready-to-approve',          // every point I raised has a change behind it
   'waiting-for-author',        // my points are still open and untouched
@@ -366,6 +372,9 @@ export function bucketOf({ analysis: a, status, staleAfterDays = STALE_AFTER_DAY
     return idleDays > staleAfterDays ? 'stale' : 'author-replied-to-me';
   }
   if ((c[THREAD_STATES.RESOLVED_WITHOUT_CHANGE] ?? 0) > 0) return 'resolved-without-change';
+  // "Resolved" with no delta fetched is not evidence of anything. It must never
+  // fall through to ready-to-approve just because nothing contradicted it.
+  if ((c[THREAD_STATES.RESOLVED_UNVERIFIED] ?? 0) > 0 && idleDays <= staleAfterDays) return 'resolved-unverified';
   if (idleDays > staleAfterDays) return 'stale';
   if (a.headMoved) return 'new-commits-to-check';
   if (a.ci === 'FAILURE' || a.ci === 'ERROR') return 'ci-blocking';
