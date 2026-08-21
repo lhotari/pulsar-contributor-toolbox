@@ -52,6 +52,8 @@ each PR re-deciding. Tell the user which tier the batch ran at, and at `lean` or
    `skip`, or `draft`. (`prt status` refuses `ready` outright, so this is
    enforced rather than merely asked for — do not work around it.)
 3. **Never write `event: APPROVE`.** Recommend it in the file; the human types it.
+   Once typed, `Status: ready` approves both that verdict and running the whole
+   workflow; do not require or invent a second approval marker.
 4. **Never overwrite a protected file** (`ready`/`queued`/`partial`/`hold`/
    `skip`). `prt draft` refuses by default — use `--to review.next.md`. Do not
    reach for `--force` to get past it: `--force` also overrides `ready` and
@@ -118,6 +120,12 @@ and whether the author actually did what was asked.
      `RESPONSE_NEEDED` / `OBSOLETE` / `NEEDS_HUMAN_VERIFICATION`
    - collect the evidence that supports it
    - draft the reply the reviewer would send
+
+   Also read every entry in `ctx.json.analysis.newIssueComments`. These are
+   ordinary PR discussion comments, not file review threads. If the PR author
+   asks the reviewer a question or otherwise needs an answer, assess it and
+   draft a response in `issueCommentAssessments`; do not leave author questions
+   buried as context-only text.
 
    And for the delta as a whole: are there **new** problems in the commits since
    the last review? If the delta is substantial (new logic, not just the asked-for

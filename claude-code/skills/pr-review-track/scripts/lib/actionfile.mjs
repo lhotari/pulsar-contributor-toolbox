@@ -206,8 +206,8 @@ export function parseActionFile(text) {
       case 'verdict': {
         const e = (b.fields.event || '').toUpperCase();
         if (!e) r.errors.push(`${where}: missing \`event:\``);
-        else if (!['APPROVE', 'REQUEST_CHANGES', 'COMMENT', 'NONE'].includes(e)) {
-          r.errors.push(`${where}: event must be APPROVE, REQUEST_CHANGES, COMMENT or NONE (got "${e}")`);
+        else if (!['APPROVE', 'REQUEST_CHANGES', 'COMMENT', 'REPLY', 'NONE'].includes(e)) {
+          r.errors.push(`${where}: event must be APPROVE, REQUEST_CHANGES, COMMENT, REPLY or NONE (got "${e}")`);
         } else r.event = e;
         break;
       }
@@ -332,6 +332,16 @@ export function parseActionFile(text) {
 /** The list of discrete actions the submitter will perform, in order. */
 export function planActions(parsed) {
   const actions = [];
+  // REPLY is an intentionally incomplete pass: publish only replies inside
+  // file review threads. It neither submits a review verdict nor resolves a
+  // thread, and it defers ordinary PR-conversation comments to a later normal
+  // verdict. The approved file remains the record of everything deferred.
+  if (parsed.event === 'REPLY') {
+    for (const t of parsed.threads.filter((x) => x.post && x.body)) {
+      actions.push({ kind: 'thread-reply', id: `${t.id}:reply`, thread: t });
+    }
+    return actions;
+  }
   const liveInline = parsed.inline.filter((c) => c.post);
   if ((parsed.event && parsed.event !== 'NONE') || parsed.body || liveInline.length > 0) {
     actions.push({ kind: 'review', id: 'review', event: parsed.event, body: parsed.body, comments: liveInline });

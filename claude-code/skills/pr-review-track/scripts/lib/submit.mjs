@@ -152,6 +152,7 @@ export async function capture(ctx) {
 export async function preflight(ctx, parsed, tx) {
   const { repo, number, config } = ctx;
   const reasons = [];
+  const planned = planActions(parsed);
   const login = await viewerLogin();
   const pr = await fetchPr(repo, number);
   if (!pr) return { reasons: [`PR ${repo}#${number} could not be fetched`], pr: null };
@@ -163,10 +164,6 @@ export async function preflight(ctx, parsed, tx) {
   if (pr.author?.login === login && tx.event === 'REQUEST_CHANGES') {
     reasons.push('GitHub does not allow requesting changes on your own pull request');
   }
-  if (config.requireExplicitApprove && tx.event === 'APPROVE' && parsed.doc['approve-authorised'] !== 'yes') {
-    reasons.push('event is APPROVE but the doc block does not carry `approve-authorised: yes` — add it deliberately');
-  }
-
   // Diff state, not just the head SHA: the base can move under a stable head.
   const currentDiff = await prDiff(repo, number);
   const fp = diffFingerprint(currentDiff);
@@ -193,7 +190,10 @@ export async function preflight(ctx, parsed, tx) {
   // Anchors. Never relocate or demote silently: refuse, and say where it moved to.
   const anchors = commentableAnchors(parseDiff(currentDiff));
   const anchorProblems = [];
-  for (const c of parsed.inline.filter((x) => x.post)) {
+  const plannedInline = planned
+    .filter((a) => a.kind === 'review')
+    .flatMap((a) => a.comments);
+  for (const c of plannedInline) {
     if (c.subject === 'file') {
       if (!anchors.has(c.path)) anchorProblems.push({ c, reason: `file "${c.path}" is not part of this diff`, nearest: null });
       continue;
@@ -217,7 +217,12 @@ export async function preflight(ctx, parsed, tx) {
 
   // Thread preconditions: never reply into a thread that moved under us.
   const threadsById = new Map((pr.reviewThreads?.nodes ?? []).map((t) => [t.id, t]));
-  for (const t of parsed.threads.filter((x) => x.post)) {
+  const plannedThreads = new Map(
+    planned
+      .filter((a) => a.kind.startsWith('thread-'))
+      .map((a) => [a.thread.id, a.thread]),
+  );
+  for (const t of plannedThreads.values()) {
     const live = threadsById.get(t.threadNodeId);
     if (!live) {
       reasons.push(`thread "${t.id}" (${t.threadNodeId}) no longer exists on this PR`);
@@ -250,7 +255,17 @@ export async function preflight(ctx, parsed, tx) {
 
 export function securityLint(parsed) {
   if (parsed.doc['security-reviewed'] === 'yes') return [];
-  const texts = [parsed.body ?? '', ...parsed.inline.filter((c) => c.post).map((c) => c.body), ...parsed.threads.filter((t) => t.post).map((t) => t.body), ...parsed.issueComments.map((c) => c.body)];
+  const texts = [];
+  for (const action of planActions(parsed)) {
+    if (action.kind === 'review') {
+      if (action.body) texts.push(action.body);
+      texts.push(...action.comments.map((c) => c.body));
+    } else if (action.kind === 'thread-reply') {
+      texts.push(action.thread.body);
+    } else if (action.kind === 'issue-comment') {
+      texts.push(action.body);
+    }
+  }
   const hits = new Set();
   for (const t of texts) {
     for (const re of SECURITY_PATTERNS) {

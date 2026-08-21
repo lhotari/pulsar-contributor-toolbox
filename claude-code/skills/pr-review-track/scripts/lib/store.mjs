@@ -48,8 +48,8 @@ export const DEFAULT_CONFIG = {
   // Refuse to post text that looks like an undisclosed vulnerability report.
   // See CLAUDE.md critical rule 6 / SECURITY.md.
   securityLint: true,
-  // Never let the tool post APPROVE without the human having typed it.
-  // (The generator always proposes COMMENT; this is a second belt.)
+  // Never let the generator write APPROVE; the human must type the verdict.
+  // Status: ready then authorises the complete action file without a second flag.
   requireExplicitApprove: true,
   // Archive rather than delete on cleanup.
   cleanupMode: 'archive', // 'archive' | 'purge'

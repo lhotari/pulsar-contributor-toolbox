@@ -89,9 +89,8 @@ These are **preconditions**, re-checked against live GitHub immediately before
 posting. If the head moved, the PR was retargeted, or the effective diff changed,
 the submitter blocks instead of posting into a document that no longer exists.
 
-Two opt-in acknowledgements also live here:
+One opt-in acknowledgement also lives here:
 
-- `approve-authorised: yes` — required alongside `event: APPROVE`.
 - `security-reviewed: yes` — required if the outgoing text trips the security
   lint (see below).
 
@@ -103,10 +102,18 @@ event: COMMENT
 -->
 ```
 
-`APPROVE` · `REQUEST_CHANGES` · `COMMENT` · `NONE`.
+`APPROVE` · `REQUEST_CHANGES` · `COMMENT` · `REPLY` · `NONE`.
 
-`NONE` means "post no review at all" — use it when the file only replies to
-threads or resolves them. With `NONE`, delete the review-body text and set
+`REPLY` is a deliberately incomplete pass. It posts reply bodies from
+`prt:thread` blocks only. It does not create or submit a review, does not post
+the review body or new inline findings, does not resolve or unresolve threads,
+and does not post `prt:issue-comment` blocks. This lets you send file-thread
+replies, edit them in GitHub's UI if needed, and complete the review later with
+`APPROVE`, `REQUEST_CHANGES`, or `COMMENT`. Before arming that later pass,
+disable or remove thread replies already posted so they are not posted twice.
+
+`NONE` means "post no review at all" — use it when the file only replies to or
+resolves threads, or posts ordinary conversation comments. With `NONE`, delete the review-body text and set
 `post: false` on every inline comment; anything left over is a parse error
 rather than a silent omission.
 
@@ -218,6 +225,10 @@ has not answered, rather than a reply in each thread, so it costs them one
 notification. It is gated exactly like every other action — drafted, edited by
 you, and posted only once line 1 says `ready`.
 
+Re-review drafts also use this block to answer questions the PR author asked in
+the ordinary PR conversation. Such replies are posted in every verdict mode
+except `REPLY`, which is intentionally limited to file review threads.
+
 ### `prt:context` / `prt:notes` / `prt:log`
 
 Never posted. `context` holds the generated evidence, `notes` holds dropped
@@ -294,4 +305,5 @@ Disable with `"securityLint": false` in `config.json` — but consider why first
 
 `requireExplicitApprove` keeps the generator from ever writing `event: APPROVE`
 on its own — it downgrades its recommendation to `COMMENT` and tells you what it
-would have recommended. Approving stays something you type.
+would have recommended. Approving stays something you type; setting the file to
+`Status: ready` then authorises the verdict and the workflow together.

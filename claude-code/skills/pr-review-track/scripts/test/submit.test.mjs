@@ -175,6 +175,24 @@ test('happy path: one review POST carrying exactly the approved bytes', () => {
   assert.equal(fs.readFileSync(path.join(dir, 'review.md'), 'utf8').split('\n')[0], 'Status: submitted');
 });
 
+test('Status ready authorises an APPROVE workflow without a second doc flag', () => {
+  const dir = setupPr(actionFile({ event: 'APPROVE' }));
+  const log = path.join(ROOT, 'approve.jsonl');
+  const scenario = writeScenario('approve', baseRules([
+    {
+      when: { args: ['--method', 'POST'], arg: 'pulls/1/reviews' },
+      stdout: '{"id":100,"state":"APPROVED","html_url":"https://x/1#r100"}',
+    },
+  ]), log);
+
+  const r = runPrt(['submit', '1', '--repo', REPO], scenario);
+  assert.equal(r.status, 0, r.stderr);
+  const posts = calls(log).filter(isWrite);
+  assert.equal(posts.length, 1);
+  assert.equal(JSON.parse(posts[0].stdin).event, 'APPROVE');
+  assert.equal(fs.readFileSync(path.join(dir, 'review.md'), 'utf8').split('\n')[0], 'Status: submitted');
+});
+
 test('a review payload is never sent without an event', () => {
   // An eventless POST creates an invisible PENDING review that then blocks
   // every later submit on the PR.

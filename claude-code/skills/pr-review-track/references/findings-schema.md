@@ -55,6 +55,15 @@ Write it to `$PRT_ROOT/<owner>/<repo>/pr-<N>/cache/findings.json`.
       "reply": "Markdown reply to post in the thread, or null.",
       "resolve": false
     }
+  ],
+
+  "issueCommentAssessments": [
+    {
+      "url": "https://github.com/apache/pulsar/pull/26289#issuecomment-123",
+      "assessment": "RESPONSE_NEEDED",
+      "why": "the PR author asked whether the reviewer still requires the compatibility test",
+      "reply": "Yes, please keep that test because …"
+    }
   ]
 }
 ```
@@ -94,3 +103,10 @@ closure.
 
 Only threads with a `reply` or `resolve: true` are written as `post: true`;
 everything else lands as `post: false` context so the human can arm it manually.
+
+**`issueCommentAssessments[]`** covers ordinary PR conversation comments from
+`analysis.newIssueComments`. Include an entry whenever the PR author asks a
+question or otherwise needs a reviewer response. Match the source comment by
+its `url`; a non-empty `reply` becomes a gated `prt:issue-comment`. These replies
+post with `APPROVE`, `REQUEST_CHANGES`, `COMMENT`, or `NONE`, but are deferred by
+the file-thread-only `REPLY` event.

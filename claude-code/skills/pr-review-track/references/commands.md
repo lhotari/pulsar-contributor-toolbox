@@ -134,6 +134,12 @@ interrupted run must be finishable). See `action-file.md` for the protocol.
 exactly what would be posted, without writing anything — to GitHub or to the
 file. It refuses to resume an open transaction, since resuming posts.
 
+The verdict controls the action set. `REPLY` posts only replies to existing file
+review threads and leaves their resolved state and the review verdict untouched;
+ordinary PR-conversation replies are deferred. `APPROVE`, `REQUEST_CHANGES`,
+and `COMMENT` perform the normal complete pass. `Status: ready` is the single
+human authorisation for either workflow, including an `APPROVE` verdict.
+
 ### `watch [--interval 20] [--quiesce 3] [--once] [--all-repos]`
 
 Polls the tracking tree and submits files as they become `ready`. Polling, not

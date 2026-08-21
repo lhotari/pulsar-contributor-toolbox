@@ -199,6 +199,42 @@ a reply
   assert.deepEqual(planActions(p).map((a) => a.kind), ['thread-reply']);
 });
 
+test('event REPLY posts only file-thread replies and defers every other action', () => {
+  const f = `Status: draft
+<!-- prt:verdict
+event: REPLY
+-->
+<!-- prt:body -->
+final review summary
+<!-- /prt -->
+<!-- prt:inline
+id: i1
+path: a
+line: 1
+-->
+new finding
+<!-- /prt -->
+<!-- prt:thread
+id: t1
+thread: PRRT_x
+reply-to: 123
+resolve: yes
+-->
+file-thread reply
+<!-- /prt -->
+<!-- prt:issue-comment
+id: c1
+-->
+ordinary discussion reply
+about a security vulnerability
+<!-- /prt -->
+`;
+  const p = parseActionFile(f);
+  assert.deepEqual(p.errors, []);
+  assert.deepEqual(planActions(p).map((a) => a.kind), ['thread-reply']);
+  assert.deepEqual(securityLint(p), [], 'security lint examines only the reply-only action set');
+});
+
 test('an empty COMMENT review is rejected rather than posted as an empty review', () => {
   const empty = `Status: draft\n<!-- prt:verdict\nevent: COMMENT\n-->\n`;
   assert.match(parseActionFile(empty).errors.join(' '), /no review body and no inline comments/);
@@ -581,7 +617,22 @@ test('APPROVE is never written into a generated file', () => {
   });
   assert.equal(parseActionFile(text).event, 'COMMENT');
   assert.match(text, /Recommended: \*\*APPROVE\*\*/);
-  assert.match(text, /approve-authorised: yes/);
+  assert.doesNotMatch(text, /approve-authorised/);
+  assert.match(text, /Status: ready/);
+});
+
+test('ordinary author questions can be drafted as gated conversation replies', () => {
+  const analysis = fixtureAnalysis({
+    newIssueComments: [{ author: 'author', createdAt: new Date().toISOString(), url: 'https://x/c1', body: 'Do you still need this test?' }],
+  });
+  const text = renderActionFile({
+    repo: 'r/r', analysis, delta: { commits: [], diff: null },
+    findings: { issueCommentAssessments: [{ url: 'https://x/c1', assessment: 'RESPONSE_NEEDED', why: 'author asked a question', reply: 'Yes, because it covers the compatibility path.' }] },
+    kind: 're-review', reviewerLogin: 'me', requireExplicitApprove: true,
+  });
+  const p = parseActionFile(text);
+  assert.equal(p.issueComments.length, 1);
+  assert.equal(p.issueComments[0].body, 'Yes, because it covers the compatibility path.');
 });
 
 test('board buckets put an author waiting on me above everything else', () => {

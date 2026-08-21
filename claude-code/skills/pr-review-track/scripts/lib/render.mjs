@@ -166,10 +166,10 @@ export function renderActionFile({
   if (proposed === 'APPROVE' && requireExplicitApprove) {
     out.push('');
     out.push('> The generator never writes `APPROVE` on its own. To approve, set `event: APPROVE`');
-    out.push('> in the block above **and** add `approve-authorised: yes` to the `<!-- prt:doc -->` block.');
+    out.push('> in the block above, review the whole file, and set line 1 to `Status: ready`.');
   }
   out.push('');
-  out.push('Valid values: `APPROVE`, `REQUEST_CHANGES`, `COMMENT`, `NONE` (post replies/resolutions only).');
+  out.push('Valid values: `APPROVE`, `REQUEST_CHANGES`, `COMMENT`, `REPLY` (file-thread replies only; no resolution or completed review), `NONE` (no review).');
   out.push('');
 
   // ---------- review body ----------
@@ -237,6 +237,37 @@ export function renderActionFile({
       out.push('');
       out.push(assess?.reply?.trim() || '');
       out.push('');
+      out.push('<!-- /prt -->');
+      out.push('');
+    }
+  }
+
+  // ---------- ordinary PR conversation replies ----------
+  const discussionAssessments = new Map(
+    (findings?.issueCommentAssessments ?? []).map((x) => [String(x.url ?? ''), x]),
+  );
+  const discussionReplies = a.newIssueComments
+    .map((comment) => ({ comment, assessment: discussionAssessments.get(String(comment.url ?? '')) }))
+    .filter(({ assessment }) => assessment?.reply?.trim());
+  if (discussionReplies.length) {
+    out.push('## PR conversation replies');
+    out.push('');
+    out.push('*Ordinary PR comments. Posted with `APPROVE`, `REQUEST_CHANGES`, `COMMENT`, or `NONE`; deferred by `REPLY`.*');
+    out.push('');
+    let n = 0;
+    for (const { comment, assessment } of discussionReplies) {
+      n += 1;
+      out.push(`### conversation reply ${n} — ${comment.author}`);
+      out.push('');
+      out.push(`In response to <${comment.url}>:`);
+      out.push('');
+      out.push(quote(comment.body, 20));
+      out.push('');
+      if (assessment.why) out.push(`Reason: ${assessment.why}`, '');
+      out.push('<!-- prt:issue-comment');
+      out.push(`id: c${n}`);
+      out.push('-->');
+      out.push(assessment.reply.trim());
       out.push('<!-- /prt -->');
       out.push('');
     }
