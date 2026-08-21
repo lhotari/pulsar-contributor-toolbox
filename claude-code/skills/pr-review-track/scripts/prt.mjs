@@ -249,7 +249,8 @@ COMMANDS.approved = async () => {
     say(`Open PRs currently approved by ${base.login}:`);
     say('');
     for (const row of rows) {
-      say(`- [#${row.number}](${row.url}) ${row.title}${row.author ? ` — @${row.author}` : ''}`);
+      say(`- #${row.number} ${row.title}${row.author ? ` — @${row.author}` : ''}`);
+      say(`  ${row.url}`);
     }
     say('');
     say(`${rows.length} approved PR(s).`);

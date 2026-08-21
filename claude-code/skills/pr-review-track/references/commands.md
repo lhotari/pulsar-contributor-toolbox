@@ -22,8 +22,10 @@ only on GitHub's search qualifier: the reviewer's latest non-comment verdict
 must be `APPROVED`, so later standalone thread replies do not hide an approval
 and a later changes-requested or dismissed verdict excludes it.
 
-Human-readable output is a Markdown list of clickable PR links, titles, and
-authors. `--json` returns `{ repo, reviewer, rows }` for automation.
+Human-readable output lists each PR number, title, and author, followed by the
+full PR URL on its own line so terminals can recognize it as a clickable link
+without rendering Markdown. `--json` returns `{ repo, reviewer, rows }` for
+automation.
 
 ### `latest [--limit 10] [--pool 120] [--include-drafts] [--max-per-author 2]`
 
