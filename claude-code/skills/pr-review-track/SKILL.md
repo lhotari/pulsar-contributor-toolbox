@@ -1,8 +1,8 @@
 ---
 name: pr-review-track
-description: Keep up with pull requests in a GitHub project (especially apache/pulsar) across many PRs and many rounds. Tracks every in-progress review under ~/.claude/pr-review-track, detects whether the author actually addressed earlier feedback, and drafts the reply, inline comments and review resolution into a markdown file the human edits and arms before anything is posted. Use for "re-review", "show latest PRs", "review latest", "what needs my attention", "cleanup closed PRs", or any request to manage a backlog of PR reviews. Invokes the pr-review skill to do the actual reviewing.
+description: Keep up with pull requests in a GitHub project (especially apache/pulsar) across many PRs and many rounds. Tracks every in-progress review under ~/.claude/pr-review-track, detects whether the author actually addressed earlier feedback, and drafts the reply, inline comments and review resolution into a markdown file the human edits and arms before anything is posted. Use for "re-review", "show latest PRs", "review latest", "revisit/revise a draft review", "what needs my attention", "cleanup closed PRs", or any request to manage a backlog of PR reviews. Invokes the pr-review skill to do the actual reviewing.
 argument-hint: |
-  re-review [N...] | show-latest | approved | review-latest [--limit 10] | sync | board | submit | watch | cleanup | open [N...]
+  re-review [N...] | show-latest | approved | review-latest [--limit 10] | revisit-draft [N] [instructions] | sync | board | submit | watch | cleanup | open [N...]
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, Agent, Monitor, Skill
 ---
 
@@ -56,10 +56,12 @@ each PR re-deciding. Tell the user which tier the batch ran at, and at `lean` or
    workflow; this includes GitHub's separate **Approve workflows to run** action
    for eligible fork PR runs on the approved head. Do not require or invent a
    second approval marker.
-4. **Never overwrite a protected file** (`ready`/`queued`/`partial`/`hold`/
-   `skip`). `prt draft` refuses by default — use `--to review.next.md`. Do not
-   reach for `--force` to get past it: `--force` also overrides `ready` and
-   `hold`, which are the human's decisions.
+4. **Never let a generator overwrite a protected file** (`ready`/`queued`/
+   `partial`/`hold`/`skip`). `prt draft` refuses by default — use
+   `--to review.next.md`. Do not reach for `--force` to get past it: `--force`
+   also overrides `ready` and `hold`, which are the human's decisions.
+   Hand-revising a `draft` or `hold` file *because the human asked you to* is a
+   different act and is allowed — see [Revisit draft](#revisit-draft).
 5. **Evidence, not vibes.** A thread GitHub reports as resolved with no code
    change behind it is a finding, not a closure — and a thread marked
    `resolved-but-unverified` means nobody has looked yet, so do not report it as
@@ -87,6 +89,7 @@ Match the user's words — natural phrasing is expected, not just flags.
 | "cleanup closed or merged", "cleanup" | [Cleanup](#cleanup) |
 | "submit", "post the ready ones" | `node "$PRT" submit --all-ready` |
 | "watch", or any batch of drafts | [Arm the watcher](#arm-the-watcher) |
+| `revisit-draft <N> [instructions]`, "revisit the draft", "make the comments more concise", "revise #26424" | [Revisit draft](#revisit-draft) |
 | "open #26289" | `node "$PRT" open 26289` |
 | "nudge", "remind the authors", "who hasn't replied" | [Nudge](#nudge) |
 
@@ -182,6 +185,94 @@ Full first-pass reviews of the top candidates, prepared for editing.
 
 If `pr-review` degrades (Codex unavailable, no worktree, diff-only), say so per
 PR — a thinner review must never be presented as a full consensus one.
+
+## Revisit draft
+
+```
+revisit-draft <N> [instructions]
+```
+
+Refine a draft that already exists, **in place**, without regenerating it. Reach
+for this when the human says "make the comments more concise", "drop the severity
+prefixes", "add the test case", "soften the tone", or just "revisit the draft for
+#26424". The instructions are free text — apply them to the existing prose.
+
+If no PR number is given and exactly one draft is open, use that one; otherwise
+list the candidates and ask which.
+
+The distinction that matters: `prt draft` *regenerates* the file from
+`findings.json` and would discard every judgement call already baked into the
+prose — the adjudication, the wording, the human's own edits. Revisiting *edits
+the bytes that are there*. Never reach for the generator to satisfy a revision
+request.
+
+### What may be revised
+
+| Status | Revise? |
+|---|---|
+| `draft`, `hold` | Yes — this is the editing state. |
+| `blocked`, `error` | Yes — revising is part of the recovery path. |
+| `submitted` | Only to prepare a *new* round — prefer a fresh `prt draft` for that. |
+| `ready` | **No.** Ask the human to set it back to `hold` first. |
+| `queued`, `partial` | **No.** A submission is in flight — `prt recover <N>` first. |
+| `skip` | Ask first. The human dropped this PR. |
+
+`ready` is refused for a mechanical reason, not a ceremonial one: the watcher can
+pick the file up between your read and your write, and then the human's signature
+sits on bytes nobody approved.
+
+### Procedure
+
+1. Read the file and check line 1 before touching anything.
+2. Back it up beside the draft, timestamped:
+   `cp review.md "cache/review.$(date +%Y%m%dT%H%M%S).md"`.
+   Do **not** write into `history/` — the submitter owns that directory.
+3. Edit in place. Never modify line 1, and never modify anything inside
+   `prt:doc`: the head SHA and diff fingerprint are what the submitter
+   pre-flights against, so a stale one must fail loudly rather than be tidied up.
+4. `node "$PRT" validate <N> --repo <owner/repo>` — expect no errors and no
+   warnings, and check the action count still matches what you intended.
+5. Report what changed, and what you deliberately left alone.
+
+### What to preserve
+
+Revision is about wording and emphasis. It must not quietly change the review.
+
+- Keep every load-bearing fact: SHAs, `file:line`, test names, measured numbers,
+  reproduction steps. Concision comes out of hedging and restatement, never out
+  of evidence.
+- Do not add a finding no reviewer verified, and do not drop one to make the
+  review shorter. If a point should go, move it to `prt:notes` with the reason
+  rather than deleting it.
+- Do not change `event:` in `prt:verdict` unless the human asked. Never write
+  `APPROVE` (invariant 3).
+- Keep tooling attribution out of anything that posts. Model names belong in
+  `prt:context` and the italic per-comment lines, which stay local — not in a
+  comment body that lands on a public PR. Revision passes are a common place for
+  this to leak, because the prose gets reshuffled.
+- **Flag the drift.** The file is now ahead of `cache/findings.json`. Harmless
+  while the status is `draft`/`hold`, but a later `prt draft` regenerates from
+  the stale findings and silently loses the revision. Say so in your report, and
+  update `findings.json` too when the change is substantive enough to be worth
+  carrying into the next round.
+
+### Attaching artefacts
+
+Reviews often reference something bulky — a suggested test, a stack trace, a
+benchmark table. Put it in a collapsed block so the comment stays skimmable:
+
+```markdown
+<details>
+<summary><code>SomeSuggestedTest.java</code></summary>
+
+...fenced code here...
+
+</details>
+```
+
+Files an earlier round staged under `cache/` (`cache/suggested-test-*.java` and
+friends) exist to be inlined this way. Keep ASF licence headers intact on
+anything the author is meant to paste into the repo — RAT fails without them.
 
 ## Arm the watcher
 

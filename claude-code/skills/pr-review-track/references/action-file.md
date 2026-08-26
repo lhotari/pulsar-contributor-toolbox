@@ -27,6 +27,13 @@ tooling is allowed to do.
 refuses to overwrite the file. Use `prt draft <N> --to review.next.md` to
 produce a proposal alongside it instead.
 
+*Generator* is the operative word. A human asking for the draft to be reworded,
+tightened, or extended is not a regeneration: the `revisit-draft` workflow in the
+skill edits `draft` and `hold` files in place for exactly that, backing the file
+up under `cache/` first. `ready`, `queued` and `partial` stay off-limits even
+then — the first because `watch` may capture it mid-edit and post bytes the human
+never signed, the other two because a submission is already in flight.
+
 `submitted` is deliberately *not* protected — the approved bytes and the posted
 URLs already live in `history/` and `outbox/`, so the next round's draft has
 nothing to destroy. Protecting it would make `--force` part of every re-review
