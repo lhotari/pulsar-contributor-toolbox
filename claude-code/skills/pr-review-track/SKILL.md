@@ -2,7 +2,7 @@
 name: pr-review-track
 description: Keep up with pull requests in a GitHub project (especially apache/pulsar) across many PRs and many rounds. Tracks every in-progress review under ~/.claude/pr-review-track, detects whether the author actually addressed earlier feedback, and drafts the reply, inline comments and review resolution into a markdown file the human edits and arms before anything is posted. Use for "re-review", "show latest PRs", "review latest", "revisit/revise a draft review", "what needs my attention", "cleanup closed PRs", or any request to manage a backlog of PR reviews. Invokes the pr-review skill to do the actual reviewing.
 argument-hint: |
-  re-review [N...] | show-latest | approved | review-latest [--limit 10] | revisit-draft [N] [instructions] | sync | board | submit | watch | cleanup | open [N...]
+  re-review [N...] | show-latest | approved | review-latest [--limit 10] | revisit-draft [N] [instructions] | ask [N] | sync | board | submit | watch | cleanup | open [N...]
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, Agent, Monitor, Skill
 ---
 
@@ -62,16 +62,22 @@ each PR re-deciding. Tell the user which tier the batch ran at, and at `lean` or
    also overrides `ready` and `hold`, which are the human's decisions.
    Hand-revising a `draft` or `hold` file *because the human asked you to* is a
    different act and is allowed — see [Revisit draft](#revisit-draft).
-5. **Evidence, not vibes.** A thread GitHub reports as resolved with no code
+5. **Answer every open note before you hand the file back.** A `prt:ask` block —
+   or an `@ai` line — is the human talking to *you*. Answer it with a
+   `prt:answer` block carrying a real justification; never edit their words, and
+   never mark one addressed without saying what you did. An open blocking note
+   refuses the submit, so leaving one unanswered silently costs them a round.
+   See [Notes to the assistant](#notes-to-the-assistant).
+6. **Evidence, not vibes.** A thread GitHub reports as resolved with no code
    change behind it is a finding, not a closure — and a thread marked
    `resolved-but-unverified` means nobody has looked yet, so do not report it as
    addressed. Neither is `isOutdated` evidence on its own: a rebase marks threads
    outdated without anyone touching the code they point at. Every assessment
    carries checkable evidence: SHAs, file:line, test names.
-6. **Security stays private.** Never draft text that discloses a vulnerability or
+7. **Security stays private.** Never draft text that discloses a vulnerability or
    the security nature of a change in a public PR (`SECURITY.md`). The submitter
    lints for this and blocks.
-7. The ASF requires a **human is accountable** for every review posted. This
+8. The ASF requires a **human is accountable** for every review posted. This
    whole design exists to make that true, not to route around it.
 
 ## Routing
@@ -90,6 +96,7 @@ Match the user's words — natural phrasing is expected, not just flags.
 | "submit", "post the ready ones" | `node "$PRT" submit --all-ready` |
 | "watch", or any batch of drafts | [Arm the watcher](#arm-the-watcher) |
 | `revisit-draft <N> [instructions]`, "revisit the draft", "make the comments more concise", "revise #26424" | [Revisit draft](#revisit-draft) |
+| "answer my notes", "I left you comments in the file", "address the asks on #26424" | [Notes to the assistant](#notes-to-the-assistant) |
 | "open #26289" | `node "$PRT" open 26289` |
 | "nudge", "remind the authors", "who hasn't replied" | [Nudge](#nudge) |
 
@@ -117,8 +124,14 @@ and whether the author actually did what was asked.
    doing:
 
    ```bash
-   node "$PRT" context <N> > ctx.json      # analysis + delta + commentable anchors
+   node "$PRT" context <N> > ctx.json      # analysis + delta + anchors + my open notes
    ```
+
+   **First, read `ctx.json.asks`.** Any entry with `open: true` is the human
+   asking you something about the draft you are about to replace — answer it
+   before anything else, per [Notes to the assistant](#notes-to-the-assistant).
+   A note saying "drop this comment" changes what the round should contain, so
+   acting on it first saves re-doing the work.
 
    Then, for each thread in `ctx.json.analysis.threads`:
    - read the anchored code at the current head and in `cache/delta.patch`
@@ -223,7 +236,9 @@ sits on bytes nobody approved.
 
 ### Procedure
 
-1. Read the file and check line 1 before touching anything.
+1. Read the file and check line 1 before touching anything. Run
+   `node "$PRT" ask <N>` — if the human left notes, those *are* the revision
+   instructions, and each one needs a `prt:answer`, not just a silent edit.
 2. Back it up beside the draft, timestamped:
    `cp review.md "cache/review.$(date +%Y%m%dT%H%M%S).md"`.
    Do **not** write into `history/` — the submitter owns that directory.
@@ -273,6 +288,64 @@ benchmark table. Put it in a collapsed block so the comment stays skimmable:
 Files an earlier round staged under `cache/` (`cache/suggested-test-*.java` and
 friends) exist to be inlined this way. Keep ASF licence headers intact on
 anything the author is meant to paste into the repo — RAT fails without them.
+
+## Notes to the assistant
+
+The human answers a draft *in the draft*. A `prt:ask` block — or a bare `@ai`
+line they typed while reading — is a question, an objection, or an instruction
+addressed to you. It is never posted, it survives regeneration, and it stays
+open across rounds until you answer it.
+
+**Discover them.** They arrive in two places, so a subagent cannot miss them:
+
+```bash
+node "$PRT" ask <N>            # or --json; ● blocking, ○ non-blocking, ✓ closed
+node "$PRT" context <N>        # the same notes in the `asks` array
+```
+
+Run `node "$PRT" ask <N> --promote` first if the human typed `@ai` shorthand and
+has not run `prt draft` since — an un-promoted note is a parse error, so the
+file will not submit until it is promoted.
+
+`prt validate <N>` reports notes the parser could see but not collect: an `@ai`
+line inside a block, or a mistyped block kind like `prt:note`. Both are errors,
+so treat either as an instruction you have not read yet, not as noise.
+
+**Answer them.** Append a sibling block; never open theirs.
+
+```
+<!-- prt:answer
+to: a6
+disposition: addressed
+did: drop-inline i3
+in: g5
+-->
+Dropped it. You are right that the upstream null check makes the branch
+unreachable — I had only checked the callers in this file.
+<!-- /prt -->
+```
+
+- `addressed` — you did what was asked. `declined` — you looked and disagree;
+  say why, with evidence, and expect a `follows:` note back. `deferred` — real
+  work for a later round; the note stays open.
+- **A body is mandatory** for `addressed` and `declined`. This is enforced, not
+  encouraged: a disposition with nothing to show for it will not parse.
+- `did: drop-inline i3` is cross-checked. Set `post: false` and
+  `dropped-by: a6` on that inline in the same edit, or the file will not parse.
+- **Also move the finding to `dropped[]` in `cache/findings.json`** with the
+  reason. The file edit alone is a trap: the next `prt draft` regenerates from
+  the findings and the comment you dropped comes back.
+
+**Never** edit the human's words, set `closed:`, or answer a note by deleting
+it. `closed: yes` is them withdrawing their own question — the same class of act
+as `Status: ready` and `event: APPROVE`.
+
+**Never quote a note back into the review.** It is theirs, written to you, about
+the PR author. The submitter blocks a twelve-word verbatim overlap, but that is
+a backstop, not a licence to write up to eleven.
+
+When you report back, say what you answered, what you declined and why, and what
+is still open.
 
 ## Arm the watcher
 
@@ -347,7 +420,11 @@ Default to archiving, and show the list before deleting anything.
 
 ## When the human comes back
 
-- `blocked` → read the reasons in the file's activity log. Usually the head
+- `blocked` because a note is open → the human armed the file with a question of
+  their own still unanswered. Answer it (a `prt:answer` block), then tell them it
+  is ready to re-arm. Do not clear the block by setting `blocking: no` or
+  `closed: yes` — both are theirs.
+- `blocked` otherwise → read the reasons in the file's activity log. Usually the head
   moved or an anchor no longer exists. Regenerate with
   `prt draft <N> --to review.next.md`, show the human what changed, and let them
   merge and re-arm. Never re-arm it yourself.

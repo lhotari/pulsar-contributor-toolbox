@@ -6,6 +6,7 @@
 
 import { parseDiff } from './diff.mjs';
 import { THREAD_STATES, summarizeCounts, recommendEvent } from './analyze.mjs';
+import { renderAsk } from './actionfile.mjs';
 
 const EVIDENCE_LABEL = {
   [THREAD_STATES.AWAITING_MY_REPLY]: 'the author replied and is waiting on me',
@@ -19,6 +20,29 @@ const EVIDENCE_LABEL = {
 
 function fence(s) {
   return String(s ?? '').replace(/\r\n/g, '\n');
+}
+
+/**
+ * Collapse the generator's own run-on blank lines, but never inside an ask or
+ * answer block: those bodies are the human's bytes (or the model's answer to
+ * them), and reflowing words nobody asked us to reflow is the failure this
+ * whole mechanism exists to avoid.
+ *
+ * The placeholder is grown until it is absent from the text, so a body that
+ * happens to contain the token cannot be spliced into a different block on the
+ * way back — that would silently truncate a comment that was going to be posted.
+ */
+function squeezeOutsideAsks(text) {
+  let token = '@@PRTASK';
+  while (text.includes(token)) token += 'X';
+  const guarded = [];
+  const masked = text.replace(/<!-- prt:(ask|answer)\n[\s\S]*?\n<!-- \/prt -->/g, (m) => {
+    guarded.push(m);
+    return `${token}${guarded.length - 1}@@`;
+  });
+  const squeezed = masked.replace(/\n{4,}/g, '\n\n\n');
+  if (!guarded.length) return squeezed;
+  return squeezed.replace(new RegExp(`${token.replace(/[@$]/g, '\\$&')}(\\d+)@@`, 'g'), (_, k) => guarded[Number(k)]);
 }
 
 function quote(s, max = 12) {
@@ -45,6 +69,38 @@ export function modulesOf(paths) {
   return [...mods].sort();
 }
 
+/** The id the generator will give finding `f` at index `i`. Shared with carry-over. */
+export function inlineIdFor(f, i) {
+  return f.id || `i${i + 1}`;
+}
+
+/**
+ * Every block id the next generation of the file will contain.
+ *
+ * Carry-over needs this to tell "your target survived" from "your target is
+ * gone". Deriving it here — from the same filters the renderer uses — keeps one
+ * source of truth; computing it separately in prt.mjs is how thread-bound notes
+ * ended up orphaned on every single draft.
+ */
+export function expectedBlockIds({ analysis, findings }) {
+  const ids = new Set(['verdict', 'body', 'general', 'gone']);
+  const anchors = new Map();
+  (findings?.findings ?? []).forEach((f, i) => {
+    const id = inlineIdFor(f, i);
+    ids.add(id);
+    if (f.path) anchors.set(id, { path: f.path, line: f.line, side: f.side ?? 'RIGHT' });
+  });
+  const actionableThreads = (analysis?.threads ?? []).filter((t) => t.state !== THREAD_STATES.RESOLVED_BY_ME);
+  actionableThreads.forEach((_, i) => ids.add(`t${i + 1}`));
+  const discussionAssessments = new Map(
+    (findings?.issueCommentAssessments ?? []).map((x) => [String(x.url ?? ''), x]),
+  );
+  (analysis?.newIssueComments ?? [])
+    .filter((c) => discussionAssessments.get(String(c.url ?? ''))?.reply?.trim())
+    .forEach((_, i) => ids.add(`c${i + 1}`));
+  return { ids, anchors };
+}
+
 export function renderActionFile({
   repo,
   analysis,
@@ -56,7 +112,36 @@ export function renderActionFile({
   baseOid,
   reviewerLogin,
   requireExplicitApprove = true,
+  carriedAsks = [],
+  carriedAnswers = [],
+  askChanges = [],
 }) {
+  // Asks are rendered beside whatever they are about: a note on inline i7 is
+  // unjudgeable away from i7's text. Orphans get their own section, since they
+  // have no target left to sit beside.
+  // Every carried ask must reach the new file. A note that is rendered nowhere
+  // is a note destroyed, so `emitted` tracks what has been placed and an
+  // unplaced-notes sweep at the end catches anything whose target this function
+  // does not know how to place.
+  const emitted = new Set();
+  const asksFor = (target) => carriedAsks.filter((a) => a.re === target);
+  const answersFor = (askId) => carriedAnswers.filter((x) => x.to === askId);
+  const emitAsks = (out, target) => {
+    for (const a of asksFor(target)) {
+      emitted.add(a.id);
+      const closed = a.closed || a.state === 'addressed' || a.state === 'declined';
+      if (closed) {
+        out.push(`<details><summary>ask ${a.id} — ${a.state}</summary>`);
+        out.push('');
+        out.push(renderAsk(a, answersFor(a.id)));
+        out.push('');
+        out.push('</details>');
+      } else {
+        out.push(renderAsk(a, answersFor(a.id)));
+      }
+      out.push('');
+    }
+  };
   const a = analysis;
   const rec = recommendEvent(a);
   const proposed = findings?.recommendedEvent ?? rec.event;
@@ -171,6 +256,9 @@ export function renderActionFile({
   out.push('');
   out.push('Valid values: `APPROVE`, `REQUEST_CHANGES`, `COMMENT`, `REPLY` (file-thread replies only; no resolution or completed review), `NONE` (no review).');
   out.push('');
+  out.push('*Not happy with this call, or want something answered before you arm it? Type* `@ai verdict …` *below — it is never posted.*');
+  out.push('');
+  emitAsks(out, 'verdict');
 
   // ---------- review body ----------
   out.push('## Review summary');
@@ -183,6 +271,7 @@ export function renderActionFile({
   out.push('');
   out.push('<!-- /prt -->');
   out.push('');
+  emitAsks(out, 'body');
 
   // ---------- threads ----------
   const actionableThreads = a.threads.filter((t) => t.state !== THREAD_STATES.RESOLVED_BY_ME);
@@ -239,6 +328,7 @@ export function renderActionFile({
       out.push('');
       out.push('<!-- /prt -->');
       out.push('');
+      emitAsks(out, `t${n}`);
     }
   }
 
@@ -270,6 +360,7 @@ export function renderActionFile({
       out.push(assessment.reply.trim());
       out.push('<!-- /prt -->');
       out.push('');
+      emitAsks(out, `c${n}`);
     }
   }
 
@@ -303,7 +394,7 @@ export function renderActionFile({
     out.push('');
   }
   items.forEach((f, i) => {
-    const id = f.id || `i${i + 1}`;
+    const id = inlineIdFor(f, i);
     const loc = f.path ? `${f.path.split('/').pop()}:${f.line ?? '?'}` : 'general';
     out.push(`### inline ${i + 1} — ${loc}`);
     out.push('');
@@ -317,6 +408,7 @@ export function renderActionFile({
     out.push('<!-- prt:inline');
     out.push(`id: ${id}`);
     out.push(`post: ${f.post === false ? 'false' : 'true'}`);
+    if (f.droppedBy) out.push(`dropped-by: ${f.droppedBy}`);
     out.push(`subject: ${f.subject || (f.endLine ? 'range' : f.line ? 'line' : 'file')}`);
     out.push(`path: ${f.path}`);
     if (f.endLine && f.line) {
@@ -335,7 +427,38 @@ export function renderActionFile({
     out.push('');
     out.push('<!-- /prt -->');
     out.push('');
+    emitAsks(out, id);
   });
+
+  // ---------- notes with no home above ----------
+  // Anything not already placed lands here: orphans, general notes, and — the
+  // reason this is a sweep rather than two fixed targets — a note bound to a
+  // block kind this function has not been taught to place. A note rendered
+  // nowhere is a note destroyed, and that must not be possible by omission.
+  const unplaced = carriedAsks.filter((a) => !emitted.has(a.id));
+  if (unplaced.length) {
+    const orphans = unplaced.filter((a) => a.re === 'gone');
+    out.push('## Notes to the assistant');
+    out.push('');
+    if (orphans.length) {
+      out.push('> **The comment these were about is no longer in the draft.** If an earlier round');
+      out.push('> already posted it, the note still applies to what is on GitHub — check `outbox/`');
+      out.push('> before deciding it is moot.');
+      out.push('');
+    }
+    for (const a of unplaced) {
+      emitted.add(a.id);
+      const closed = a.closed || a.state === 'addressed' || a.state === 'declined';
+      if (closed) {
+        out.push(`<details><summary>ask ${a.id} — ${a.state}</summary>`, '');
+        out.push(renderAsk(a, answersFor(a.id)));
+        out.push('', '</details>');
+      } else {
+        out.push(renderAsk(a, answersFor(a.id)));
+      }
+      out.push('');
+    }
+  }
 
   // ---------- dropped ----------
   if (findings?.dropped?.length) {
@@ -353,9 +476,15 @@ export function renderActionFile({
   out.push('');
   out.push('*Set `Status: ready` on line 1 to post everything above that has `post: true`.*');
   out.push('*`Status: hold` parks this file so re-review will not regenerate it. `Status: skip` drops the PR.*');
+  const stillOpen = carriedAsks.filter((x) => x.open);
+  if (stillOpen.length) {
+    const blocking = stillOpen.filter((x) => x.blocking);
+    out.push('');
+    out.push(`*${stillOpen.length} open note(s) to the assistant: ${stillOpen.map((x) => x.id).join(', ')}.${blocking.length ? ` ${blocking.length} of them will refuse a submit until answered.` : ''}*`);
+  }
   out.push('');
 
-  return `${out.join('\n').replace(/\n{4,}/g, '\n\n\n')}\n`;
+  return `${squeezeOutsideAsks(out.join('\n'))}\n`;
 }
 
 function defaultSummary(a, delta) {
@@ -427,7 +556,7 @@ export function bucketOf({ analysis: a, status, staleAfterDays = STALE_AFTER_DAY
  * out that is not "do the work" — including handing it back to me. The human
  * edits it before it goes anywhere, as with every other action.
  */
-export function renderNudgeFile({ repo, analysis, generation = 1, reviewerLogin, draftText = null }) {
+export function renderNudgeFile({ repo, analysis, generation = 1, reviewerLogin, draftText = null, carriedAsks = [], carriedAnswers = [] }) {
   const a = analysis;
   const n = a.nudge ?? {};
   const out = [];
@@ -492,13 +621,26 @@ export function renderNudgeFile({ repo, analysis, generation = 1, reviewerLogin,
   out.push('<!-- /prt -->');
   out.push('');
 
+  // A nudge overwrites whatever draft was here, so any notes the human left on
+  // it are carried across rather than destroyed.
+  if (carriedAsks.length) {
+    out.push('## Notes to the assistant');
+    out.push('');
+    out.push('*Carried over from the review draft this reminder replaced. Never posted.*');
+    out.push('');
+    for (const ask of carriedAsks) {
+      out.push(renderAsk(ask, carriedAnswers.filter((x) => x.to === ask.id)));
+      out.push('');
+    }
+  }
+
   out.push('---');
   out.push('');
   out.push('*`Status: ready` posts the comment above. `Status: skip` drops it and stops this PR');
   out.push('being proposed again until something changes.*');
   out.push('');
 
-  return `${out.join('\n').replace(/\n{4,}/g, '\n\n\n')}\n`;
+  return `${squeezeOutsideAsks(out.join('\n'))}\n`;
 }
 
 function defaultNudgeText(a, n) {

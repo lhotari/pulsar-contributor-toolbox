@@ -93,6 +93,9 @@ tracked PRs (all of them when given no numbers).
 - the full diff, cached to `cache/diff.patch`
 - per file, every commentable line for `RIGHT` and `LEFT`
 - the diff fingerprint and an urgency score with reasons
+- `asks[]` — the notes the human left on the existing draft, with their derived
+  state. Anything with `open: true` must be answered before the round is handed
+  back; it is surfaced here as well as in `prt ask` so a subagent cannot miss it.
 
 ### `diff <N> [--since <sha> | --delta]`
 
@@ -109,6 +112,31 @@ Writes `review.md` at `Status: draft`. Refuses to overwrite a protected file
 unless `--force`; `--to review.next.md` writes a proposal alongside instead.
 Anchors are validated at generation time too, so a finding that could never post
 arrives as `post: false` with the reason attached rather than wasting your edit.
+
+**It carries the human's notes forward.** `@ai` shorthand in the old file is
+promoted; open `prt:ask` blocks are kept, answered ones for one more generation.
+A note whose comment survived at a different id is re-bound **by anchor, not by
+id** — inline ids are positional, so next round's `i3` may be a different
+finding. A note whose comment is gone is orphaned to `re: gone` with `was:`
+recording where it pointed, never dropped. Every promotion, re-bind and orphan
+is printed. `--no-carry` drops them (the old file is still in `history/`).
+
+If the old file's notes cannot be parsed safely, `draft` **refuses** rather than
+overwriting them.
+
+### `ask [<N>…] [--promote] [--json]`
+
+Read the notes in an action file: `●` open and blocking, `○` open but deferred,
+`✓` closed, with the derived state and the latest answer.
+
+`--promote` turns `@ai` shorthand into canonical `prt:ask` blocks in place,
+printing each id and the target it inferred. It refuses on a file the submitter
+may be reading (`ready`, `queued`, `partial`).
+
+There is deliberately **no `--addressed` flag**. Closing a note requires prose
+saying what was done, prose is judgement, and judgement is the model's half of
+the split — a flag that closed one without a body is exactly what the mandatory
+answer body exists to forbid.
 
 ### `open [<N>…]`
 

@@ -243,6 +243,147 @@ Re-review drafts also use this block to answer questions the PR author asked in
 the ordinary PR conversation. Such replies are posted in every verdict mode
 except `REPLY`, which is intentionally limited to file review threads.
 
+### `prt:ask` — a note to the assistant. Never posted.
+
+Your questions, objections and instructions, addressed to the model rather than
+to the PR author. They live in the file, survive regeneration, and carry a
+lifecycle across rounds.
+
+```
+<!-- prt:ask
+id: a6
+re: i3
+blocking: yes
+closed: no
+follows: a2
+raised: g4
+-->
+this one's wrong — the null check is upstream, drop it
+<!-- /prt -->
+```
+
+| field | values | who writes it | notes |
+|---|---|---|---|
+| `id` | `a<n>`, unique for the life of the PR | `prt` | assigned by promotion; a retired id is never reissued |
+| `re` | a block `id` · `verdict` · `body` · `general` · `gone` | you, maintained by `prt` | defaults to `general` |
+| `blocking` | `yes` / `no` | you | **defaults to `yes`** — see below |
+| `closed` | `yes` / `no` | **you only** | withdraw your own question |
+| `follows` | an earlier ask id | you | chains a follow-up when an answer did not satisfy |
+| `raised` | `g<N>` | `prt` | the generation you wrote it in |
+| `was` | `path:line` | `prt` | only on an orphan (`re: gone`) |
+
+**The shorthand.** Typing four lines while reading a draft is friction you will
+not pay at 23:00, so type this instead, at column 0, anywhere *outside* a block:
+
+```
+@ai i3 — drop this, the null check upstream makes it unreachable
+@ai verdict — COMMENT is too soft. Two reviewers disagreed on the wrap-around case.
+@ai follows a5 — still not convinced; the clamp moved, it did not go away.
+```
+
+A note runs to the next blank line. A leading `i3` / `verdict` / `body` /
+`general` / `follows aN` binds it; otherwise it binds to the **nearest preceding
+block**, and the promotion prints what it inferred so the guess is never silent.
+`prt draft` promotes automatically; `prt ask <N> --promote` does it on demand.
+
+The leading token is only *removed* from your text when a punctuation separator
+follows it — `@ai i3 — drop this` stores "drop this", while `@ai i3 drop this`
+stores the whole line. That asymmetry is deliberate: `general cleanup of the
+summary` and `i1 is fine, it is i2 that is wrong` both open with a token that is
+also an ordinary word, and eating it would delete a word you wrote. The target
+is still read in both cases; only the tidier body needs the dash.
+
+**An un-promoted `@ai` line is an error, not a warning.** A warning is silent in
+practice, and a silently swallowed instruction is the worst thing this format
+could do. So it reaches both `prt validate` (exit 1) and the submitter, which
+refuses. Promoted, or the submit stops — there is no third path.
+
+**`@ai` inside a body that posts is a hard error**, and the text is *not*
+stripped: the format promises a body is posted byte for byte, so quietly editing
+it would decouple the posted bytes from `outbox/<txId>/approved.md`. To write
+about `@ai` as prose, indent it one space — the same escape the format already
+teaches for sentinels.
+
+### `prt:answer` — the model's reply. Never posted.
+
+```
+<!-- prt:answer
+to: a6
+disposition: addressed
+did: drop-inline i3
+in: g5
+-->
+Dropped it. You are right that the upstream check makes the branch unreachable.
+<!-- /prt -->
+```
+
+| field | values | notes |
+|---|---|---|
+| `to` | an ask `id` in this file | must resolve, else error |
+| `disposition` | `addressed` · `declined` · `deferred` | strict; a typo is an error, never a silent value |
+| `did` | `drop-inline <id>` · `edit-inline <id>` · `edit-thread <id>` · `edit-body` · `edit-verdict` · `answer-only` · `none` | `drop-inline` is cross-checked |
+| `in` | `g<N>` | the generation it was answered in |
+
+An answer carries no `id:` — it is not postable, so it must not claim a slot in
+the id namespace.
+
+**Two guards make the model's claim honest.** A body is mandatory for
+`addressed` and `declined`, so it cannot mark its own homework done without
+showing the work. And `did: drop-inline i3` is checked against the file: if `i3`
+is absent, or still says `post: true`, the file will not parse. The model can
+write a wrong paragraph; it cannot write one that contradicts the file's state.
+
+**State is derived, never stored.** A stored `state:` field and an answer body
+are two facts that can disagree — "addressed" with nothing to show for it.
+Deriving makes that unrepresentable:
+
+```
+closed: yes                        -> withdrawn
+a terminal answer (addressed|declined) -> that disposition
+a deferred answer                  -> deferred (still open)
+otherwise                          -> open
+```
+
+There is no reopen transition. Unsatisfied by an answer? Write a new note with
+`follows: aN` — the chain stays linear and auditable. (Deleting the answer block
+also reopens it, precisely because the state is derived.)
+
+### An open note refuses the submit
+
+`Status: ready` means **every question I raised is closed**. An open note with
+`blocking: yes` — the default — is a preflight reason: the file goes to
+`blocked`, nothing is posted, and the reason names the note.
+
+The escape is one field: `blocking: no` for "just something to remember next
+round", or `closed: yes` to withdraw the question.
+
+This lives in `preflight()`, deliberately not in the parser. An open note is the
+*normal* state of a draft being worked on, so as a parse error it would make
+every mid-round `prt validate` fail — and the revisit loop depends on that
+signal staying clean.
+
+### Dropping a comment because of a note
+
+Set `post: false` and add `dropped-by: <ask id>` to the `prt:inline` block, and
+move the finding to `dropped[]` in `findings.json` with the reason. The file
+change alone is a trap: the next `prt draft` regenerates from `findings.json`
+and the comment comes back while its note still reads `addressed`.
+
+### The quote lint
+
+The one leak the parser cannot close is the model folding your private note into
+outgoing prose during a revision pass. Twelve consecutive words shared between a
+`prt:ask` body and any outgoing text — code spans stripped — blocks the
+submission. Clear it with `ask-quote-reviewed: yes` in `prt:doc` if the sentence
+genuinely belongs in the review; only you can, since the model may not edit
+`prt:doc`.
+
+### Notes and hashes
+
+`payloadHash` excludes notes entirely, so annotating a file does **not**
+invalidate a payload that was already approved. `contentHash` includes them,
+because writing one *is* a human edit.
+
 ### `prt:context` / `prt:notes` / `prt:log`
 
 Never posted. `context` holds the generated evidence, `notes` holds dropped
@@ -260,7 +401,8 @@ findings, `log` is the append-only activity record the submitter writes.
    - no unsubmitted (PENDING) review of yours sitting on the PR
    - every inline anchor still exists in the diff
    - every thread precondition still holds
-   - the security lint (below)
+   - no open blocking `prt:ask` note is left unanswered
+   - the security lint (below), and the ask-quote lint
 
    Any failure ⇒ `Status: blocked`, reasons appended to the activity log,
    **nothing posted**.

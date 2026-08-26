@@ -20,11 +20,12 @@ import {
 } from './lib/github.mjs';
 import { analyzePr, fetchDelta, summarizeCounts, THREAD_STATES } from './lib/analyze.mjs';
 import { rankCandidates, scoreTracked } from './lib/rank.mjs';
-import { renderActionFile, renderNudgeFile, bucketOf, BUCKETS } from './lib/render.mjs';
+import { renderActionFile, renderNudgeFile, bucketOf, BUCKETS, inlineIdFor, expectedBlockIds } from './lib/render.mjs';
 import { parseDiff, commentableAnchors, validateAnchor } from './lib/diff.mjs';
 import {
   parseActionFile, parseStatus, setStatus, contentHash, appendLog, planActions,
   PROTECTED_STATUSES, IN_FLIGHT_STATUSES, STATUSES,
+  carryAsks, collectAsks, maxAskOrdinal, promoteShorthand, askState,
 } from './lib/actionfile.mjs';
 
 /** Statuses only the submitter may write. */
@@ -119,7 +120,8 @@ COMMANDS.help = () => {
     diff <N> [--since <sha>]               the diff, or the diff since my last review
     anchors <N>                            commentable (path,line,side) positions
     draft <N> [--findings f.json] [--kind initial|re-review]
-                                           write review.md (never over a protected file)
+                                           write review.md (carries notes; never over a protected file)
+    ask [<N>...] [--promote]               read notes to the assistant, or promote @ai shorthand
     open <N>...                            open review.md in the configured editor
     nudge [<N>...] [--limit 10]            draft reminders for unanswered feedback
 
@@ -438,6 +440,20 @@ COMMANDS.context = async () => {
     },
     urgency: scoreTracked(analysis, { priorityAuthors: base.cfg.priorityAuthors }),
   };
+
+  // Notes the human left on the existing draft. Surfaced here as well as in
+  // `prt ask` so a subagent that already calls `context` cannot miss them —
+  // an unanswered note is the most important thing in the file.
+  const existing = store.readActionFile(base.root, base.repo, n);
+  if (existing) {
+    const { asks, answers } = collectAsks(existing);
+    out.asks = asks.map((a) => ({
+      id: a.id, re: a.re, state: a.state, open: a.open, blocking: a.blocking,
+      raised: a.raised, follows: a.follows, was: a.was, question: a.question,
+      answer: answers.filter((x) => x.to === a.id).pop() ?? null,
+    }));
+  } else out.asks = [];
+
   console.log(JSON.stringify(out, null, 2));
 };
 
@@ -525,6 +541,30 @@ COMMANDS.draft = async () => {
   const prev = store.readState(base.root, base.repo, n);
   const generation = (prev?.tracking?.generation ?? 0) + 1;
 
+  // Carry the human's notes into the new generation. Without this, every round
+  // would destroy them and the whole mechanism would be a trap.
+  let carried = { asks: [], answers: [], promoted: [], changes: [], retired: 0, maxOrdinal: 0, structuralErrors: [], dropped: [] };
+  if (existing && argv.flags['no-carry']) {
+    // Name what is being left behind. "carried: 0" reads like "there were none".
+    const { asks: wouldCarry } = collectAsks(existing);
+    carried.dropped = wouldCarry.map((a) => a.id);
+    carried.maxOrdinal = maxAskOrdinal(existing);
+  }
+  if (existing && !argv.flags['no-carry']) {
+    const floor = Math.max(prev?.asks?.ordinalFloor ?? 0, maxAskOrdinal(existing));
+    // Promotion happens on an in-memory copy only. Writing a normalisation back
+    // into a file that may be `ready` under a running watcher is the one thing
+    // that must never happen here.
+    const { text: promotedText, promoted } = promoteShorthand(existing, { startOrdinal: floor + 1, generation });
+    // Thread and conversation-comment ids count too. Building this from
+    // findings alone orphaned every `t*`/`c*`-bound note on every draft.
+    const { ids: newIds, anchors: newAnchors } = expectedBlockIds({ analysis, findings });
+    carried = { ...carryAsks(promotedText, { newIds, newAnchors, generation, ordinalFloor: floor }), promoted };
+    if (carried.structuralErrors?.length) {
+      die(`refusing to regenerate #${n}: the existing review.md has notes this tool cannot read safely:\n  ${carried.structuralErrors.join('\n  ')}\nFix them, or pass --no-carry to drop them (the old file is kept in history/).`);
+    }
+  }
+
   const text = renderActionFile({
     repo: base.repo,
     analysis,
@@ -536,6 +576,9 @@ COMMANDS.draft = async () => {
     baseOid: null,
     reviewerLogin: base.login,
     requireExplicitApprove: base.cfg.requireExplicitApprove,
+    carriedAsks: carried.asks,
+    carriedAnswers: carried.answers,
+    askChanges: carried.changes,
   });
 
   const target = argv.flags.to
@@ -562,11 +605,35 @@ COMMANDS.draft = async () => {
     lastSyncAt: new Date().toISOString(),
     analysis,
     tracking: { ...(prev?.tracking ?? { addedAt: new Date().toISOString(), addedBy: 'draft' }), generation },
+    // A retired ask id must never be reissued, or a `follows:` chain in an
+    // archived file would point at somebody else's question.
+    asks: { ordinalFloor: Math.max(prev?.asks?.ordinalFloor ?? 0, carried.maxOrdinal ?? 0) },
     draft: { path: target, generatedAt: new Date().toISOString(), contentHash: contentHash(text) },
   });
   writeBoard(base);
-  emit({ number: n, file: target, generation });
+  const openAsks = carried.asks.filter((x) => x.open);
+  emit({
+    number: n, file: target, generation,
+    asks: {
+      carried: carried.asks.length, open: openAsks.length, retired: carried.retired ?? 0,
+      promoted: carried.promoted, changes: carried.changes,
+    },
+  });
   say(`drafted ${target}`);
+  for (const p of carried.promoted ?? []) {
+    say(`  promoted @ai note → ask ${p.id} (re: ${p.re}${p.inferred ? ', inferred from position' : ''}) at line ${p.line}`);
+  }
+  for (const c of carried.changes ?? []) {
+    say(c.kind === 'rebound'
+      ? `  ask ${c.id}: re-targeted ${c.from} → ${c.to}`
+      : `  ask ${c.id}: its target ${c.from} is gone — if an earlier round posted that comment, check outbox/`);
+  }
+  if (openAsks.length) say(`  ${openAsks.length} open note(s) carried: ${openAsks.map((x) => x.id).join(', ')}`);
+  if (carried.retired) say(`  ${carried.retired} answered note(s) retired to history/`);
+  for (const w of carried.warnings ?? []) say(`  warning: ${w}`);
+  if (carried.dropped?.length) {
+    say(`  --no-carry: dropped ${carried.dropped.length} note(s) — ${carried.dropped.join(', ')}. The previous file is in history/.`);
+  }
 };
 
 /**
@@ -616,8 +683,35 @@ COMMANDS.nudge = async () => {
   for (const { number: n, analysis } of batch) {
     const prev = store.readState(base.root, base.repo, n);
     const generation = (prev?.tracking?.generation ?? 0) + 1;
-    if (store.readActionFile(base.root, base.repo, n)) store.archiveActionFile(base.root, base.repo, n);
-    const text = renderNudgeFile({ repo: base.repo, analysis, generation, reviewerLogin: base.login });
+    const before = store.readActionFile(base.root, base.repo, n);
+    // A nudge-due PR is exactly one where a review was drafted and never
+    // posted, so it is precisely where unanswered notes live. `draft` is not a
+    // protected status, so without this the reminder would destroy them.
+    let nudgeAsks = { asks: [], answers: [], maxOrdinal: 0 };
+    let askFloor = prev?.asks?.ordinalFloor ?? 0;
+    if (before) {
+      askFloor = Math.max(askFloor, maxAskOrdinal(before));
+      const { text: promotedText } = promoteShorthand(before, { startOrdinal: askFloor + 1, generation });
+      nudgeAsks = carryAsks(promotedText, { generation, ordinalFloor: askFloor });
+      // Overwriting a file whose notes cannot be read would destroy them from
+      // the working copy. Skip the reminder instead — it can wait; the notes
+      // cannot be retyped.
+      if (nudgeAsks.structuralErrors?.length) {
+        skipped.push({ number: n, why: `its review.md has notes that cannot be parsed: ${nudgeAsks.structuralErrors[0]}` });
+        say(`  #${n}: SKIPPED — the existing review.md has notes this tool cannot read safely, so it was left alone.`);
+        for (const e of nudgeAsks.structuralErrors) say(`      ${e}`);
+        continue;
+      }
+      store.archiveActionFile(base.root, base.repo, n);
+      askFloor = Math.max(askFloor, nudgeAsks.maxOrdinal ?? 0);
+      if (nudgeAsks.asks.length) {
+        say(`  #${n}: carried ${nudgeAsks.asks.length} note(s) into the reminder draft`);
+      }
+    }
+    const text = renderNudgeFile({
+      repo: base.repo, analysis, generation, reviewerLogin: base.login,
+      carriedAsks: nudgeAsks.asks, carriedAnswers: nudgeAsks.answers,
+    });
     store.ensurePrDir(base.root, base.repo, n);
     store.writeAtomic(store.actionFilePath(base.root, base.repo, n), text);
     store.writeState(base.root, base.repo, n, {
@@ -627,6 +721,9 @@ COMMANDS.nudge = async () => {
       isDraft: analysis.isDraft, headOid: analysis.headOid, baseRefName: analysis.baseRefName,
       updatedAt: analysis.updatedAt, lastSyncAt: new Date().toISOString(), analysis,
       tracking: { ...(prev?.tracking ?? { addedAt: new Date().toISOString(), addedBy: 'nudge' }), generation },
+      // Advance the floor here too. On a PR that only ever saw nudges, nothing
+      // else records it, and a retired ask id would be handed out a second time.
+      asks: { ordinalFloor: askFloor },
     });
     written.push({
       number: n,
@@ -656,6 +753,76 @@ COMMANDS.nudge = async () => {
       for (const x of abandoned) say(`  #${x.number}  ${x.author}  oldest point ${x.oldestDays}d`);
     }
   }
+};
+
+/**
+ * Read the notes in an action file, and promote any `@ai` shorthand into
+ * canonical blocks.
+ *
+ * There is deliberately no `--addressed` flag. Closing a note requires prose
+ * saying what was done, prose is judgement, and judgement is the model's half
+ * of the split — a flag that closed one without a body is exactly what the
+ * mandatory-answer-body rule exists to forbid.
+ */
+COMMANDS.ask = async () => {
+  const base = await context();
+  const numbers = (argv._.slice(1).length ? argv._.slice(1) : store.listTracked(base.root, base.repo)).map(assertSafeNumber);
+  const rows = [];
+  for (const n of numbers) {
+    const file = store.actionFilePath(base.root, base.repo, n);
+    if (!fs.existsSync(file)) continue;
+    const text = fs.readFileSync(file, 'utf8');
+    const status = parseStatus(text);
+
+    if (argv.flags.promote) {
+      // Never rewrite a file a submission may be reading or about to capture.
+      if (PROTECTED_STATUSES.has(status) && status !== 'hold') {
+        say(`#${n}: "${status}" — refusing to rewrite. Set it back to draft or hold first.`);
+        continue;
+      }
+      const prev = store.readState(base.root, base.repo, n);
+      const floor = Math.max(prev?.asks?.ordinalFloor ?? 0, maxAskOrdinal(text));
+      const generation = prev?.tracking?.generation ?? 1;
+      const { text: promotedText, promoted } = promoteShorthand(text, { startOrdinal: floor + 1, generation });
+      if (promoted.length) {
+        store.writeAtomic(file, promotedText);
+        store.writeState(base.root, base.repo, n, {
+          ...(prev ?? {}),
+          asks: { ordinalFloor: Math.max(floor, maxAskOrdinal(promotedText)) },
+        });
+      }
+      for (const p of promoted) {
+        say(`#${n}: promoted @ai note → ask ${p.id} (re: ${p.re}${p.inferred ? ', inferred from position' : ''}) at line ${p.line}`);
+      }
+      if (!promoted.length) say(`#${n}: no un-promoted @ai notes`);
+      rows.push({ number: n, promoted });
+      continue;
+    }
+
+    const { asks, answers } = collectAsks(text);
+    const row = {
+      number: n,
+      status,
+      file,
+      asks: asks.map((a) => ({
+        id: a.id, re: a.re, state: a.state, open: a.open, blocking: a.blocking,
+        raised: a.raised, follows: a.follows, was: a.was, question: a.question,
+        answer: (answers.filter((x) => x.to === a.id).pop() ?? null),
+      })),
+    };
+    rows.push(row);
+    if (!JSON_OUT && row.asks.length) {
+      const open = row.asks.filter((x) => x.open);
+      say(`#${n} [${status}] — ${row.asks.length} note(s), ${open.length} open`);
+      for (const a of row.asks) {
+        const mark = a.open ? (a.blocking ? '●' : '○') : '✓';
+        say(`  ${mark} ${a.id}  re: ${a.re}  ${a.state}${a.raised ? `  (${a.raised})` : ''}`);
+        say(`      ${a.question.split('\n')[0].slice(0, 100)}`);
+      }
+    }
+  }
+  emit({ rows });
+  if (!JSON_OUT && !rows.some((r) => r.asks?.length || r.promoted?.length)) say('no notes');
 };
 
 COMMANDS.open = async () => {
@@ -867,10 +1034,16 @@ COMMANDS.submit = async () => {
         store.writeAtomic(ctx.actionPath, t);
       }
     }
-    results.push({ number: n, ...res });
+    // Parse warnings were previously visible only to `prt validate`, so a note
+    // the parser could see but not collect — one inside an inert block, or in a
+    // block whose kind was mistyped — was reported nowhere while the review
+    // posted anyway. On the path where bytes leave the machine, say them.
+    const warnings = parseActionFile(fs.readFileSync(ctx.actionPath, 'utf8')).warnings;
+    results.push({ number: n, ...res, warnings });
     if (!JSON_OUT) {
       say(`#${n} → ${res.status ?? 'error'}`);
       say(String(res.message).split('\n').map((l) => `    ${l}`).join('\n'));
+      for (const w of warnings) say(`    warning: ${w}`);
     }
   }
   writeBoard(base);

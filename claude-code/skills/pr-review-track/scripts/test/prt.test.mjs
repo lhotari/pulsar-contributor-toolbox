@@ -10,11 +10,12 @@ import assert from 'node:assert/strict';
 import {
   parseActionFile, planActions, parseStatus, setStatus, contentHash, payloadHash,
   appendLog, tokenize, PROTECTED_STATUSES,
+  askState, blockingAsks, carryAsks, promoteShorthand,
 } from '../lib/actionfile.mjs';
 import { parseDiff, commentableAnchors, validateAnchor, touchesAnchor } from '../lib/diff.mjs';
 import { renderActionFile, bucketOf } from '../lib/render.mjs';
 import { scorePr, rankCandidates } from '../lib/rank.mjs';
-import { securityLint, diffFingerprint } from '../lib/submit.mjs';
+import { securityLint, askQuoteLint, diffFingerprint } from '../lib/submit.mjs';
 import { analyzePr, recommendEvent, assessNudge, THREAD_STATES } from '../lib/analyze.mjs';
 import { renderNudgeFile } from '../lib/render.mjs';
 import { isApprovedByReviewer } from '../lib/github.mjs';
@@ -1052,4 +1053,439 @@ More prose.
   const kinds = tokenize(f).map((b) => b.kind);
   // The mid-sentence mention is not at column 0, so it is not a sentinel.
   assert.deepEqual(kinds, ['body']);
+});
+
+
+// ------------------------------------------------- notes to the assistant
+
+const WITH_ASK = `Status: draft
+
+<!-- prt:doc
+repo: apache/pulsar
+pr: 1
+head: abc123
+generation: 4
+-->
+
+<!-- prt:verdict
+event: COMMENT
+-->
+
+<!-- prt:body -->
+Summary text.
+<!-- /prt -->
+
+<!-- prt:inline
+id: i1
+post: true
+subject: line
+path: src/Main.java
+line: 10
+-->
+**[BUG] the claim**
+
+evidence
+<!-- /prt -->
+
+<!-- prt:ask
+id: a1
+re: i1
+-->
+this one is wrong, the null check is upstream
+<!-- /prt -->
+`;
+
+test('an ask never becomes an action, so it can never be posted', () => {
+  const p = parseActionFile(WITH_ASK);
+  assert.deepEqual(p.errors, []);
+  assert.equal(p.asks.length, 1);
+  assert.equal(p.asks[0].re, 'i1');
+  // The whole never-posted guarantee: asks produce no action, and planActions
+  // has no fall-through that could sweep them in.
+  assert.deepEqual(planActions(p).map((a) => a.kind), ['review']);
+  const review = planActions(p).find((a) => a.kind === 'review');
+  assert.equal(review.body.includes('null check is upstream'), false);
+  assert.equal(review.comments.some((c) => c.body.includes('null check is upstream')), false);
+});
+
+test('editing a note does not change the approved payload, but does change the content hash', () => {
+  const edited = WITH_ASK.replace('this one is wrong, the null check is upstream', 'actually I withdraw this');
+  assert.equal(payloadHash(parseActionFile(WITH_ASK)), payloadHash(parseActionFile(edited)));
+  assert.notEqual(contentHash(WITH_ASK), contentHash(edited));
+});
+
+test('an ask defaults to blocking, and blocks only until it is answered', () => {
+  const p = parseActionFile(WITH_ASK);
+  assert.equal(p.asks[0].blocking, true);
+  assert.deepEqual(blockingAsks(p).map((a) => a.id), ['a1']);
+
+  const answered = WITH_ASK + `
+<!-- prt:answer
+to: a1
+disposition: addressed
+did: answer-only
+in: g5
+-->
+Checked: the upstream null check is on a different path, so the comment stands.
+<!-- /prt -->
+`;
+  const q = parseActionFile(answered);
+  assert.deepEqual(q.errors, []);
+  assert.deepEqual(blockingAsks(q).map((a) => a.id), []);
+  assert.equal(askState(q.asks[0], q.answers).state, 'addressed');
+});
+
+test('blocking: no defers a note without stopping the submit', () => {
+  const p = parseActionFile(WITH_ASK.replace('re: i1', 're: i1\nblocking: no'));
+  assert.deepEqual(p.errors, []);
+  assert.equal(p.asks[0].blocking, false);
+  assert.deepEqual(blockingAsks(p), []);
+});
+
+test('closed: yes withdraws a note', () => {
+  const p = parseActionFile(WITH_ASK.replace('re: i1', 're: i1\nclosed: yes'));
+  assert.equal(askState(p.asks[0], p.answers).state, 'withdrawn');
+  assert.deepEqual(blockingAsks(p), []);
+});
+
+test('the model cannot mark its own homework done without showing the work', () => {
+  const empty = WITH_ASK + `
+<!-- prt:answer
+to: a1
+disposition: addressed
+-->
+<!-- /prt -->
+`;
+  assert.match(parseActionFile(empty).errors.join(' '), /needs a body saying what was done/);
+});
+
+test('a claim that an inline was dropped is cross-checked against the file', () => {
+  const lying = WITH_ASK + `
+<!-- prt:answer
+to: a1
+disposition: addressed
+did: drop-inline i1
+-->
+Dropped it.
+<!-- /prt -->
+`;
+  // i1 still says post: true, so the claim contradicts the file.
+  assert.match(parseActionFile(lying).errors.join(' '), /still has `post: true`/);
+
+  const honest = lying.replace('id: i1\npost: true', 'id: i1\npost: false\ndropped-by: a1');
+  assert.deepEqual(parseActionFile(honest).errors, []);
+});
+
+test('a disposition typo is an error, never a silent value', () => {
+  const f = WITH_ASK + `
+<!-- prt:answer
+to: a1
+disposition: adressed
+-->
+body
+<!-- /prt -->
+`;
+  assert.match(parseActionFile(f).errors.join(' '), /must be addressed, declined or deferred/);
+});
+
+test('an answer pointing at no ask is an error', () => {
+  const f = WITH_ASK + `
+<!-- prt:answer
+to: a99
+disposition: addressed
+-->
+body
+<!-- /prt -->
+`;
+  assert.match(parseActionFile(f).errors.join(' '), /does not match any ask/);
+});
+
+// ---- the shorthand, and the leak paths it must not open --------------------
+
+test('an un-promoted @ai note is an error, so it is never silently swallowed', () => {
+  const f = MINIMAL + '\n@ai the summary is too soft here\n';
+  assert.match(parseActionFile(f).errors.join(' '), /un-promoted/);
+});
+
+test('@ai inside text that gets posted is refused, not stripped', () => {
+  const f = `Status: draft
+
+<!-- prt:verdict
+event: COMMENT
+-->
+
+<!-- prt:body -->
+Real summary.
+@ai remember to soften this
+<!-- /prt -->
+`;
+  const p = parseActionFile(f);
+  assert.match(p.errors.join(' '), /inside text that gets posted/);
+  // And the bytes are untouched: refusing beats editing what the human approved.
+  assert.match(p.body, /@ai remember to soften this/);
+});
+
+test('@ai indented by one space stays prose, exactly as the format already teaches', () => {
+  const f = MINIMAL + '\n  @ai this is just prose about notes\n';
+  assert.deepEqual(parseActionFile(f).errors, []);
+});
+
+test('promotion turns shorthand into a canonical block and reports what it inferred', () => {
+  const f = WITH_ASK.replace(/<!-- prt:ask[\s\S]*<!-- \/prt -->\n$/, '@ai drop this, the null check is upstream\n');
+  const { text, promoted } = promoteShorthand(f, { startOrdinal: 7, generation: 4 });
+  assert.equal(promoted.length, 1);
+  assert.equal(promoted[0].id, 'a7');
+  // No explicit target, so it binds to the nearest preceding block — i1.
+  assert.equal(promoted[0].re, 'i1');
+  assert.equal(promoted[0].inferred, true);
+  const p = parseActionFile(text);
+  assert.deepEqual(p.errors, []);
+  assert.equal(p.asks[0].question, 'drop this, the null check is upstream');
+  assert.equal(p.asks[0].raised, 'g4');
+});
+
+test('an explicit target on the shorthand wins over position', () => {
+  // With a punctuation separator the target token is consumed, giving a clean body.
+  const f = MINIMAL + '\n@ai verdict — COMMENT is too soft, two reviewers disagreed\n';
+  const { promoted, text } = promoteShorthand(f, { startOrdinal: 1, generation: 2 });
+  assert.equal(promoted[0].re, 'verdict');
+  assert.equal(promoted[0].inferred, false);
+  assert.equal(parseActionFile(text).asks[0].question, 'COMMENT is too soft, two reviewers disagreed');
+});
+
+test('a target token separated by only a space is read but never eaten', () => {
+  // "general cleanup of the summary" and "i1 is fine, it is i2 that is wrong" both
+  // open with a token that is also an ordinary word. Consuming it on a bare space
+  // deleted a word the human wrote, which is never an acceptable price for a
+  // tidier body — so the target is read and the text is kept whole.
+  const g = promoteShorthand(MINIMAL + '\n@ai general cleanup of the summary\n', { startOrdinal: 1 });
+  assert.equal(g.promoted[0].re, 'general');
+  assert.equal(parseActionFile(g.text).asks[0].question, 'general cleanup of the summary');
+
+  const withInline = MINIMAL + `
+<!-- prt:inline
+id: i1
+post: true
+subject: line
+path: src/Main.java
+line: 10
+-->
+**[BUG] c**
+
+body
+<!-- /prt -->
+
+@ai i1 is fine, it is i2 that is wrong
+`;
+  const h = promoteShorthand(withInline, { startOrdinal: 1 });
+  assert.equal(h.promoted[0].re, 'i1');
+  assert.equal(parseActionFile(h.text).asks[0].question, 'i1 is fine, it is i2 that is wrong');
+});
+
+test('a mistyped block kind is an error, not a silently dropped note', () => {
+  const f = MINIMAL + '\n<!-- prt:note -->\ndrop the third comment\n<!-- /prt -->\n';
+  assert.match(parseActionFile(f).errors.join(' '), /did you mean `prt:notes`|did you mean `prt:ask`/);
+});
+
+test('@ai inside an inert block is an error, because nothing else would report it', () => {
+  const f = MINIMAL + '\n<!-- prt:context -->\n@ai drop the third comment\n<!-- /prt -->\n';
+  assert.match(parseActionFile(f).errors.join(' '), /inside a block, so it will not be collected/);
+});
+
+test('a second review body is an error rather than silently replacing the first', () => {
+  const f = MINIMAL + '\n<!-- prt:body -->\nA revised summary I pasted below the original.\n<!-- /prt -->\n';
+  assert.match(parseActionFile(f).errors.join(' '), /a second .*prt:body/);
+});
+
+test('a BOM on line 1 does not hide the gate or duplicate the status line', () => {
+  const withBom = '\uFEFF' + MINIMAL;
+  assert.equal(parseStatus(withBom), 'draft');
+  const armed = setStatus(withBom, 'ready');
+  assert.equal(armed.split('\n').filter((l) => /^\uFEFF?Status:/.test(l)).length, 1);
+  assert.equal(parseStatus(armed), 'ready');
+});
+
+test('a note reproduced in full is caught even when it is under twelve words', () => {
+  const note = 'do not mention the netty regression it is embargoed';
+  const f = WITH_ASK
+    .replace('this one is wrong, the null check is upstream', note)
+    .replace('Summary text.', 'Also: ' + note + '.');
+  const hits = askQuoteLint(parseActionFile(f));
+  assert.equal(hits.length, 1, 'a ten-word note pasted verbatim is still a paste');
+});
+
+test('a note written mostly in backticks is still caught', () => {
+  const note = 'the \`assertion\` in \`testFoo\` is \`bogus\` and the \`author\` told me \`privately\`';
+  const f = WITH_ASK
+    .replace('this one is wrong, the null check is upstream', note)
+    .replace('Summary text.', note);
+  assert.ok(askQuoteLint(parseActionFile(f)).length > 0, 'code spans must not hide a verbatim paste');
+});
+
+test('a follows chain is lifted off the shorthand', () => {
+  const f = MINIMAL + '\n@ai follows a5 still not convinced, the clamp moved\n';
+  const { promoted } = promoteShorthand(f, { startOrdinal: 6, generation: 3 });
+  assert.equal(promoted[0].follows, 'a5');
+});
+
+// ---- the tokenizer hazard --------------------------------------------------
+
+test('an unterminated sentinel never swallows the block below it', () => {
+  // The closing --> is missing from the ask. Before the guard, the scan ran on
+  // to the inline's -->, absorbed its id/path/line as the ask's own fields and
+  // its text as the ask's body — and the armed inline comment vanished with no
+  // error at all.
+  const f = `Status: draft
+
+<!-- prt:verdict
+event: COMMENT
+-->
+
+<!-- prt:ask
+id: a1
+re: general
+
+a note whose sentinel is broken
+<!-- /prt -->
+
+<!-- prt:inline
+id: i1
+post: true
+subject: line
+path: src/Main.java
+line: 10
+-->
+**[BUG] a real finding that must not disappear**
+<!-- /prt -->
+`;
+  const kinds = tokenize(f).map((b) => b.kind);
+  assert.ok(kinds.includes('inline'), 'the inline block must still be seen');
+  const p = parseActionFile(f);
+  assert.match(p.errors.join(' '), /missing its/);
+});
+
+// ---- carry-over ------------------------------------------------------------
+
+test('open notes survive regeneration; answered ones age out', () => {
+  const answered = WITH_ASK + `
+<!-- prt:answer
+to: a1
+disposition: addressed
+in: g1
+-->
+Done.
+<!-- /prt -->
+
+<!-- prt:ask
+id: a2
+re: verdict
+-->
+why COMMENT and not REQUEST_CHANGES?
+<!-- /prt -->
+`;
+  const newAnchors = new Map([['i1', { path: 'src/Main.java', line: 10, side: 'RIGHT' }]]);
+  const out = carryAsks(answered, { newIds: new Set(['i1']), newAnchors, generation: 4, ordinalFloor: 0 });
+  const ids = out.asks.map((a) => a.id);
+  assert.ok(ids.includes('a2'), 'the open note survives');
+  assert.ok(!ids.includes('a1'), 'an answer from g1 is too old to carry into g4');
+  assert.equal(out.maxOrdinal, 2, 'a retired id is never reissued');
+});
+
+test('a note is rebound by anchor, not by id, when the comment moves', () => {
+  // Next round the same finding is i2, and a different finding took id i1.
+  const newAnchors = new Map([
+    ['i1', { path: 'src/Other.java', line: 99, side: 'RIGHT' }],
+    ['i2', { path: 'src/Main.java', line: 10, side: 'RIGHT' }],
+  ]);
+  const out = carryAsks(WITH_ASK, { newIds: new Set(['i1', 'i2']), newAnchors, generation: 5, ordinalFloor: 0 });
+  assert.equal(out.asks[0].re, 'i2', 'follows the anchor, not the recycled id');
+  assert.deepEqual(out.changes.map((c) => c.kind), ['rebound']);
+});
+
+test('a note whose comment is gone is orphaned loudly, never dropped', () => {
+  const out = carryAsks(WITH_ASK, { newIds: new Set(), newAnchors: new Map(), generation: 5, ordinalFloor: 0 });
+  assert.equal(out.asks.length, 1);
+  assert.equal(out.asks[0].re, 'gone');
+  assert.equal(out.asks[0].was, 'src/Main.java:10');
+  assert.deepEqual(out.changes.map((c) => c.kind), ['orphaned']);
+});
+
+test('carry-over refuses rather than dropping notes it cannot read', () => {
+  const broken = WITH_ASK.replace('<!-- prt:ask\nid: a1\nre: i1\n-->', '<!-- prt:ask\nid: a1\nre: i1');
+  const out = carryAsks(broken, { newIds: new Set(['i1']), newAnchors: new Map(), generation: 2 });
+  assert.ok(out.structuralErrors.length > 0);
+  assert.deepEqual(out.asks, []);
+});
+
+test('a carried note keeps its blank lines through the generator squeeze', () => {
+  const ask = {
+    id: 'a1', re: 'verdict', blocking: true, closed: false, raised: 'g2', open: true, state: 'open',
+    question: 'first paragraph\n\n\n\nfourth line after three blanks',
+  };
+  const text = renderActionFile({
+    repo: 'apache/pulsar',
+    analysis: {
+      number: 1, title: 't', url: 'u', author: 'a', authorAssociation: 'CONTRIBUTOR',
+      updatedAt: new Date().toISOString(), additions: 1, deletions: 0, changedFiles: 1,
+      ci: 'SUCCESS', reviewDecision: null, myLastReview: null, headMoved: false,
+      threadCounts: {}, labels: [], threads: [], newIssueComments: [], newReviewsByOthers: [],
+      headOid: 'abc', baseRefName: 'master',
+    },
+    delta: null, findings: null, kind: 'initial', generation: 2, reviewerLogin: 'me',
+    carriedAsks: [ask], carriedAnswers: [],
+  });
+  assert.match(text, /first paragraph\n\n\n\nfourth line/, 'the human bytes are not reflowed');
+});
+
+test('a private note repeated verbatim in outgoing text is caught before it posts', () => {
+  const leaked = WITH_ASK
+    .replace('this one is wrong, the null check is upstream',
+      'the clamp in getMaxEntriesInThisBatch re-clamps per consumer so this whole claim is simply wrong here')
+    .replace('Summary text.',
+      'the clamp in getMaxEntriesInThisBatch re-clamps per consumer so this whole claim is simply wrong here');
+  const hits = askQuoteLint(parseActionFile(leaked));
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].id, 'a1');
+  // The human, and only the human, can clear it.
+  const ok = leaked.replace('head: abc123', 'head: abc123\nask-quote-reviewed: yes');
+  assert.deepEqual(askQuoteLint(parseActionFile(ok)), []);
+});
+
+test('a short shared phrase does not false-positive the quote lint', () => {
+  const p = parseActionFile(WITH_ASK.replace('Summary text.', 'the null check is upstream'));
+  assert.deepEqual(askQuoteLint(p), []);
+});
+
+
+test('a body containing the whitespace-guard token is not spliced into another block', () => {
+  // The generator masks ask/answer spans before squeezing blank lines. If a
+  // finding body happened to contain the mask token, restoring it would splice
+  // an ask block into a comment that was about to be posted — truncating it.
+  const analysis = {
+    number: 1, title: 't', url: 'u', author: 'a', authorAssociation: 'CONTRIBUTOR',
+    updatedAt: new Date().toISOString(), additions: 1, deletions: 0, changedFiles: 1,
+    ci: 'SUCCESS', reviewDecision: null, myLastReview: null, headMoved: false,
+    threadCounts: {}, labels: [], threads: [], newIssueComments: [], newReviewsByOthers: [],
+    headOid: 'abc', baseRefName: 'master',
+  };
+  const text = renderActionFile({
+    repo: 'apache/pulsar', analysis, delta: null, kind: 'initial', generation: 1, reviewerLogin: 'me',
+    findings: {
+      summary: 'Summary', recommendedEvent: 'COMMENT',
+      findings: [{
+        id: 'i1', severity: 'BUG', claim: 'c', path: 'src/Main.java', line: 10, side: 'RIGHT',
+        body: 'This code emits @@PRTASK0@@ literally.\n\nSecond paragraph that must survive.',
+      }],
+    },
+    carriedAsks: [{
+      id: 'a1', re: 'verdict', blocking: true, closed: false, raised: 'g1', open: true, state: 'open',
+      question: 'is this right?',
+    }],
+    carriedAnswers: [],
+  });
+  const review = planActions(parseActionFile(text)).find((a) => a.kind === 'review');
+  const inline = review.comments.find((c) => c.id === 'i1');
+  assert.ok(inline.body.includes('Second paragraph that must survive.'), 'the comment is not truncated');
+  assert.ok(inline.body.includes('@@PRTASK0@@'), 'the literal survives untouched');
+  assert.ok(!inline.body.includes('prt:ask'), 'no note is spliced into a postable body');
 });

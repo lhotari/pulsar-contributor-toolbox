@@ -16,7 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 
-import { parseActionFile, planActions, contentHash, payloadHash, setStatus, appendLog } from './actionfile.mjs';
+import { parseActionFile, planActions, contentHash, payloadHash, setStatus, appendLog, blockingAsks } from './actionfile.mjs';
 import { parseDiff, commentableAnchors, validateAnchor } from './diff.mjs';
 import {
   prDiff, fetchPr, submitReview, replyToComment, resolveThread, pendingReviews, describeApiError, httpStatusOf,
@@ -250,7 +250,109 @@ export async function preflight(ctx, parsed, tx) {
     }
   }
 
+  // An unanswered note of your own refuses the post. This lives in preflight,
+  // not in `parseActionFile`: an open ask is the NORMAL state of a draft being
+  // worked on, so as a parse error it would make every mid-round `prt validate`
+  // fail — and the revisit loop depends on that signal staying clean.
+  //
+  // The failure it prevents is real: arming a batch days later with your own
+  // objection three lines above, and posting under your own name a review you
+  // had already said was wrong.
+  for (const ask of blockingAsks(parsed)) {
+    reasons.push(
+      `note "${ask.id}"${ask.re && ask.re !== 'general' ? ` (on ${ask.re})` : ''} is still open: ` +
+        `"${firstLine(ask.question)}". Answer it, or set \`blocking: no\` to defer it, or \`closed: yes\` to withdraw it.`,
+    );
+  }
+
+  if (config.askQuoteLint !== false) {
+    const quoted = askQuoteLint(parsed);
+    if (quoted.length) {
+      reasons.push(
+        `outgoing text repeats ${quoted.length === 1 ? 'a private note' : 'private notes'} to the assistant verbatim ` +
+          `(${quoted.map((q) => `${q.id}: "${q.excerpt}…"`).join(', ')}). Notes in \`prt:ask\` are yours, not the author's. ` +
+          'Rewrite the passage, or add `ask-quote-reviewed: yes` to the `<!-- prt:doc -->` block if it genuinely belongs in the review.',
+      );
+    }
+  }
+
   return { reasons, pr, currentDiff, anchorProblems };
+}
+
+function firstLine(s, max = 90) {
+  const line = String(s ?? '').split('\n')[0].trim();
+  return line.length > max ? `${line.slice(0, max)}…` : line;
+}
+
+/**
+ * Words, punctuation flattened. Two normalisations, because either alone has a
+ * blind spot: dropping code spans loses a note written mostly in backticks
+ * (reviewers write `symbolNames` constantly), while keeping them lets a shared
+ * identifier drag unrelated prose over the threshold.
+ */
+function wordsOf(s, { code = 'strip' } = {}) {
+  let t = String(s ?? '');
+  t = code === 'strip'
+    ? t.replace(/```[\s\S]*?```/g, ' ').replace(/`[^`]*`/g, ' ')
+    : t.replace(/`+/g, ' ');
+  return t
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+/**
+ * The one leak the parser cannot close: the model folding a private note into
+ * outgoing prose during a revision pass. SKILL.md already warns that revision
+ * is where tooling attribution leaks, for the same reason — prose gets
+ * reshuffled and provenance is lost.
+ *
+ * 12 consecutive words with code stripped is essentially copy-paste detection.
+ * A shorter run false-positives on the common case, where the note IS a
+ * technical objection and its sentence is also the right sentence for the
+ * review — and the escape hatch is one only the human may use, since the model
+ * is forbidden to touch `prt:doc`.
+ */
+export function askQuoteLint(parsed, { run = 12, whole = 6 } = {}) {
+  if (parsed.doc?.['ask-quote-reviewed'] === 'yes') return [];
+  if (!parsed.asks?.length) return [];
+  const outgoing = [];
+  for (const action of planActions(parsed)) {
+    if (action.kind === 'review') {
+      if (action.body) outgoing.push(action.body);
+      outgoing.push(...action.comments.map((c) => c.body));
+    } else if (action.kind === 'thread-reply') outgoing.push(action.thread.body);
+    else if (action.kind === 'issue-comment') outgoing.push(action.body);
+  }
+  const modes = ['strip', 'keep'];
+  const haystacks = new Map(modes.map((m) => [m, outgoing.map((t) => wordsOf(t, { code: m }).join(' '))]));
+  const hits = [];
+  for (const ask of parsed.asks) {
+    let hit = null;
+    for (const mode of modes) {
+      const w = wordsOf(ask.question, { code: mode });
+      const hay = haystacks.get(mode);
+      if (!w.length) continue;
+      // A note reproduced in FULL is a paste however short it is. The sliding
+      // window alone missed "do not mention the netty regression it is
+      // embargoed" — ten words, and exactly the kind of note that must not go
+      // out. `whole` floors it so a three-word note cannot false-positive.
+      if (w.length >= whole && w.length < run) {
+        const all = w.join(' ');
+        if (hay.some((h) => h.includes(all))) { hit = w.slice(0, 8).join(' '); break; }
+      }
+      if (w.length < run) continue;
+      for (let i = 0; i + run <= w.length; i++) {
+        const needle = w.slice(i, i + run).join(' ');
+        if (hay.some((h) => h.includes(needle))) { hit = w.slice(i, i + 8).join(' '); break; }
+      }
+      if (hit) break;
+    }
+    if (hit) hits.push({ id: ask.id, excerpt: hit });
+  }
+  return hits;
 }
 
 export function securityLint(parsed) {
