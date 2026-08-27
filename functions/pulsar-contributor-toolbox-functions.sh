@@ -1944,6 +1944,8 @@ function ptbx_gha_ci_trigger() {
         branch-3.0|branch-3.2|branch-3.3|branch-4.0|branch-4.1|branch-4.2|master)
           gh workflow run pulsar-ci.yaml -R $SLUG -r $BRANCH --field collect_coverage=false
           gh workflow run pulsar-ci-flaky.yaml -R $SLUG -r $BRANCH --field collect_coverage=false
+          gh workflow run ci-go-functions.yaml -R $SLUG -r $BRANCH
+          gh workflow run ci-python-functions.yaml -R $SLUG -r $BRANCH
           ;;
         *)
           echo "Unsupported branch $BRANCH"
