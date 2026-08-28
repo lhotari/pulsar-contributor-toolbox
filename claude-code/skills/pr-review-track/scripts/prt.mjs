@@ -133,11 +133,15 @@ COMMANDS.help = () => {
 
   Housekeeping
     cleanup [--purge] [--dry-run]          archive tracking for closed/merged PRs
+    archive <N>... [--reason "why"]        set a review aside; \`latest\` stops offering it
+    archive [--list]                       what is in the archive
+    unarchive <N>...                       bring one back, draft and cache intact
     status <N> [<status>]                  read or set line 1
     doctor                                 environment + rate-limit check
 
   Aliases
-    show-latest = latest    queue = list    scan = sync    post = submit    archive = cleanup
+    show-latest = latest    queue = list    scan = sync    post = submit
+    ignore = archive        restore = unarchive
 
   Global flags: --repo owner/repo  --root DIR  --json  --limit N
 
@@ -181,6 +185,9 @@ COMMANDS.latest = async () => {
     searchEngagedPrs(base.repo, base.login),
   ]);
   const tracked = new Set(store.listTracked(base.root, base.repo));
+  // Archiving a PR is how the reviewer says "not this one". Ranking it back to
+  // the top of the list tomorrow would make that gesture meaningless.
+  const archived = new Set(store.listArchived(base.root, base.repo));
   const reviewRequested = new Set(
     [...engaged.entries()].filter(([, why]) => why.has('review-requested')).map(([n]) => n),
   );
@@ -188,7 +195,7 @@ COMMANDS.latest = async () => {
   const eligible = candidates.filter((pr) => {
     if (pr.author?.login === base.login) return false;
     if (base.cfg.ignoreAuthors.includes(pr.author?.login)) return false;
-    if (tracked.has(pr.number)) return false;
+    if (tracked.has(pr.number) || archived.has(pr.number)) return false;
     // Exclude only PRs I have actually engaged with. A PR where my review was
     // *requested* and I have not answered is the single most relevant thing
     // this command can surface — filtering it out as "engaged" hid exactly the
@@ -907,7 +914,8 @@ function writeBoard(base) {
   }
 
   const file = path.join(dir, 'BOARD.md');
-  store.writeAtomic(file, renderBoard({ repo: base.repo, rows, storeDir: dir }));
+  const archived = store.listArchived(base.root, base.repo);
+  store.writeAtomic(file, renderBoard({ repo: base.repo, rows, storeDir: dir, archived }));
   return file;
 }
 
@@ -1163,14 +1171,10 @@ COMMANDS.cleanup = async () => {
     const status = text ? parseStatus(text) : null;
 
     if (!isClosed) { kept.push(n); continue; }
-    if (IN_FLIGHT_STATUSES.has(status) || status === 'ready') {
-      // `ready` is a human signature that never got posted. Archiving it would
-      // throw that approval away silently.
+    const blocker = archiveBlocker(status);
+    if (blocker) {
       kept.push(n);
-      const why = status === 'ready'
-        ? 'you approved it but it was never posted'
-        : 'a transaction is still open';
-      say(`#${n} is ${prState} but its action file is "${status}" — ${why}. Run \`prt recover ${n}\`, or \`prt status ${n} skip\` to let cleanup take it.`);
+      say(`#${n} is ${prState} but its action file is "${status}" — ${blocker}. Run \`prt recover ${n}\`, or \`prt status ${n} skip\` to let cleanup take it.`);
       continue;
     }
     const dir = store.prDir(base.root, base.repo, n);
@@ -1183,7 +1187,7 @@ COMMANDS.cleanup = async () => {
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.rmSync(dest, { recursive: true, force: true });
       fs.renameSync(dir, dest);
-      fs.writeFileSync(path.join(dest, 'ARCHIVED.txt'), `${prState} · archived ${new Date().toISOString()}\n`);
+      fs.writeFileSync(path.join(dest, store.ARCHIVE_MARKER), `${prState} · archived ${new Date().toISOString()}\n`);
     }
   }
   if (!dryRun) writeBoard(base);
@@ -1194,6 +1198,157 @@ COMMANDS.cleanup = async () => {
   }
 };
 
+/**
+ * Why a review may not be moved out of the live tree, or null if it may.
+ *
+ * `cleanup` and `archive` ask this for opposite reasons — one on GitHub's
+ * authority that the PR is dead, the other because I said so — but the thing
+ * being protected is the same, so the rule lives in one place. `ready` is a
+ * human signature that has not been posted yet; filing it away would throw that
+ * approval out silently. An in-flight status means a submit transaction is open,
+ * and moving the directory under it loses the record needed to reconcile.
+ */
+function archiveBlocker(status) {
+  if (IN_FLIGHT_STATUSES.has(status)) return 'a transaction is still open';
+  if (status === 'ready') return 'you approved it but it was never posted';
+  return null;
+}
+
+/**
+ * Set a review aside without finishing it.
+ *
+ * `cleanup` archives what GitHub has settled; this archives what I have.
+ * "I am not going to review this one" needs somewhere for the directory to go
+ * that is neither the live tree nor the bin, and `_archive` is already exactly
+ * that place — the one part of the store nothing else reads. `latest` is taught
+ * to consult it, so an ignored PR does not get ranked back onto the board
+ * tomorrow, which is the whole point of ignoring it.
+ *
+ * Reversible on purpose: `prt unarchive <N>` puts it back, still holding
+ * whatever draft, notes and cache it had when it left.
+ */
+COMMANDS.archive = async () => {
+  const base = await context();
+  const numbers = argv._.slice(1).map(assertSafeNumber);
+  if (!numbers.length || argv.flags.list) return reportArchive(base);
+
+  const reason = typeof argv.flags.reason === 'string' ? argv.flags.reason : null;
+  const archived = [];
+  const refused = [];
+  for (const n of numbers) {
+    const dir = store.prDir(base.root, base.repo, n);
+    if (!fs.existsSync(dir)) {
+      const why = fs.existsSync(store.archiveDir(base.root, base.repo, n))
+        ? 'already archived'
+        : 'not tracked';
+      refused.push({ number: n, why });
+      say(`#${n}: ${why}`);
+      continue;
+    }
+    const text = store.readActionFile(base.root, base.repo, n);
+    const status = text ? parseStatus(text) : null;
+    const blocker = archiveBlocker(status);
+    if (blocker) {
+      refused.push({ number: n, why: blocker, status });
+      say(`#${n} is "${status}" — ${blocker}. Run \`prt recover ${n}\`, or \`prt status ${n} hold\` and archive it then.`);
+      continue;
+    }
+
+    // Read the state before the move: a corrupt pr.json must not leave the
+    // directory relocated but unmarked.
+    let st = null;
+    try {
+      st = store.readState(base.root, base.repo, n);
+    } catch { /* the marker just says "unknown" then */ }
+
+    const dest = store.archiveDir(base.root, base.repo, n);
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.rmSync(dest, { recursive: true, force: true });
+    fs.renameSync(dir, dest);
+    fs.writeFileSync(
+      path.join(dest, store.ARCHIVE_MARKER),
+      `${st?.state ?? 'unknown'} · archived ${new Date().toISOString()} · by hand${reason ? ` · ${reason}` : ''}\n`,
+    );
+    archived.push({ number: n, status: status ?? 'none', to: dest });
+  }
+
+  if (archived.length) writeBoard(base);
+  emit({ archived, refused });
+  if (!JSON_OUT && archived.length) {
+    say(`archived ${archived.length} PR(s); \`prt unarchive <N>\` brings one back`);
+    for (const a of archived) say(`  #${a.number} (${a.status})`);
+  }
+  // Anything refused is a non-zero exit even when the rest went: a caller that
+  // asked for four and got three should not read that as success.
+  if (refused.length) process.exitCode = 1;
+};
+
+/** Put an archived PR back in the live tree, draft and cache intact. */
+COMMANDS.unarchive = async () => {
+  const base = await context();
+  const numbers = argv._.slice(1).map(assertSafeNumber);
+  if (!numbers.length) {
+    reportArchive(base);
+    die('usage: prt unarchive <PR number>...');
+  }
+
+  const restored = [];
+  const refused = [];
+  for (const n of numbers) {
+    const src = store.archiveDir(base.root, base.repo, n);
+    const dest = store.prDir(base.root, base.repo, n);
+    if (!fs.existsSync(src)) {
+      refused.push({ number: n, why: 'not in the archive' });
+      say(`#${n} is not in the archive`);
+      continue;
+    }
+    // Never merge two histories: if the PR was tracked again after being
+    // archived, the live copy is the newer one and only the human can choose.
+    if (fs.existsSync(dest)) {
+      refused.push({ number: n, why: 'tracked again already' });
+      say(`#${n} is tracked again already — remove ${dest} first if the archived copy is the one you want`);
+      continue;
+    }
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.renameSync(src, dest);
+    fs.rmSync(path.join(dest, store.ARCHIVE_MARKER), { force: true });
+    restored.push({ number: n, to: dest });
+  }
+
+  if (restored.length) writeBoard(base);
+  emit({ restored, refused });
+  if (!JSON_OUT && restored.length) {
+    say(`restored ${restored.length} PR(s) — their GitHub state is as stale as the day they were archived:`);
+    say(`  prt refresh ${restored.map((r) => r.number).join(' ')}`);
+  }
+  if (refused.length) process.exitCode = 1;
+};
+
+/** What is in the archive, so that bringing something back is possible. */
+function reportArchive(base) {
+  const rows = store.listArchived(base.root, base.repo).map((n) => {
+    const dir = store.archiveDir(base.root, base.repo, n);
+    // One unreadable archived PR must not hide the rest of the list.
+    let st = null;
+    try {
+      st = store.readStateFrom(dir);
+    } catch { /* listed by number alone */ }
+    let marker = null;
+    try {
+      marker = fs.readFileSync(path.join(dir, store.ARCHIVE_MARKER), 'utf8').trim();
+    } catch { /* archived by an older version, or by hand */ }
+    return { number: n, title: st?.title ?? null, state: st?.state ?? null, url: st?.url ?? null, marker };
+  });
+  emit({ repo: base.repo, archived: rows });
+  if (JSON_OUT) return;
+  if (!rows.length) { say(`nothing archived for ${base.repo}`); return; }
+  say(`${rows.length} archived PR(s) in ${base.repo} — \`prt unarchive <N>\` brings one back:\n`);
+  for (const r of rows) {
+    say(`  #${r.number}  ${r.title ?? ''}`);
+    if (r.marker) say(`      ${r.marker}`);
+  }
+}
+
 // ------------------------------------------------------------------- dispatch
 
 // Aliases for the names the skill and the user actually say out loud.
@@ -1203,7 +1358,8 @@ const ALIASES = {
   queue: 'list',
   scan: 'sync',
   post: 'submit',
-  archive: 'cleanup',
+  ignore: 'archive',
+  restore: 'unarchive',
 };
 
 const handler = COMMANDS[CMD] ?? COMMANDS[ALIASES[CMD]];

@@ -96,6 +96,11 @@ test('the in-progress section names only the reviews that are unfinished', () =>
   assert.doesNotMatch(section, /#43/, 'submitted is finished');
   assert.doesNotMatch(section, /#44/, 'no review.md means no review was started');
 
+  // Whose PR it is decides how a half-finished review gets picked back up, so
+  // the author is in this table and not only in the bucket tables below.
+  assert.match(section, /\| PR \| status \| author \| draft \| bucket \| title \|/);
+  assert.match(section, /\| `draft` \| someone \| \[review\.md\]\(pr-42\/review\.md\) \|/);
+
   // ...and the bucket table below carries the same link on its status cell.
   assert.match(content, /\| \[`draft`\]\(pr-42\/review\.md\) \|/);
   assert.match(content, /\| `submitted` \|/);

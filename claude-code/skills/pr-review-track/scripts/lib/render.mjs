@@ -574,7 +574,7 @@ export function isReviewInProgress(status) {
  * Links are relative to the board's own directory, so they resolve in an editor
  * without baking anyone's home directory into generated markdown.
  */
-export function renderBoard({ repo, rows, generatedAt = new Date().toISOString(), storeDir = null }) {
+export function renderBoard({ repo, rows, generatedAt = new Date().toISOString(), storeDir = null, archived = [] }) {
   const ordered = [...rows].sort((a, b) => (b.urgency ?? 0) - (a.urgency ?? 0));
   // A path is only a link when the file behind it is still live work.
   const draftLink = (r) => (r.reviewPath && isReviewInProgress(r.status) ? r.reviewPath : null);
@@ -594,10 +594,12 @@ export function renderBoard({ repo, rows, generatedAt = new Date().toISOString()
     out.push('_Reviews I started and have not finished: a `review.md` exists and its status is');
     out.push(`neither \`submitted\` nor \`skip\`.${storeDir ? ` Links are relative to \`${storeDir}\`.` : ''}_`);
     out.push('');
-    out.push('| PR | status | draft | bucket | title |');
-    out.push('|---|---|---|---|---|');
+    // The author is here for the same reason it is in every bucket table: whose
+    // PR it is decides how a half-finished review gets picked back up.
+    out.push('| PR | status | author | draft | bucket | title |');
+    out.push('|---|---|---|---|---|---|');
     for (const r of inProgress) {
-      out.push(`| [#${r.number}](${r.url}) | \`${r.status}\` | [review.md](${draftLink(r)}) | ${r.bucket} | ${title(r)} |`);
+      out.push(`| [#${r.number}](${r.url}) | \`${r.status}\` | ${r.author ?? '?'} | [review.md](${draftLink(r)}) | ${r.bucket} | ${title(r)} |`);
     }
     out.push('');
   }
@@ -626,6 +628,17 @@ export function renderBoard({ repo, rows, generatedAt = new Date().toISOString()
       out.push(`- [#${r.number}](${r.url}) ${r.prState} — ${r.title}${href ? ` — unfinished draft: [review.md](${href})` : ''}`);
     }
     out.push('');
+  }
+
+  // A count, not a list: the archive accumulates every PR cleanup has ever
+  // taken, and the board is for what is still live. Enough to remember that
+  // something was set aside, and to say how to get it back.
+  if (archived.length) {
+    out.push(
+      `_${archived.length} archived PR(s) not shown — \`prt archive --list\` to see them, ` +
+        '`prt unarchive <N>` to bring one back._',
+      '',
+    );
   }
 
   return out.join('\n');

@@ -11,7 +11,9 @@
 //         notes.md                       private notes, never posted
 //         cache/                         diff, threads, findings from pr-review
 //         history/                       archived action files, timestamped
-//     _archive/<owner>/<repo>/pr-<N>/     closed/merged, moved here by cleanup
+//     _archive/<owner>/<repo>/pr-<N>/     out of the way: closed/merged PRs moved
+//                                         here by cleanup, or ones set aside by
+//                                         `prt archive`. `prt unarchive` reverses it.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -94,10 +96,17 @@ export function prDir(root, repo, number) {
   return path.join(repoDir(root, repo), `pr-${number}`);
 }
 
-export function archiveDir(root, repo, number) {
+export function archiveRepoDir(root, repo) {
   const [owner, name] = repo.split('/');
-  return path.join(root, '_archive', owner, name, `pr-${number}`);
+  return path.join(root, '_archive', owner, name);
 }
+
+export function archiveDir(root, repo, number) {
+  return path.join(archiveRepoDir(root, repo), `pr-${number}`);
+}
+
+/** Written into an archived directory so a human browsing the tree knows why. */
+export const ARCHIVE_MARKER = 'ARCHIVED.txt';
 
 export function ensurePrDir(root, repo, number) {
   const d = prDir(root, repo, number);
@@ -106,14 +115,27 @@ export function ensurePrDir(root, repo, number) {
   return d;
 }
 
-export function listTracked(root, repo) {
-  const d = repoDir(root, repo);
-  if (!fs.existsSync(d)) return [];
+function listPrNumbers(dir) {
+  if (!fs.existsSync(dir)) return [];
   return fs
-    .readdirSync(d, { withFileTypes: true })
+    .readdirSync(dir, { withFileTypes: true })
     .filter((e) => e.isDirectory() && /^pr-\d+$/.test(e.name))
     .map((e) => Number(e.name.slice(3)))
     .sort((a, b) => b - a);
+}
+
+export function listTracked(root, repo) {
+  return listPrNumbers(repoDir(root, repo));
+}
+
+/**
+ * PRs moved out of the live tree — by `cleanup` once they closed, or by hand to
+ * drop one off the radar. Nothing else in the tool looks inside `_archive`, so
+ * this is also what "ignored" means: `latest` consults it so an archived PR is
+ * not offered up again the next time the backlog is ranked.
+ */
+export function listArchived(root, repo) {
+  return listPrNumbers(archiveRepoDir(root, repo));
 }
 
 export function listRepos(root) {
@@ -129,7 +151,12 @@ export function listRepos(root) {
 }
 
 export function readState(root, repo, number) {
-  const p = path.join(prDir(root, repo, number), 'pr.json');
+  return readStateFrom(prDir(root, repo, number));
+}
+
+/** The same read, for a PR directory that is not (or is no longer) in the live tree. */
+export function readStateFrom(dir) {
+  const p = path.join(dir, 'pr.json');
   if (!fs.existsSync(p)) return null;
   try {
     return JSON.parse(fs.readFileSync(p, 'utf8'));

@@ -23,6 +23,11 @@ tooling is allowed to do.
 | `hold` | Parked by the human. `sync` / `re-review` will not regenerate over it. | human |
 | `skip` | The human decided not to review this PR. `cleanup` may archive it. | human |
 
+`skip` parks a PR in the live tree, where it stays visible in the `parked`
+bucket and `cleanup` picks it up once GitHub closes it. To get it off the board
+entirely and out of `latest`, `prt archive <N>` moves the whole directory to
+`_archive` — reversibly, with `prt unarchive <N>`.
+
 `ready`, `queued`, `partial`, `hold`, `skip` are **protected**: a generator
 refuses to overwrite the file. Use `prt draft <N> --to review.next.md` to
 produce a proposal alongside it instead.

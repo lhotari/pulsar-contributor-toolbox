@@ -76,13 +76,16 @@ urgent first:
 
 Above the buckets sits **`reviews in progress`**: every PR whose `review.md`
 exists and is neither `submitted` nor `skip` — the reviews that were started and
-not finished — each linked to its draft. The same rows are reachable from the
-buckets too, where the status cell is the link. Links are relative to the
-board's directory, so they open straight from an editor.
+not finished — with its author, and linked to its draft. The same rows are
+reachable from the buckets too, where the status cell is the link. Links are
+relative to the board's directory, so they open straight from an editor.
 
 A `hold` draft counts as in progress: it was started, it is parked, it is not
 done. An unfinished draft on a closed or merged PR is linked from the
 `closed or merged` list as well, since `prt cleanup` is about to archive it.
+
+The board ends with a count of what is in `_archive` — enough to remember that
+something was set aside, without listing every PR `cleanup` has ever taken.
 
 `list` is the one-line-per-PR form, sorted by the same urgency score.
 
@@ -221,6 +224,28 @@ Archives the tracking directory of every closed or merged PR to
 Held back and reported rather than archived: a PR whose action file is `queued`
 or `partial` (a transaction is open), or `ready` — a `ready` file is an approval
 that never got posted, and archiving it would throw that approval away silently.
+
+### `archive <N>... [--reason "why"]` · `archive [--list]` · `unarchive <N>...`
+
+`cleanup` archives what GitHub has settled; `archive` archives what you have.
+Use it for the PR you have decided not to review, or not to review now: the
+directory moves to the same `_archive/<owner>/<repo>/pr-<N>/`, with its draft,
+notes and cache intact, and `--reason` is recorded in `ARCHIVED.txt` beside it.
+
+Archiving is how you say *not this one*, so `latest` skips archived numbers as
+well as tracked ones — an ignored PR is not ranked back onto the board tomorrow.
+The board stops listing it and carries a one-line count of what is in the archive.
+
+It refuses exactly what `cleanup` refuses: `ready` (an approval that was never
+posted) and `queued`/`partial` (a transaction is open). Set the file to `hold`
+first if you really mean to put an armed review away.
+
+`archive` with no numbers — or `--list` — reports what is in the archive, with
+each PR's title and the marker line saying when and why it went there.
+`unarchive <N>...` (alias `restore`) moves one back into the live tree. It never
+overwrites a PR that is being tracked again; remove the live directory first if
+the archived copy is the one you want. What comes back is as stale as the day it
+left, so `prt refresh <N>` after it.
 
 ### `status <N> [<new status>]` · `doctor`
 

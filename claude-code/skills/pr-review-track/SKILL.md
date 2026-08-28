@@ -1,8 +1,8 @@
 ---
 name: pr-review-track
-description: Keep up with pull requests in a GitHub project (especially apache/pulsar) across many PRs and many rounds. Tracks every in-progress review under ~/.claude/pr-review-track, detects whether the author actually addressed earlier feedback, and drafts the reply, inline comments and review resolution into a markdown file the human edits and arms before anything is posted. Use for "re-review", "show latest PRs", "review latest", "revisit/revise a draft review", "what needs my attention", "cleanup closed PRs", or any request to manage a backlog of PR reviews. Invokes the pr-review skill to do the actual reviewing.
+description: Keep up with pull requests in a GitHub project (especially apache/pulsar) across many PRs and many rounds. Tracks every in-progress review under ~/.claude/pr-review-track, detects whether the author actually addressed earlier feedback, and drafts the reply, inline comments and review resolution into a markdown file the human edits and arms before anything is posted. Use for "re-review", "show latest PRs", "review latest", "revisit/revise a draft review", "what needs my attention", "cleanup closed PRs", "ignore/archive this PR" or "bring back an archived review", or any request to manage a backlog of PR reviews. Invokes the pr-review skill to do the actual reviewing.
 argument-hint: |
-  re-review [N...] | show-latest | approved | review-latest [--limit 10] | revisit-draft [N] [instructions] | ask [N] | sync | board | submit | watch | cleanup | open [N...]
+  re-review [N...] | show-latest | approved | review-latest [--limit 10] | revisit-draft [N] [instructions] | ask [N] | sync | board | submit | watch | cleanup | archive [N...] | unarchive [N...] | open [N...]
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, Agent, Monitor, Skill
 ---
 
@@ -429,6 +429,22 @@ is held back and reported — run `prt recover <N>` first, because a partially
 posted review must be reconciled before its record is filed away.
 
 Default to archiving, and show the list before deleting anything.
+
+### Setting one aside
+
+When the user decides a PR is not theirs to review, or not now, archive it
+rather than leaving a half-written draft on the board:
+
+```bash
+node "$PRT" archive <N> --reason "why"   # unfinished review out of the way
+node "$PRT" archive --list               # what is in there
+node "$PRT" unarchive <N>                # bring it back, then `prt refresh <N>`
+```
+
+`latest` skips archived PRs, so this is also how "ignore this one" is expressed
+— never by deleting a directory. It is refused on a `ready` or in-flight file;
+if the user means to put an armed review away, they set it to `hold` first.
+Archiving is the user's decision to make: propose it, do not do it unasked.
 
 ## When the human comes back
 
