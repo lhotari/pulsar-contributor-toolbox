@@ -260,6 +260,28 @@ export function renderActionFile({
   out.push('');
   emitAsks(out, 'verdict');
 
+  // ---------- PR-level actions ----------
+  // Written `false` every time, like `event:` is never written APPROVE: both
+  // are writes to the pull request, so the human types the word.
+  out.push('## Pull request actions');
+  out.push('');
+  out.push('<!-- prt:pr-actions');
+  out.push('update-branch: false');
+  out.push('trigger-ci: false');
+  out.push('-->');
+  out.push('');
+  out.push('*Run when you set line 1 to `ready`, after everything above has been posted, then set back to `false`.*');
+  out.push('');
+  out.push('- `update-branch` — merge the base branch into this PR, as the **Update branch** button does.');
+  out.push('  It updates nothing if the head has moved since this file was drafted, and reports a merge');
+  out.push('  conflict rather than guessing at it.');
+  out.push('- `trigger-ci` — GitHub\'s **Approve workflows to run** for this PR\'s waiting runs. `event: APPROVE`');
+  out.push('  already does this, so it is for letting CI run *without* approving the PR.');
+  out.push('');
+  out.push('Both together update the branch first, then approve the runs that appear on the new head.');
+  out.push('');
+  emitAsks(out, 'pr-actions');
+
   // ---------- review body ----------
   out.push('## Review summary');
   out.push('');

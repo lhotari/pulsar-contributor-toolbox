@@ -47,6 +47,9 @@ export const DEFAULT_CONFIG = {
   // Beyond this the PR needs a decision (close, reassign, re-review), not a
   // reminder. `prt nudge` reports those separately instead of drafting one.
   nudgeMaxAgeDays: 90,
+  // After `update-branch` moves the head, how long to wait for GitHub to create
+  // that head's workflow runs before deciding there are none to approve.
+  workflowApprovalWaitSeconds: 60,
   // Refuse to post text that looks like an undisclosed vulnerability report.
   // See CLAUDE.md critical rule 6 / SECURITY.md.
   securityLint: true,

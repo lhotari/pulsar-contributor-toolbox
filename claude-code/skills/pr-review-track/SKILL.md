@@ -62,11 +62,16 @@ that each PR got one independent reviewer rather than two.
    round trip". `draft` → `ready` is the human's signature. You may set `hold`,
    `skip`, or `draft`. (`prt status` refuses `ready` outright, so this is
    enforced rather than merely asked for — do not work around it.)
-3. **Never write `event: APPROVE`.** Recommend it in the file; the human types it.
-   Once typed, `Status: ready` approves both that verdict and running the whole
-   workflow; this includes GitHub's separate **Approve workflows to run** action
-   for eligible fork PR runs on the approved head. Do not require or invent a
-   second approval marker.
+3. **Never write `event: APPROVE`, and never arm a `prt:pr-actions` flag.**
+   Recommend them in the file; the human types the word. Once typed,
+   `Status: ready` approves the verdict, both flags and running the whole
+   workflow; an `APPROVE` verdict includes GitHub's separate **Approve workflows
+   to run** action for eligible fork PR runs on the approved head. Do not
+   require or invent a second approval marker.
+   `update-branch: true` and `trigger-ci: true` are writes to the pull request,
+   so the same rule covers them: always generate them `false`, and say in prose
+   when one looks worth setting (a PR behind its base, a fork PR whose CI is
+   waiting for approval).
 4. **Never let a generator overwrite a protected file** (`ready`/`queued`/
    `partial`/`hold`/`skip`). `prt draft` refuses by default — use
    `--to review.next.md`. Do not reach for `--force` to get past it: `--force`

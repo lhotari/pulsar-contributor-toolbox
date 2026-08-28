@@ -196,6 +196,14 @@ human authorisation for either workflow. An `APPROVE` verdict also performs
 GitHub's **Approve workflows to run** action for every eligible
 `action_required` workflow run associated with the PR's approved head SHA.
 
+A `prt:pr-actions` block adds two actions on the PR itself, run after everything
+that posts text and then set back to `false`: `update-branch` (GitHub's **Update
+branch**, sent with `expected_head_sha` so a moved head updates nothing) and
+`trigger-ci` (**Approve workflows to run** without approving the PR). Both in
+one round update the branch first, then wait up to `workflowApprovalWaitSeconds`
+for the new head's runs to appear and approve those. See
+[action-file.md](action-file.md#prtpr-actions--acting-on-the-pull-request-itself).
+
 ### `watch [--interval 20] [--quiesce 3] [--once] [--all-repos]`
 
 Polls the tracking tree and submits files as they become `ready`. Polling, not

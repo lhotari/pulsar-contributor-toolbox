@@ -41,7 +41,10 @@ export const IN_FLIGHT_STATUSES = new Set(['queued', 'partial']);
 /** Blocks that carry a free-form body and therefore need a `<!-- /prt -->`. */
 const BODY_KINDS = new Set(['body', 'inline', 'thread', 'issue-comment', 'log', 'notes', 'context', 'ask', 'answer']);
 /** Blocks that are attributes only; the opening sentinel is the whole block. */
-const ATTR_KINDS = new Set(['doc', 'verdict']);
+const ATTR_KINDS = new Set(['doc', 'verdict', 'pr-actions']);
+
+/** Fields of `prt:pr-actions`, mapped to the names the plan uses. */
+const PR_ACTION_FIELDS = { 'update-branch': 'updateBranch', 'trigger-ci': 'triggerCi' };
 
 /**
  * Blocks whose body can reach GitHub. A human note that lands inside one of
@@ -60,7 +63,7 @@ const COMMENT_END = /-->\s*$/;
 /** The human's shorthand for a note to the model. Column 0, outside every block. */
 export const SHORTHAND = /^@ai\b[:,]?[ \t]*(.*)$/;
 /** Targets that are symbolic rather than a block id, so they never need rebinding. */
-const SYMBOLIC_TARGETS = new Set(['verdict', 'body', 'general', 'gone']);
+const SYMBOLIC_TARGETS = new Set(['verdict', 'body', 'general', 'gone', 'pr-actions']);
 const KNOWN_KINDS = [...BODY_KINDS, ...ATTR_KINDS];
 
 /** Levenshtein, capped — only used to spot a typo'd block kind. */
@@ -96,6 +99,39 @@ export function setStatus(text, status) {
   const lines = text.split('\n');
   if (/^Status:\s*/.test(stripBom(lines[0] ?? ''))) lines[0] = `Status: ${status}`;
   else lines.unshift(`Status: ${status}`);
+  return lines.join('\n');
+}
+
+/**
+ * Rewrite one field of the `prt:pr-actions` sentinel in place, touching nothing
+ * else in the file.
+ *
+ * This is how an armed flag is disarmed once its action has actually landed:
+ * the alternative — regenerating the block — would rewrite bytes the human is
+ * still editing. A file with no such block, or no such field, comes back
+ * unchanged, because "the human deleted the block" is not an error worth having.
+ */
+export function setPrActionField(text, field, value) {
+  const lines = text.split('\n');
+  let inSentinel = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (!inSentinel) {
+      const m = OPEN_START.exec(lines[i]);
+      if (m && m[1] === 'pr-actions') {
+        // A one-line `<!-- prt:pr-actions update-branch: true -->` has no field
+        // lines to rewrite; leave it be rather than reflow the human's markup.
+        if (COMMENT_END.test(m[2])) return text;
+        inSentinel = true;
+      }
+      continue;
+    }
+    if (COMMENT_END.test(lines[i]) || OPEN_START.test(lines[i]) || CLOSE.test(lines[i])) break;
+    const m = new RegExp(`^(\\s*${field}\\s*:)`).exec(lines[i]);
+    if (m) {
+      lines[i] = `${m[1]} ${value}`;
+      break;
+    }
+  }
   return lines.join('\n');
 }
 
@@ -256,6 +292,9 @@ export function parseActionFile(text) {
     status: parseStatus(text),
     doc: {},
     event: null,
+    // PR-level actions the human arms alongside the verdict. Both default off:
+    // a file with no `prt:pr-actions` block behaves exactly as it always did.
+    prActions: { updateBranch: false, triggerCi: false },
     body: null,
     inline: [],
     threads: [],
@@ -275,6 +314,7 @@ export function parseActionFile(text) {
   const bad = (msg) => r.errors.push(msg);
   let sawBody = false;
   let sawVerdict = false;
+  let sawPrActions = false;
   const seenIds = new Set();
   const claimId = (id, where) => {
     if (!id) { r.errors.push(`${where}: missing \`id:\``); return; }
@@ -308,6 +348,27 @@ export function parseActionFile(text) {
       case 'doc':
         r.doc = b.fields;
         break;
+
+      case 'pr-actions': {
+        // Two of these would let one say yes and the other no about the same
+        // GitHub write, and the file would still look armed either way.
+        if (sawPrActions) {
+          r.errors.push(`${where}: a second \`<!-- prt:pr-actions -->\` block — the PR has one set of actions, so delete one.`);
+          break;
+        }
+        sawPrActions = true;
+        for (const [field, key] of Object.entries(PR_ACTION_FIELDS)) {
+          r.prActions[key] = truthy(b.fields[field], false, bad, `${where} ${field}`);
+        }
+        // A misspelled flag reads as armed and does nothing at all, which is the
+        // one outcome the human cannot tell apart from "it ran and did nothing".
+        for (const field of Object.keys(b.fields)) {
+          if (!(field in PR_ACTION_FIELDS)) {
+            r.errors.push(`${where}: unknown field "${field}" — this block takes ${Object.keys(PR_ACTION_FIELDS).join(' and ')}`);
+          }
+        }
+        break;
+      }
 
       case 'verdict': {
         if (sawVerdict) {
@@ -852,6 +913,24 @@ export function carryAsks(oldText, { newIds = new Set(), newAnchors = new Map(),
 }
 
 /** The list of discrete actions the submitter will perform, in order. */
+/**
+ * The two actions that act on the pull request itself rather than on its
+ * conversation. They come after everything that posts text, and in this order,
+ * because updating the branch replaces the head whose workflow runs
+ * `approve-workflows` then has to approve — approving the old head's runs first
+ * would approve exactly the runs the update is about to supersede.
+ *
+ * `APPROVE` implies the workflow approval (it is what the GitHub UI does when a
+ * maintainer approves), so `event: APPROVE` and `trigger-ci: true` together
+ * still plan one action, not two.
+ */
+function prLevelActions(parsed, actions) {
+  if (parsed.prActions?.updateBranch) actions.push({ kind: 'update-branch', id: 'update-branch' });
+  if (parsed.prActions?.triggerCi || parsed.event === 'APPROVE') {
+    actions.push({ kind: 'approve-workflows', id: 'approve-workflows' });
+  }
+}
+
 export function planActions(parsed) {
   const actions = [];
   // REPLY is an intentionally incomplete pass: publish only replies inside
@@ -862,6 +941,9 @@ export function planActions(parsed) {
     for (const t of parsed.threads.filter((x) => x.post && x.body)) {
       actions.push({ kind: 'thread-reply', id: `${t.id}:reply`, thread: t });
     }
+    // The PR-level flags are orthogonal to the verdict, and silently dropping
+    // an armed one here would be indistinguishable from having run it.
+    prLevelActions(parsed, actions);
     return actions;
   }
   const liveInline = parsed.inline.filter((c) => c.post);
@@ -874,9 +956,7 @@ export function planActions(parsed) {
     if (t.unresolve) actions.push({ kind: 'thread-unresolve', id: `${t.id}:unresolve`, thread: t });
   }
   for (const c of parsed.issueComments) actions.push({ kind: 'issue-comment', id: `${c.id}:comment`, body: c.body });
-  // Approving the PR also approves any GitHub Actions runs that are waiting for
-  // the maintainer's "Approve workflows to run" decision on this exact head.
-  if (parsed.event === 'APPROVE') actions.push({ kind: 'approve-workflows', id: 'approve-workflows' });
+  prLevelActions(parsed, actions);
   return actions;
 }
 
@@ -898,6 +978,7 @@ export function contentHash(text) {
 export function payloadHash(parsed) {
   const canonical = JSON.stringify({
     event: parsed.event,
+    prActions: [parsed.prActions?.updateBranch ?? false, parsed.prActions?.triggerCi ?? false],
     body: parsed.body,
     inline: parsed.inline.filter((c) => c.post).map((c) => [c.id, c.subject, c.path, c.startLine, c.line, c.startSide, c.side, c.body]),
     threads: parsed.threads.filter((t) => t.post).map((t) => [t.id, t.threadNodeId, t.replyToCommentId, t.resolve, t.unresolve, t.body]),

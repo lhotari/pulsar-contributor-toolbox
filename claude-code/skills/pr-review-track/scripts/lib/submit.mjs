@@ -16,7 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 
-import { parseActionFile, planActions, contentHash, payloadHash, setStatus, appendLog, blockingAsks } from './actionfile.mjs';
+import { parseActionFile, planActions, contentHash, payloadHash, setStatus, setPrActionField, appendLog, blockingAsks } from './actionfile.mjs';
 import { parseDiff, commentableAnchors, validateAnchor } from './diff.mjs';
 import {
   prDiff, fetchPr, submitReview, replyToComment, resolveThread, pendingReviews, describeApiError, httpStatusOf,
@@ -578,8 +578,56 @@ async function performAction(ctx, action, tx, journal = () => {}) {
       if (r.ok && c) return { ok: true, result: { commentDatabaseId: String(c.id), url: c.html_url } };
       return { ok: false, error: describeApiError(r), ambiguous: isAmbiguous(httpStatusOf(r)) };
     }
+    case 'update-branch': {
+      const expected = tx.preconditions.head;
+      const pr = await fetchPr(repo, number);
+      if (!pr) return { ok: false, error: 'the PR could not be fetched', ambiguous: false };
+      // Asking first costs one read and saves a pointless merge commit on a
+      // branch that is already current — the common case when the human armed
+      // the flag optimistically.
+      const behind = await behindBy(repo, pr.baseRefName, pr.headRefOid);
+      if (behind === 0) {
+        return { ok: true, result: { headSha: pr.headRefOid, note: 'already up to date with the base branch' } };
+      }
+      // `expected_head_sha` makes GitHub enforce what preflight checked: if the
+      // author pushed between capture and here, this updates nothing.
+      const r = await restRaw('PUT', `repos/${repo}/pulls/${number}/update-branch`,
+        expected ? { expected_head_sha: expected } : {});
+      if (!r.ok) {
+        const status = httpStatusOf(r);
+        // 422 is GitHub's answer to both "the head moved" and "it does not
+        // merge cleanly". Neither is retryable and neither is ambiguous: in
+        // both cases nothing was written.
+        return { ok: false, error: describeApiError(r), ambiguous: status === 422 ? false : isAmbiguous(status) };
+      }
+      // GitHub applies the merge asynchronously and answers 202 with a message,
+      // not a SHA — reading the head back here would as likely return the old
+      // one as the new. Whoever needs the new head reads it when it needs it.
+      return {
+        ok: true,
+        result: { updated: true, previousHead: expected, note: parseBody(r.stdout)?.message ?? 'branch update requested' },
+      };
+    }
     case 'approve-workflows': {
-      const runs = await pendingWorkflowRuns(repo, number, tx.preconditions.head);
+      // After a branch update the runs that matter belong to the NEW head; the
+      // ones on the old head are about to be superseded. GitHub creates them a
+      // few seconds later, so this is the one place the submitter waits.
+      const updated = tx.actions.find((a) => a.kind === 'update-branch' && a.state === 'done' && a.result?.updated);
+      let head = tx.preconditions.head;
+      let runs;
+      if (updated) {
+        // The head this transaction just moved is not knowable up front, and
+        // the runs on it appear a few seconds later still, so the wait re-reads
+        // both together.
+        ({ runs, head } = await waitForRunsOnCurrentHead(repo, number, workflowWaitMs(ctx)));
+      } else {
+        runs = await pendingWorkflowRuns(repo, number, head);
+      }
+      if (updated && runs.length === 0) {
+        // Not a failure: a repo that does not gate this PR's workflows has
+        // nothing to approve, and so does one whose runs have not appeared yet.
+        return { ok: true, result: { approvedWorkflowRunIds: [], head, note: 'no runs were waiting for approval' } };
+      }
       const approvedWorkflowRunIds = [];
       for (const run of runs) {
         const r = await restRaw('POST', `repos/${repo}/actions/runs/${run.id}/approve`);
@@ -587,7 +635,7 @@ async function performAction(ctx, action, tx, journal = () => {}) {
           // The endpoint has no useful idempotent success response. Re-query:
           // if the run is no longer action_required, this request or another
           // maintainer already approved it and recovery can safely continue.
-          const stillPending = await pendingWorkflowRuns(repo, number, tx.preconditions.head);
+          const stillPending = await pendingWorkflowRuns(repo, number, head);
           if (!stillPending.some((x) => String(x.id) === String(run.id))) {
             approvedWorkflowRunIds.push(String(run.id));
             continue;
@@ -598,7 +646,7 @@ async function performAction(ctx, action, tx, journal = () => {}) {
         journal({ approvedWorkflowRunIds: [...approvedWorkflowRunIds] });
         await sleep(MUTATION_SPACING_MS);
       }
-      return { ok: true, result: { approvedWorkflowRunIds } };
+      return { ok: true, result: { approvedWorkflowRunIds, head } };
     }
     default:
       return { ok: false, error: `unknown action kind "${action.kind}"` };
@@ -673,14 +721,77 @@ async function findExisting(ctx, action, tx) {
       return !!t.isResolved === want ? { threadNodeId: t.id, isResolved: t.isResolved } : null;
     }
 
+    if (action.kind === 'update-branch') {
+      // Observable end state, the argument thread-resolve uses: if the head has
+      // moved off the SHA we captured AND the branch is no longer behind its
+      // base, the update landed — by the crashed run, or by a hand on the
+      // button. Either way, doing it again would merge nothing and add noise.
+      const pr = await fetchPr(repo, number);
+      if (!pr || !tx.preconditions.head || pr.headRefOid === tx.preconditions.head) return null;
+      const behind = await behindBy(repo, pr.baseRefName, pr.headRefOid);
+      return behind === 0
+        ? { headSha: pr.headRefOid, previousHead: tx.preconditions.head, updated: true }
+        : null;
+    }
+
     if (action.kind === 'approve-workflows') {
-      const remaining = await pendingWorkflowRuns(repo, number, tx.preconditions.head);
-      return remaining.length === 0 ? { approvedWorkflowRunIds: [] } : null;
+      // Same head the action would have targeted, so a resumed run does not
+      // check the pre-update head and conclude there is nothing left to do.
+      const updated = tx.actions.find((a) => a.kind === 'update-branch' && a.state === 'done' && a.result?.updated);
+      const head = updated ? (await fetchPr(repo, number))?.headRefOid ?? tx.preconditions.head : tx.preconditions.head;
+      const remaining = await pendingWorkflowRuns(repo, number, head);
+      return remaining.length === 0 ? { approvedWorkflowRunIds: [], head } : null;
     }
   } catch {
     return null; // could not verify — the caller keeps the action `unknown`
   }
   return null;
+}
+
+/**
+ * How many commits the base branch is ahead of this head, or null when GitHub
+ * cannot say (a fork head it will not compare, a transient error). Only ever
+ * used to skip a pointless update, so "don't know" means "ask GitHub anyway".
+ */
+async function behindBy(repo, baseRef, head) {
+  if (!baseRef || !head) return null;
+  try {
+    const data = await rest('GET', `repos/${repo}/compare/${encodeURIComponent(baseRef)}...${head}`);
+    return Number.isFinite(data?.behind_by) ? data.behind_by : null;
+  } catch {
+    return null;
+  }
+}
+
+const WORKFLOW_POLL_MS = 5000;
+
+/** How long to wait for a freshly updated head's workflow runs to appear. */
+function workflowWaitMs(ctx) {
+  const s = Number(ctx.config?.workflowApprovalWaitSeconds);
+  return Number.isFinite(s) && s >= 0 ? s * 1000 : 60_000;
+}
+
+/**
+ * Runs waiting for approval on whatever the PR head is *now*.
+ *
+ * Two things are asynchronous after a branch update, and this waits out both:
+ * GitHub moves the head some time after answering 202, and creates that head's
+ * workflow runs some time after that. So the head is re-read on every poll
+ * rather than pinned once — pinning it would mean approving runs on the head we
+ * just replaced, or on nothing at all. This is the only place the submitter
+ * waits, and only when this transaction moved the head itself.
+ */
+async function waitForRunsOnCurrentHead(repo, number, budgetMs) {
+  const deadline = Date.now() + budgetMs;
+  let head = null;
+  for (;;) {
+    head = (await fetchPr(repo, number))?.headRefOid ?? head;
+    const runs = head ? await pendingWorkflowRuns(repo, number, head) : [];
+    if (runs.length) return { runs, head };
+    const left = deadline - Date.now();
+    if (left <= 0) return { runs: [], head };
+    await sleep(Math.min(WORKFLOW_POLL_MS, left));
+  }
 }
 
 /** Workflow runs for this PR head that show GitHub's "Approve workflows to run" gate. */
@@ -787,6 +898,7 @@ export async function submitReady(ctx) {
         if (a.kind === 'thread-reply') return `reply in thread ${a.thread.threadNodeId} (${a.thread.body.length} chars)`;
         if (a.kind === 'thread-resolve') return `resolve thread ${a.thread.threadNodeId}`;
         if (a.kind === 'thread-unresolve') return `unresolve thread ${a.thread.threadNodeId}`;
+        if (a.kind === 'update-branch') return 'update this PR branch from its base (GitHub\'s "Update branch")';
         if (a.kind === 'approve-workflows') return 'approve eligible GitHub Actions workflow runs for this PR head';
         return `${a.kind} (${a.body?.length ?? 0} chars)`;
       });
@@ -819,6 +931,23 @@ export async function submitReady(ctx) {
   }
 }
 
+/**
+ * What a PR-level action did, for the activity log. Neither produces a URL, so
+ * without this both would log as a bare tick and the human could not tell an
+ * approval of four runs from one that found nothing to approve.
+ */
+function prActionDetail(a) {
+  if (a.kind === 'update-branch') {
+    return a.result?.note ?? 'branch updated from its base';
+  }
+  if (a.kind === 'approve-workflows') {
+    const ids = a.result?.approvedWorkflowRunIds ?? [];
+    if (!ids.length) return a.result?.note ?? 'no runs were waiting for approval';
+    return `approved ${ids.length} workflow run(s)${a.result?.head ? ` on ${short(a.result.head)}` : ''}`;
+  }
+  return null;
+}
+
 function finish(ctx, tx, label) {
   const { actionPath, prPath, repo, number } = ctx;
   const done = tx.actions.filter((a) => a.state === 'done');
@@ -827,13 +956,19 @@ function finish(ctx, tx, label) {
 
   const lines = [`${label}: ${done.length}/${tx.actions.length} actions posted`];
   for (const a of done) {
-    lines.push(`  ✓ ${a.id} (${a.kind}) ${a.result?.url ?? ''}`.trimEnd());
+    lines.push(`  ✓ ${a.id} (${a.kind}) ${prActionDetail(a) ?? a.result?.url ?? ''}`.trimEnd());
   }
   for (const a of failed) {
     lines.push(`  ✗ ${a.id} (${a.kind}) [${a.state}] ${a.error ?? ''}`.trimEnd());
   }
 
   let out = setStatus(fs.readFileSync(actionPath, 'utf8'), status);
+  // Disarm only the flags whose action actually landed. One that failed stays
+  // `true` so `prt recover` retries what the human asked for, rather than the
+  // file quietly forgetting it was ever asked.
+  for (const [kind, field] of [['update-branch', 'update-branch'], ['approve-workflows', 'trigger-ci']]) {
+    if (done.some((a) => a.kind === kind)) out = setPrActionField(out, field, 'false');
+  }
   out = appendLog(out, lines.join('\n'));
   writeAtomic(actionPath, out);
   if (status === 'submitted') archiveActionFile(ctx.root, repo, number);

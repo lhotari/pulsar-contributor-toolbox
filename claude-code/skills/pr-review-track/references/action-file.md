@@ -141,6 +141,53 @@ it does not mean "no event" — a review POST without an event creates an
 *unsubmitted* review that only you can see and that then blocks every later
 submit on the PR. The parser refuses, and so does the submitter.
 
+### `prt:pr-actions` — acting on the pull request itself
+
+```
+<!-- prt:pr-actions
+update-branch: false
+trigger-ci: false
+-->
+```
+
+Two things a maintainer does from the PR page rather than from a review. They
+run when you set line 1 to `ready`, after everything that posts text, and each
+is set back to `false` once it has actually landed.
+
+| flag | what it does |
+|---|---|
+| `update-branch` | Merges the base branch into the PR, as GitHub's **Update branch** button does. |
+| `trigger-ci` | GitHub's **Approve workflows to run** for the runs waiting on this PR. |
+
+The generator always writes `false`, for the same reason it never writes
+`APPROVE`: both are writes to the pull request, so the human types the word.
+`Status: ready` then authorises the flags along with everything else in the
+file — there is no second marker. A misspelled field name and a value that is
+neither yes nor no are both parse errors, because a flag that reads as armed and
+does nothing cannot be told apart from one that ran and had nothing to do.
+
+`update-branch` sends the head this file was drafted against as
+`expected_head_sha`, so a branch that moved after the draft was written updates
+nothing and says so. A branch already level with its base is left alone rather
+than merged into itself. A merge conflict comes back as a failed action: the
+file becomes `partial`, GitHub's message goes in the log, and the flag stays
+`true` so `prt recover` retries what you asked for.
+
+`trigger-ci` is the same action `event: APPROVE` already performs, so the two
+together still do it once. It exists for letting CI run *without* approving the
+PR — a first-time contributor's fork PR, most often.
+
+**Both flags in one round update the branch first, then approve.** The update
+replaces the head whose runs would be approved, so the order is not arbitrary:
+approving first would approve exactly the runs the update is about to supersede.
+Because GitHub moves the head some seconds after accepting the update, and
+creates that head's workflow runs some seconds after that, the submitter waits —
+re-reading the head and its runs until they appear or
+`workflowApprovalWaitSeconds` (default 60) runs out. Finding none is recorded as
+"no runs were waiting for approval", not as a failure: a repository that does
+not gate this PR's workflows has nothing to approve. That wait is also the one
+place `prt watch` will sit on a single PR for up to a minute.
+
 ### `prt:body` — the review's summary comment
 
 ```
@@ -458,6 +505,7 @@ Disable with `"securityLint": false` in `config.json` — but consider why first
   "latestLimit": 10,
   "watchIntervalSeconds": 20,
   "quiesceSeconds": 3,
+  "workflowApprovalWaitSeconds": 60,
   "securityLint": true,
   "requireExplicitApprove": true,
   "cleanupMode": "archive"
