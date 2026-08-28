@@ -13,7 +13,7 @@ import {
   askState, blockingAsks, carryAsks, promoteShorthand,
 } from '../lib/actionfile.mjs';
 import { parseDiff, commentableAnchors, validateAnchor, touchesAnchor } from '../lib/diff.mjs';
-import { renderActionFile, bucketOf } from '../lib/render.mjs';
+import { renderActionFile, renderBoard, bucketOf, isReviewInProgress, REVIEW_IN_PROGRESS_STATUSES } from '../lib/render.mjs';
 import { scorePr, rankCandidates } from '../lib/rank.mjs';
 import { securityLint, askQuoteLint, diffFingerprint } from '../lib/submit.mjs';
 import { analyzePr, recommendEvent, assessNudge, THREAD_STATES } from '../lib/analyze.mjs';
@@ -683,6 +683,93 @@ test('board buckets put an author waiting on me above everything else', () => {
   assert.equal(bucketOf({ analysis: fixtureAnalysis(), status: 'ready' }), 'my-queue');
   assert.equal(bucketOf({ analysis: fixtureAnalysis(), status: 'blocked' }), 'my-queue');
   assert.equal(bucketOf({ analysis: fixtureAnalysis(), status: 'hold' }), 'parked');
+});
+
+test('a review is "in progress" until it is submitted or skipped', () => {
+  for (const st of ['draft', 'ready', 'queued', 'partial', 'blocked', 'error', 'hold']) {
+    assert.equal(isReviewInProgress(st), true, `${st} is unfinished work`);
+  }
+  assert.equal(isReviewInProgress('submitted'), false);
+  assert.equal(isReviewInProgress('skip'), false);
+  assert.equal(isReviewInProgress('none'), false, 'no file means no review was ever started');
+  assert.equal(isReviewInProgress(null), false);
+  // Anything unrecognised errs towards being surfaced: losing a draft is worse
+  // than one spurious row.
+  assert.equal(isReviewInProgress('submitting'), true);
+  assert.deepEqual(
+    REVIEW_IN_PROGRESS_STATUSES,
+    ['draft', 'ready', 'queued', 'partial', 'blocked', 'error', 'hold'],
+    'derived from STATUSES, so a new status defaults to being shown',
+  );
+});
+
+function boardRow(over = {}) {
+  return {
+    number: 1, title: 'a title', url: 'https://x/1', author: 'someone', prState: 'OPEN',
+    status: 'none', reviewPath: null, bucket: 'waiting-for-author', threads: '', ci: 'SUCCESS',
+    urgency: 0, ...over,
+  };
+}
+
+test('the board links every unfinished review.md and gathers them at the top', () => {
+  const md = renderBoard({
+    repo: 'r/r',
+    generatedAt: 'T',
+    storeDir: '/store/r/r',
+    rows: [
+      boardRow({ number: 4, status: 'hold', reviewPath: 'pr-4/review.md', bucket: 'parked', urgency: 1 }),
+      boardRow({ number: 1, status: 'draft', reviewPath: 'pr-1/review.md', bucket: 'author-replied-to-me', urgency: 9 }),
+      boardRow({ number: 2, status: 'submitted', reviewPath: 'pr-2/review.md', urgency: 5 }),
+      boardRow({ number: 3, status: 'none', urgency: 4 }),
+      boardRow({ number: 5, status: 'skip', reviewPath: 'pr-5/review.md', bucket: 'parked', urgency: 3 }),
+    ],
+  });
+
+  assert.match(md, /## reviews in progress \(2\)/);
+  assert.match(md, /\[review\.md\]\(pr-1\/review\.md\)/);
+  assert.match(md, /\[review\.md\]\(pr-4\/review\.md\)/);
+  assert.doesNotMatch(md, /pr-2\/review\.md/, 'a submitted review is finished');
+  assert.doesNotMatch(md, /pr-5\/review\.md/, 'a skip file holds a real draft, but the human declined it');
+  assert.match(md, /Links are relative to `\/store\/r\/r`/);
+
+  // The section sits above the buckets, and is ordered by the same urgency.
+  const section = md.indexOf('## reviews in progress');
+  assert.ok(section < md.indexOf('## author-replied-to-me'), 'unfinished drafts come first');
+  assert.ok(md.indexOf('pr-1/review.md') < md.indexOf('pr-4/review.md'), 'most urgent first');
+
+  // ...and the status cell inside the bucket table is itself the link, so a row
+  // is reachable from wherever the reader happens to be looking.
+  assert.match(md, /\| \[`draft`\]\(pr-1\/review\.md\) \|/);
+  assert.match(md, /\| `submitted` \|/, 'a finished review keeps a plain status cell');
+  assert.match(md, /\| `none` \|/);
+});
+
+test('the board renders unchanged when nothing is half-finished', () => {
+  const md = renderBoard({
+    repo: 'r/r', generatedAt: 'T',
+    rows: [boardRow({ number: 7, status: 'submitted', reviewPath: 'pr-7/review.md' })],
+  });
+  assert.doesNotMatch(md, /reviews in progress/);
+  assert.doesNotMatch(md, /review\.md/);
+  assert.match(md, /## waiting-for-author \(1\)/);
+});
+
+test('an unfinished draft on a closed PR is linked before cleanup archives it', () => {
+  const md = renderBoard({
+    repo: 'r/r', generatedAt: 'T',
+    rows: [boardRow({ number: 8, prState: 'MERGED', status: 'draft', reviewPath: 'pr-8/review.md' })],
+  });
+  assert.match(md, /## closed or merged/);
+  assert.match(md, /unfinished draft: \[review\.md\]\(pr-8\/review\.md\)/);
+});
+
+test('a pipe in a PR title cannot break the board table', () => {
+  const md = renderBoard({
+    repo: 'r/r', generatedAt: 'T',
+    rows: [boardRow({ title: 'a | b', status: 'draft', reviewPath: 'pr-1/review.md' })],
+  });
+  assert.doesNotMatch(md, /\| a \| b \|/);
+  assert.match(md, /a \\\| b/);
 });
 
 // ------------------------------------------------------------------- ranking

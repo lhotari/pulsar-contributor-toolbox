@@ -20,7 +20,7 @@ import {
 } from './lib/github.mjs';
 import { analyzePr, fetchDelta, summarizeCounts, THREAD_STATES } from './lib/analyze.mjs';
 import { rankCandidates, scoreTracked } from './lib/rank.mjs';
-import { renderActionFile, renderNudgeFile, bucketOf, BUCKETS, inlineIdFor, expectedBlockIds } from './lib/render.mjs';
+import { renderActionFile, renderNudgeFile, renderBoard, bucketOf, inlineIdFor, expectedBlockIds } from './lib/render.mjs';
 import { parseDiff, commentableAnchors, validateAnchor } from './lib/diff.mjs';
 import {
   parseActionFile, parseStatus, setStatus, contentHash, appendLog, planActions,
@@ -878,6 +878,7 @@ COMMANDS.list = async () => {
 };
 
 function writeBoard(base) {
+  const dir = store.repoDir(base.root, base.repo);
   const rows = [];
   for (const n of store.listTracked(base.root, base.repo)) {
     const st = store.readState(base.root, base.repo, n);
@@ -892,6 +893,11 @@ function writeBoard(base) {
       author: st.author,
       prState: st.state,
       status: status ?? 'none',
+      // Relative to the board's own directory, and derived from the store
+      // layout rather than re-spelling `pr-<N>/review.md` in a second place.
+      reviewPath: text
+        ? path.relative(dir, store.actionFilePath(base.root, base.repo, n)).split(path.sep).join('/')
+        : null,
       bucket: st.analysis ? bucketOf({ analysis, status }) : 'unknown',
       threads: st.analysis ? summarizeCounts(analysis.threadCounts) : '',
       ci: analysis.ci,
@@ -899,28 +905,9 @@ function writeBoard(base) {
       urgency: st.analysis ? scoreTracked(analysis, { priorityAuthors: base.cfg.priorityAuthors }).score : 0,
     });
   }
-  rows.sort((a, b) => b.urgency - a.urgency);
 
-  const out = [`# ${base.repo} — review board`, '', `_Generated ${new Date().toISOString()} · ${rows.length} tracked PR(s). Do not edit; \`prt sync\` rewrites this file._`, ''];
-  for (const bucket of BUCKETS) {
-    const inBucket = rows.filter((r) => r.bucket === bucket);
-    if (!inBucket.length) continue;
-    out.push(`## ${bucket} (${inBucket.length})`, '');
-    out.push('| PR | status | author | threads | CI | title |');
-    out.push('|---|---|---|---|---|---|');
-    for (const r of inBucket) {
-      out.push(`| [#${r.number}](${r.url}) | \`${r.status}\` | ${r.author ?? '?'} | ${r.threads} | ${r.ci ?? '?'} | ${String(r.title).replace(/\|/g, '\\|').slice(0, 80)} |`);
-    }
-    out.push('');
-  }
-  const closed = rows.filter((r) => r.prState && r.prState !== 'OPEN');
-  if (closed.length) {
-    out.push(`## closed or merged — run \`prt cleanup\` (${closed.length})`, '');
-    for (const r of closed) out.push(`- [#${r.number}](${r.url}) ${r.prState} — ${r.title}`);
-    out.push('');
-  }
-  const file = path.join(store.repoDir(base.root, base.repo), 'BOARD.md');
-  store.writeAtomic(file, out.join('\n'));
+  const file = path.join(dir, 'BOARD.md');
+  store.writeAtomic(file, renderBoard({ repo: base.repo, rows, storeDir: dir }));
   return file;
 }
 

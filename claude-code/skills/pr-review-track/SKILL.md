@@ -92,6 +92,7 @@ Match the user's words — natural phrasing is expected, not just flags.
 | "review latest", "review the top 10" | [Review latest](#review-latest) |
 | "sync", "which PRs am I mid-review on" | `node "$PRT" sync` then `node "$PRT" board` |
 | "board", "what needs my attention" | `node "$PRT" board` |
+| "which reviews did I start and not finish", "my unfinished drafts" | `node "$PRT" board` — the `reviews in progress` section links each `review.md` |
 | "cleanup closed or merged", "cleanup" | [Cleanup](#cleanup) |
 | "submit", "post the ready ones" | `node "$PRT" submit --all-ready` |
 | "watch", or any batch of drafts | [Arm the watcher](#arm-the-watcher) |

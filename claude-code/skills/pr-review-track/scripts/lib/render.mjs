@@ -6,7 +6,7 @@
 
 import { parseDiff } from './diff.mjs';
 import { THREAD_STATES, summarizeCounts, recommendEvent } from './analyze.mjs';
-import { renderAsk } from './actionfile.mjs';
+import { renderAsk, STATUSES } from './actionfile.mjs';
 
 const EVIDENCE_LABEL = {
   [THREAD_STATES.AWAITING_MY_REPLY]: 'the author replied and is waiting on me',
@@ -543,6 +543,92 @@ export function bucketOf({ analysis: a, status, staleAfterDays = STALE_AFTER_DAY
   if ((c[THREAD_STATES.UNTOUCHED] ?? 0) > 0) return 'waiting-for-author';
   if (a.threads?.length) return 'ready-to-approve';
   return 'waiting-for-author';
+}
+
+/**
+ * Statuses that mean the review file is done with: `submitted` posted
+ * everything that was approved, `skip` decided this PR is not being reviewed.
+ * Everything else — including a status added to STATUSES later, and including
+ * text nobody recognises — counts as in progress, because the failure that
+ * matters here is a half-written draft nobody can find again.
+ */
+const REVIEW_SETTLED_STATUSES = new Set(['submitted', 'skip']);
+
+/** The statuses `reviews in progress` collects, derived from the one status list. */
+export const REVIEW_IN_PROGRESS_STATUSES = STATUSES.filter((s) => !REVIEW_SETTLED_STATUSES.has(s));
+
+/** True when a review.md exists for this PR and is neither finished nor abandoned. */
+export function isReviewInProgress(status) {
+  return !!status && status !== 'none' && !REVIEW_SETTLED_STATUSES.has(status);
+}
+
+/**
+ * The attention board.
+ *
+ * Rows that still have an unfinished `review.md` link to it twice over: the
+ * status cell in the bucket table becomes the link, and the same rows are
+ * gathered into a section of their own at the top. The section is the point —
+ * a started-but-unfinished draft scattered across eleven buckets is a review
+ * that gets forgotten, and this file exists to stop exactly that.
+ *
+ * Links are relative to the board's own directory, so they resolve in an editor
+ * without baking anyone's home directory into generated markdown.
+ */
+export function renderBoard({ repo, rows, generatedAt = new Date().toISOString(), storeDir = null }) {
+  const ordered = [...rows].sort((a, b) => (b.urgency ?? 0) - (a.urgency ?? 0));
+  // A path is only a link when the file behind it is still live work.
+  const draftLink = (r) => (r.reviewPath && isReviewInProgress(r.status) ? r.reviewPath : null);
+  const cell = (v) => String(v ?? '').replace(/\|/g, '\\|');
+  const title = (r) => cell(r.title).slice(0, 80);
+
+  const out = [
+    `# ${repo} — review board`,
+    '',
+    `_Generated ${generatedAt} · ${ordered.length} tracked PR(s). Do not edit; \`prt sync\` rewrites this file._`,
+    '',
+  ];
+
+  const inProgress = ordered.filter(draftLink);
+  if (inProgress.length) {
+    out.push(`## reviews in progress (${inProgress.length})`, '');
+    out.push('_Reviews I started and have not finished: a `review.md` exists and its status is');
+    out.push(`neither \`submitted\` nor \`skip\`.${storeDir ? ` Links are relative to \`${storeDir}\`.` : ''}_`);
+    out.push('');
+    out.push('| PR | status | draft | bucket | title |');
+    out.push('|---|---|---|---|---|');
+    for (const r of inProgress) {
+      out.push(`| [#${r.number}](${r.url}) | \`${r.status}\` | [review.md](${draftLink(r)}) | ${r.bucket} | ${title(r)} |`);
+    }
+    out.push('');
+  }
+
+  for (const bucket of BUCKETS) {
+    const inBucket = ordered.filter((r) => r.bucket === bucket);
+    if (!inBucket.length) continue;
+    out.push(`## ${bucket} (${inBucket.length})`, '');
+    out.push('| PR | status | author | threads | CI | title |');
+    out.push('|---|---|---|---|---|---|');
+    for (const r of inBucket) {
+      const href = draftLink(r);
+      const status = href ? `[\`${r.status}\`](${href})` : `\`${r.status}\``;
+      out.push(`| [#${r.number}](${r.url}) | ${status} | ${r.author ?? '?'} | ${r.threads ?? ''} | ${r.ci ?? '?'} | ${title(r)} |`);
+    }
+    out.push('');
+  }
+
+  const closed = ordered.filter((r) => r.prState && r.prState !== 'OPEN');
+  if (closed.length) {
+    out.push(`## closed or merged — run \`prt cleanup\` (${closed.length})`, '');
+    // An unfinished draft on a closed PR is the one thing `cleanup` would
+    // archive away, so it gets its link here too rather than only above.
+    for (const r of closed) {
+      const href = draftLink(r);
+      out.push(`- [#${r.number}](${r.url}) ${r.prState} — ${r.title}${href ? ` — unfinished draft: [review.md](${href})` : ''}`);
+    }
+    out.push('');
+  }
+
+  return out.join('\n');
 }
 
 

@@ -74,6 +74,16 @@ urgent first:
 - `stale` — nobody has touched it in months
 - `parked` — `hold` / `skip`
 
+Above the buckets sits **`reviews in progress`**: every PR whose `review.md`
+exists and is neither `submitted` nor `skip` — the reviews that were started and
+not finished — each linked to its draft. The same rows are reachable from the
+buckets too, where the status cell is the link. Links are relative to the
+board's directory, so they open straight from an editor.
+
+A `hold` draft counts as in progress: it was started, it is parked, it is not
+done. An unfinished draft on a closed or merged PR is linked from the
+`closed or merged` list as well, since `prt cleanup` is about to archive it.
+
 `list` is the one-line-per-PR form, sorted by the same urgency score.
 
 ## Per PR
