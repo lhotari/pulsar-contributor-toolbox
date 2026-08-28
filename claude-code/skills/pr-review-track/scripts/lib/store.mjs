@@ -168,10 +168,33 @@ export function readStateFrom(dir) {
   }
 }
 
+/**
+ * Fields that belong to the store rather than to any one command, and so must
+ * survive a writer that does not know about them.
+ *
+ * `sync` and `track` build a fresh document instead of spreading the previous
+ * one, which was harmless while every field was theirs. The job queue is not:
+ * losing it on `prt sync` — step 1 of every re-review — would be
+ * indistinguishable from work that was never queued at all.
+ */
+const CARRIED_KEYS = ['job', 'lastJob'];
+
 export function writeState(root, repo, number, state) {
   ensurePrDir(root, repo, number);
   const p = path.join(prDir(root, repo, number), 'pr.json');
-  writeAtomic(p, `${JSON.stringify(state, null, 2)}\n`);
+  let prev = null;
+  // A corrupt document must not stop the write that replaces it.
+  try { prev = readStateFrom(prDir(root, repo, number)); } catch { prev = null; }
+
+  const merged = { ...state };
+  for (const key of CARRIED_KEYS) {
+    if (key in state) {
+      if (state[key] == null) delete merged[key];   // an explicit null deletes
+      continue;
+    }
+    if (prev?.[key] != null) merged[key] = prev[key];
+  }
+  writeAtomic(p, `${JSON.stringify(merged, null, 2)}\n`);
   return p;
 }
 
