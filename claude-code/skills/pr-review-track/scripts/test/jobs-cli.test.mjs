@@ -216,3 +216,31 @@ test('the mutex is not left behind by a refused write', () => {
   assert.equal(run(['job', 'list']).status, 0);
   assert.equal(run(['job', 'cancel', '--all', '--force']).status, 0);
 });
+
+// ------------------------------------------------------------------ archiving
+//
+// Job state and action-file state share the word `queued` and mean different
+// things, so they get different checks. What archiving must never do is take a
+// directory out from under a live worker, or leave a queued job in it for
+// `unarchive` to resurrect months later.
+
+test('a running job blocks archiving, and a queued one is dropped by it', () => {
+  reclaim();
+  track(30); track(31);
+  run(['job', 'add', '30', '31', '--kind', 'review']);
+  run(['job', 'next', '--max', '1']);            // one starts, one stays queued
+
+  const running = jobRow(30).state === 'running' ? 30 : 31;
+  const waiting = running === 30 ? 31 : 30;
+
+  const blocked = run(['archive', String(running)]);
+  assert.notEqual(blocked.status, 0);
+  assert.match(JSON.stringify(blocked.json), /running/);
+  assert.ok(fs.existsSync(prDir(running)), 'still live');
+
+  assert.equal(run(['archive', String(waiting)]).status, 0);
+  const moved = path.join(ROOT, '_archive', 'o', 'r', `pr-${waiting}`, 'pr.json');
+  const state = JSON.parse(fs.readFileSync(moved, 'utf8'));
+  assert.equal(state.job, undefined, 'unarchive must not resurrect work reported as dropped');
+  assert.match(state.lastJob.outcome, /archived/);
+});

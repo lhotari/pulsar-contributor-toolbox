@@ -1484,12 +1484,13 @@ COMMANDS.cleanup = async () => {
     const status = text ? parseStatus(text) : null;
 
     if (!isClosed) { kept.push(n); continue; }
-    const blocker = archiveBlocker(status);
+    const blocker = archiveBlocker(status) ?? jobBlocker(st?.job);
     if (blocker) {
       kept.push(n);
       say(`#${n} is ${prState} but its action file is "${status}" — ${blocker}. Run \`prt recover ${n}\`, or \`prt status ${n} skip\` to let cleanup take it.`);
       continue;
     }
+    if (!dryRun) dropQueuedJob(base, n);
     const dir = store.prDir(base.root, base.repo, n);
     const dest = store.archiveDir(base.root, base.repo, n);
     removed.push({ number: n, state: prState, from: dir, to: purge ? null : dest });
@@ -1528,6 +1529,46 @@ function archiveBlocker(status) {
 }
 
 /**
+ * Why the queue objects to a review leaving the live tree, or null.
+ *
+ * Deliberately not folded into archiveBlocker(). That one speaks about the
+ * action file's authority — a human signature, an open submit transaction — and
+ * job state happens to share the word `queued` while meaning something entirely
+ * different. One function answering both would let a scheduling concept stand
+ * in for an approval one, which is the sort of blur that gets a review posted
+ * that nobody approved.
+ */
+function jobBlocker(job) {
+  if (job?.state === 'running') return 'a review job is running — stop its agent first';
+  return null;
+}
+
+/**
+ * Take a queued job off a directory that is about to leave the live tree.
+ *
+ * The move alone would be enough to get it out of the queue, since the queue is
+ * just the live directories. But `unarchive` restores what it took, so a job
+ * left in place comes back as work still waiting — months after it was reported
+ * as dropped.
+ */
+function dropQueuedJob(base, number) {
+  let state = null;
+  try { state = store.readState(base.root, base.repo, number); } catch { return false; }
+  if (!state?.job || state.job.state === 'running') return false;
+  store.writeState(base.root, base.repo, number, {
+    ...state,
+    job: null,
+    lastJob: {
+      kind: state.job.kind,
+      outcome: 'cancelled — the PR was archived',
+      attempts: state.job.attempts,
+      finishedAt: new Date().toISOString(),
+    },
+  });
+  return true;
+}
+
+/**
  * Set a review aside without finishing it.
  *
  * `cleanup` archives what GitHub has settled; this archives what I have.
@@ -1560,12 +1601,15 @@ COMMANDS.archive = async () => {
     }
     const text = store.readActionFile(base.root, base.repo, n);
     const status = text ? parseStatus(text) : null;
-    const blocker = archiveBlocker(status);
+    let job = null;
+    try { job = store.readState(base.root, base.repo, n)?.job ?? null; } catch { /* corrupt: the status check still applies */ }
+    const blocker = archiveBlocker(status) ?? jobBlocker(job);
     if (blocker) {
       refused.push({ number: n, why: blocker, status });
       say(`#${n} is "${status}" — ${blocker}. Run \`prt recover ${n}\`, or \`prt status ${n} hold\` and archive it then.`);
       continue;
     }
+    dropQueuedJob(base, n);
 
     // Read the state before the move: a corrupt pr.json must not leave the
     // directory relocated but unmarked.
