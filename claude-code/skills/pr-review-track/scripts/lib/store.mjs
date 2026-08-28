@@ -35,6 +35,9 @@ export const DEFAULT_CONFIG = {
   latestLimit: 10,
   // Watcher poll interval, seconds.
   watchIntervalSeconds: 20,
+  // How many review jobs may run at once. Each one is a subagent that spawns
+  // its own reviewers, so this is a ceiling on fan-out, not on ambition.
+  maxConcurrentJobs: 4,
   // A file must be unmodified for this long before the watcher acts on it,
   // so a half-saved edit is never submitted.
   quiesceSeconds: 3,
@@ -286,4 +289,113 @@ export function acquireLock(dir, name = 'submit.lock', ttlMs = 10 * 60_000, atte
     }
     return null;
   }
+}
+
+// ------------------------------------------------------- the job queue's locks
+//
+// Two things that look alike and are not. `withJobLock` is mutual exclusion: one
+// process inside a read-then-write of the queue at a time. `drain.owner` is
+// policy: which session may start work for this repository at all. Answering
+// only the second — as the first draft of this feature did — leaves two
+// `prt job next` calls in one session free to select the same job.
+
+/** A live owner that has done nothing for this long is wedged, not working. */
+export const IDLE_TAKEOVER_MS = 30 * 60_000;
+
+const ownerPath = (root, repo) => path.join(repoDir(root, repo), 'drain.owner');
+
+/**
+ * Is that process still there?
+ *
+ * EPERM means it exists and belongs to somebody else, which for this purpose is
+ * the same answer as yes. Anything else — ESRCH, a nonsense pid — is no.
+ */
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
+}
+
+export function readOwner(root, repo) {
+  const p = ownerPath(root, repo);
+  if (!fs.existsSync(p)) return null;
+  try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; }
+}
+
+/** Place an owner record without going through the claim rules. Tests only. */
+export function writeOwnerForTest(root, repo, owner) {
+  fs.mkdirSync(repoDir(root, repo), { recursive: true });
+  writeAtomic(ownerPath(root, repo), `${JSON.stringify(owner, null, 2)}\n`);
+}
+
+/**
+ * Take, keep, or be refused the right to run jobs for this repository.
+ *
+ * One drainer per repo guards against starting a second session's batch by
+ * accident; it is not a distributed-systems claim. So the rules are the cheap
+ * ones that answer exactly that: it is ours, its process is gone, or it has
+ * done nothing for half an hour. Otherwise somebody is working, and we are not
+ * going to trample them.
+ */
+export function claimOwner(root, repo, { session, pid, now = Date.now(), force = false } = {}) {
+  const held = readOwner(root, repo);
+  const stamp = new Date(now).toISOString();
+  const take = (how) => {
+    writeOwnerForTest(root, repo, { session, pid, since: stamp, lastActivityAt: stamp });
+    return { ok: true, how };
+  };
+
+  if (!held) return take('new');
+  if (held.session === session) {
+    writeOwnerForTest(root, repo, { ...held, session, pid, lastActivityAt: stamp });
+    return { ok: true, how: 'ours' };
+  }
+  if (force) return take('forced');
+  if (!pidAlive(held.pid)) return take('crashed');
+
+  const idleMs = now - Date.parse(held.lastActivityAt ?? held.since ?? stamp);
+  if (idleMs > IDLE_TAKEOVER_MS) return take('idle');
+
+  const mins = Math.max(1, Math.round((now - Date.parse(held.since ?? stamp)) / 60_000));
+  return {
+    ok: false,
+    owner: held,
+    reason: `${repo} jobs are owned by session ${held.session} (pid ${held.pid}), held ${mins}m. `
+      + 'Use that session, or `prt job release --force` to take it.',
+  };
+}
+
+/** Mark the lease as still doing something. Activity, not existence, keeps it. */
+export function touchOwner(root, repo, { session, pid, now = Date.now() } = {}) {
+  const held = readOwner(root, repo);
+  if (!held || held.session !== session) return false;
+  writeOwnerForTest(root, repo, { ...held, pid: pid ?? held.pid, lastActivityAt: new Date(now).toISOString() });
+  return true;
+}
+
+export function releaseOwner(root, repo, { session, force = false } = {}) {
+  const held = readOwner(root, repo);
+  if (!held) return false;
+  if (!force && held.session !== session) return false;
+  try { fs.unlinkSync(ownerPath(root, repo)); } catch { /* already gone */ }
+  return true;
+}
+
+/**
+ * Run one job-state mutation with nobody else inside.
+ *
+ * Callers must return their refusals rather than exiting: `die()` calls
+ * process.exit, which does not run a `finally`, and an exit from in here would
+ * leave the lock behind until its TTL broke it.
+ */
+export function withJobLock(root, repo, fn, { ttlMs = 60_000, attempts = 50, waitMs = 100 } = {}) {
+  const dir = repoDir(root, repo);
+  fs.mkdirSync(dir, { recursive: true });
+  for (let i = 0; i < attempts; i++) {
+    const lock = acquireLock(dir, 'jobs.lock', ttlMs);
+    if (lock) {
+      try { return fn(); } finally { lock.release(); }
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, waitMs);
+  }
+  throw new Error(`the job queue for ${repo} is busy — another prt process is holding jobs.lock`);
 }
