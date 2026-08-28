@@ -98,7 +98,11 @@ that each PR got one independent reviewer rather than two.
 7. **Security stays private.** Never draft text that discloses a vulnerability or
    the security nature of a change in a public PR (`SECURITY.md`). The submitter
    lints for this and blocks.
-8. The ASF requires a **human is accountable** for every review posted. This
+8. **A worker is you.** Jobs run as agents with the same invariants — they
+   draft, they never post, they never write `ready` or `APPROVE`, and they write
+   `review.md` only through `prt draft --job-token` or `prt job commit`. Running
+   in the background changes who is watching, not what is allowed.
+9. The ASF requires a **human is accountable** for every review posted. This
    whole design exists to make that true, not to route around it.
 
 ## Routing
@@ -121,6 +125,8 @@ Match the user's words — natural phrasing is expected, not just flags.
 | "answer my notes", "I left you comments in the file", "address the asks on #26424" | [Notes to the assistant](#notes-to-the-assistant) |
 | "open #26289" | `node "$PRT" open 26289` |
 | "nudge", "remind the authors", "who hasn't replied" | [Nudge](#nudge) |
+| "what's running", "how's the batch going", "is anything still queued" | `node "$PRT" job list` |
+| "stop the batch", "cancel the queue", "forget those reviews" | `node "$PRT" job cancel --all` (a running one needs its agent stopped first) |
 
 Anything not listed: run `node "$PRT" help` and route from there. Do not invent
 subcommands.
@@ -142,8 +148,17 @@ and whether the author actually did what was asked.
 
    State the batch before starting, and say what you are leaving out.
 
-3. **Per PR, in parallel subagents** (one per PR, at most ~5 concurrent), each
-   doing:
+3. **Queue the batch, then drain it.**
+   ```bash
+   node "$PRT" job add <N>… --kind re-review --tier <batch tier>
+   node "$PRT" job next --max 4
+   ```
+   `job next` prints one entry per job to start, each with its `token`. Spawn one
+   agent per entry — never more than it handed you — and **end your turn**, so
+   the human has the prompt back while the batch runs. See
+   [The job queue](#the-job-queue) for the loop and the worker's contract.
+
+   Each worker does, for its own PR:
 
    ```bash
    node "$PRT" context <N> > ctx.json      # analysis + delta + anchors + my open notes
@@ -181,10 +196,14 @@ and whether the author actually did what was asked.
    node "$PRT" draft <N> --findings cache/findings.json --kind re-review
    ```
 
-4. **Open the batch and arm the watcher** (below).
+   …then records its own outcome with `job done`, per the worker contract.
 
-5. **Report**: one line per PR — number, title, what the author did, the
-   recommended resolution, and the file path. Nothing has been posted.
+4. **Report each PR as its agent lands**, one line: number, what the author did,
+   the recommended resolution, and the file path. Refill the freed slot with
+   `job next` and end the turn again.
+
+5. **When the queue is empty**, open the batch and arm the watcher (below).
+   Nothing has been posted.
 
 ## Show latest
 
@@ -209,14 +228,20 @@ Full first-pass reviews of the top candidates, prepared for editing.
 2. Confirm the list with the user if it is more than ~3 PRs. This spends real
    time and API budget.
 3. `node "$PRT" track <N>…`
-4. For each PR, a subagent that:
-   - invokes the **`pr-review` skill** (`/pr-review <N> --out <prdir>/cache --tier <batch tier>`)
-   - converts its findings to `cache/findings.json`
-   - `node "$PRT" draft <N> --findings cache/findings.json --kind initial`
+4. Queue them and drain:
+   ```bash
+   node "$PRT" job add <N>… --kind review --tier <batch tier>
+   node "$PRT" job next --max 4
+   ```
+   Each worker invokes the **`pr-review` skill**
+   (`/pr-review <N> --out <prdir>/cache --tier <batch tier>`), converts its
+   findings to `cache/findings.json`, and writes the draft with
+   `node "$PRT" draft <N> --findings cache/findings.json --kind initial --job-token <token>`.
 
-   Cap concurrency at ~4: each `pr-review` run spawns its own reviewers. At
-   `lean`/`codex` the concurrency limit that matters is Codex's, not Claude's.
-5. Open the batch, arm the watcher, report.
+   `maxConcurrentJobs` (default 4) is the ceiling, and `job next` already applied
+   it — spawn what it handed you and no more. At `lean`/`codex` the limit that
+   bites first is Codex's, not Claude's.
+5. Report each as it lands; when the queue is empty, arm the watcher.
 
 If `pr-review` degrades (Codex unavailable, no worktree, diff-only), say so per
 PR — a thinner review must never be presented as a full consensus one.
@@ -234,6 +259,22 @@ prefixes", "add the test case", "soften the tone", or just "revisit the draft fo
 
 If no PR number is given and exactly one draft is open, use that one; otherwise
 list the candidates and ask which.
+
+**A revision is a `now`-priority job**, so it takes the next free slot ahead of
+any batch already queued:
+
+```bash
+node "$PRT" job add <N> --kind revise --priority now --instructions "<their words>"
+node "$PRT" job next --max 1
+```
+
+The worker follows the procedure below, and then — this part is not optional —
+writes the edited bytes to `cache/revise-<token>.md` and commits them with
+`node "$PRT" job commit <N> --token <token> --from <that file>`. It never writes
+`review.md` itself. The commit re-checks, under the queue lock and at the moment
+of writing, that the token is still the current attempt and that line 1 is not
+`ready`: that is what stops a superseded worker, or one whose file the human
+armed while it was thinking, from overwriting a decision.
 
 The distinction that matters: `prt draft` *regenerates* the file from
 `findings.json` and would discard every judgement call already baked into the
@@ -264,9 +305,11 @@ sits on bytes nobody approved.
 2. Back it up beside the draft, timestamped:
    `cp review.md "cache/review.$(date +%Y%m%dT%H%M%S).md"`.
    Do **not** write into `history/` — the submitter owns that directory.
-3. Edit in place. Never modify line 1, and never modify anything inside
-   `prt:doc`: the head SHA and diff fingerprint are what the submitter
+3. Edit the bytes you read. Never modify line 1, and never modify anything
+   inside `prt:doc`: the head SHA and diff fingerprint are what the submitter
    pre-flights against, so a stale one must fail loudly rather than be tidied up.
+   Working as a job, write the result to `cache/revise-<token>.md` and commit it
+   with `job commit`; the file itself is prt's to write.
 4. If the file has no `prt:pr-actions` block and the PR is not merged, add one
    directly below the `prt:verdict` block — the human cannot arm a button that
    is not in the file:
@@ -408,6 +451,53 @@ Stop it with `TaskStop` when the batch is done.
 
 The watcher dies with the session. For a longer-lived setup, `node "$PRT" watch`
 runs fine in a terminal of its own.
+
+## The job queue
+
+Per-PR work runs as background jobs so the terminal stays the human's. The queue
+is on disk, so it survives this session ending; the workers do not, and are
+restarted from it.
+
+**Every routed request starts with a drain.** Before anything else:
+
+```bash
+node "$PRT" job next --max 4
+```
+
+That call is also the only thing that resumes queued work. Nothing in `prt` runs
+on a timer, so a session that never invokes this skill never touches the queue —
+which is the point: other sessions are free to do unrelated work.
+
+**One session drains a repository at a time.** If `job next` says another session
+owns the queue, do not force it. Tell the human which session has it and let them
+choose. A crashed owner is taken over automatically; so is one that has done
+nothing for 30 minutes.
+
+**The loop.** Spawn one agent per entry `job next` handed you, then **end the
+turn**. When an agent completes: print one line for that PR, run `job next` again
+to fill the freed slot, spawn, end the turn. When the queue is empty, give the
+batch summary and arm the watcher.
+
+**Every worker's prompt carries** the PR number, the repo, the tier, the payload,
+its `token`, and this contract:
+
+> Do the work for this kind of job. Write `review.md` **only** through
+> `prt draft <N> --job-token <token>` or
+> `prt job commit <N> --token <token> --from <file>` — never by editing it.
+> Finish with `prt job done <N> --token <token> --outcome "<one line>"`, or
+> `prt job fail <N> --token <token> --error "<why>"` if you could not.
+> Return at most five lines: number, what happened, the recommended resolution,
+> and the path to the file. Everything substantial goes on disk, not in the
+> reply.
+
+**If an agent finishes and its job is still `running`,** it died without
+recording anything. Record it yourself with `job fail`, and say so in the report:
+reaping only catches a dead *session*, and silently losing a job is the failure
+this queue exists to prevent.
+
+**A `failed` job stays failed** until a human says otherwise — `job add` again is
+that decision, and it resets the attempt count. Two attempts is the cap; a third
+would spend the budget again on a failure that repeats.
 
 ## Nudge
 

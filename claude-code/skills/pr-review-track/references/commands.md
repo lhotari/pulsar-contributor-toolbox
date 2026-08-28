@@ -177,6 +177,52 @@ machines and survives a lost tracking directory.
 PRs whose oldest unanswered point exceeds `nudgeMaxAgeDays` (90) are listed
 separately and not drafted — they need a decision, not a reminder.
 
+### `prt job add|list|next|commit|done|fail|cancel|release`
+
+The background review queue. A job is one PR's worth of model work — `review`,
+`re-review` or `revise` — recorded on that PR's `pr.json`, so the queue is
+simply "every tracked PR carrying a job" and archiving one takes its job with
+it. Ordering is `(priority, queuedAt)`: `--priority now` (what the human just
+asked for) runs ahead of `--priority batch` (the default).
+
+```
+job add <N>… --kind K [--priority now|batch] [--instructions "…"] [--tier T] [--since <sha>]
+job list [--json]                       # the queue and its owner. Read-only.
+job next [--max N] [--force]            # own, reap, start up to N, print them with tokens
+job commit <N> --token T --from <file>  # the only way a worker writes review.md
+job done <N> --token T [--outcome "…"]
+job fail <N> --token T --error "…"
+job cancel <N>… | --all [--force]
+job release [--force]
+```
+
+**One session drains a repository at a time**, recorded in `drain.owner` beside
+`BOARD.md`:
+
+| Holder | Outcome |
+|---|---|
+| The same session | Ours; the lease is touched and work continues. |
+| Another session whose process is gone | Taken over at once, and its running jobs are reaped. |
+| Another session, alive, idle > 30 min | Taken over — a wedged session must not block recovery forever. |
+| Another session, alive and working | Refused, naming it. `job release --force` takes it anyway. |
+
+Only *starting* work needs ownership. `job add`, `job list` and every other read
+work from any session, so a second session can queue and watch but not run —
+which is the accident the rule exists to prevent, and nothing more.
+
+Every mutation happens inside a short `jobs.lock` mutex, so two `job next` calls
+in one session cannot select the same job. `job next` reaps in the same breath:
+a `running` job owned by another session can only mean that session died, so it
+is requeued — unless it had already written its file, in which case it is
+*recovered* rather than retried. Re-running that would regenerate a draft for
+nothing, or re-apply a revision to bytes it already revised.
+
+`job commit` and `draft --job-token` re-check two things at the moment of
+writing: that the token is still the current attempt, and that line 1 is not
+protected. Checking either when the job started would be checking it a network
+round trip too early. See
+[the design](../../../../docs/superpowers/specs/2026-08-28-prt-async-review-jobs-design.md).
+
 ## Posting
 
 ### `validate [<N>…]`
