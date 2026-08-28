@@ -141,3 +141,78 @@ test('release hands the repo to another session', () => {
   assert.equal(run(['job', 'release']).status, 0);
   assert.equal(run(['job', 'next'], { session: 's2' }).status, 0);
 });
+
+// ------------------------------------------------------------- guarded writes
+//
+// prt is the only writer of review.md, and both halves of the permission are
+// re-asked at the moment of writing: is this still the current attempt, and is
+// the file still one a worker may touch. Checking either when the job started
+// would be checking it minutes too early.
+
+function reviewFile(number, status = 'draft') {
+  fs.writeFileSync(
+    path.join(prDir(number), 'review.md'),
+    `Status: ${status}\n\n<!-- prt:verdict\nevent: COMMENT\n-->\n\n<!-- prt:body -->\nold\n<!-- /prt -->\n`,
+  );
+}
+
+/** Take the queue back: the test above deliberately hands it to another session. */
+const reclaim = () => {
+  run(['job', 'release', '--force']);
+  run(['job', 'cancel', '--all', '--force']);
+};
+
+function startJob(number, kind = 'revise') {
+  track(number);
+  reviewFile(number);
+  run(['job', 'add', String(number), '--kind', kind]);
+  return run(['job', 'next']).json.started.find((s) => s.number === number).token;
+}
+
+test('a revise worker commits through prt, and the bytes land', () => {
+  reclaim();
+  const token = startJob(20);
+  const from = path.join(ROOT, 'revised.md');
+  fs.writeFileSync(from, 'Status: draft\n\nrevised body\n');
+
+  assert.equal(run(['job', 'commit', '20', '--token', token, '--from', from]).status, 0);
+  assert.match(fs.readFileSync(path.join(prDir(20), 'review.md'), 'utf8'), /revised body/);
+  assert.ok(jobRow(20).committedAt, 'a crash after this recovers rather than re-runs');
+  assert.equal(fs.readdirSync(path.join(prDir(20), 'history')).length, 1, 'the replaced file is kept');
+});
+
+test('a superseded worker cannot overwrite the draft that replaced it', () => {
+  reclaim();
+  const stale = startJob(21);
+  // The job is restarted — a takeover, or a retry — and mints a new token.
+  run(['job', 'fail', '21', '--token', stale, '--error', 'crashed']);
+  run(['job', 'next']);
+
+  const from = path.join(ROOT, 'stale.md');
+  fs.writeFileSync(from, 'Status: draft\n\nstale body\n');
+  const r = run(['job', 'commit', '21', '--token', stale, '--from', from]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.json.error, /not the current attempt/);
+  assert.doesNotMatch(fs.readFileSync(path.join(prDir(21), 'review.md'), 'utf8'), /stale body/);
+});
+
+test('a file the human armed while the job ran is never written', () => {
+  reclaim();
+  const token = startJob(22);
+  reviewFile(22, 'ready');                       // the human arms it mid-job
+
+  const from = path.join(ROOT, 'late.md');
+  fs.writeFileSync(from, 'Status: draft\n\nlate body\n');
+  const r = run(['job', 'commit', '22', '--token', token, '--from', from]);
+  assert.notEqual(r.status, 0);
+  assert.match(r.json.error, /ready/);
+  assert.match(fs.readFileSync(path.join(prDir(22), 'review.md'), 'utf8'), /Status: ready/);
+  assert.doesNotMatch(fs.readFileSync(path.join(prDir(22), 'review.md'), 'utf8'), /late body/);
+});
+
+test('the mutex is not left behind by a refused write', () => {
+  // A refusal that exited while holding the lock would make the next command
+  // report a busy queue for no reason anyone could see.
+  assert.equal(run(['job', 'list']).status, 0);
+  assert.equal(run(['job', 'cancel', '--all', '--force']).status, 0);
+});

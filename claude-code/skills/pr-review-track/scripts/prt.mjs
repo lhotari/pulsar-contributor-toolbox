@@ -619,9 +619,26 @@ COMMANDS.draft = async () => {
   const target = argv.flags.to
     ? path.join(ctx.prPath, String(argv.flags.to))
     : store.actionFilePath(base.root, base.repo, n);
-  if (existing) store.archiveActionFile(base.root, base.repo, n);
-  store.ensurePrDir(base.root, base.repo, n);
-  store.writeAtomic(target, text);
+
+  // A worker's permission to write is re-asked where the write happens, not
+  // where the command started: everything between those two points is a network
+  // round trip long, which is time enough for the human to arm the file or for
+  // this attempt to be superseded. A human running `prt draft` by hand has no
+  // token and is covered by the protected-status check at the top.
+  const jobToken = argv.flags['job-token'];
+  const writeIt = () => {
+    if (jobToken && !argv.flags.to) {
+      const guard = guardJobWrite(base, n, jobToken);
+      if (!guard.ok) return guard.reason;
+    }
+    if (existing) store.archiveActionFile(base.root, base.repo, n);
+    store.ensurePrDir(base.root, base.repo, n);
+    store.writeAtomic(target, text);
+    return null;
+  };
+  const refusal = jobToken ? store.withJobLock(base.root, base.repo, writeIt) : writeIt();
+  if (refusal) die(refusal);
+
   store.writeState(base.root, base.repo, n, {
     ...(prev ?? {}),
     schema: 1,
@@ -644,6 +661,8 @@ COMMANDS.draft = async () => {
     // archived file would point at somebody else's question.
     asks: { ordinalFloor: Math.max(prev?.asks?.ordinalFloor ?? 0, carried.maxOrdinal ?? 0) },
     draft: { path: target, generatedAt: new Date().toISOString(), contentHash: contentHash(text) },
+    // The job, if this draft was one, is now the reason not to re-run it.
+    ...(jobToken && prev?.job ? { job: { ...prev.job, committedAt: new Date().toISOString() } } : {}),
   });
   writeBoard(base);
   const openAsks = carried.asks.filter((x) => x.open);
@@ -1213,6 +1232,29 @@ COMMANDS.job = async () => {
       for (const n of refused) say(`#${n} is running — stop its agent first, then \`prt job cancel ${n} --force\``);
       say(`cancelled ${cancelled.length} job(s)`);
     }
+    return;
+  }
+
+  if (verb === 'commit') {
+    const n = numbers[0] ?? die('usage: prt job commit <PR number> --token T --from <file>');
+    const tok = argv.flags.token ?? die('--token is required');
+    const from = argv.flags.from ?? die('--from <file> is required');
+    if (!fs.existsSync(from)) die(`no such file: ${from}`);
+    const text = fs.readFileSync(from, 'utf8');
+    const refusal = store.withJobLock(base.root, base.repo, () => {
+      const guard = guardJobWrite(base, n, tok);
+      if (!guard.ok) return guard.reason;
+      store.archiveActionFile(base.root, base.repo, n);
+      store.writeActionFile(base.root, base.repo, n, text);
+      store.writeState(base.root, base.repo, n, {
+        ...guard.state, job: { ...guard.job, committedAt: new Date().toISOString() },
+      });
+      store.touchOwner(base.root, base.repo, { session, pid: sessionPid() });
+      return null;
+    });
+    if (refusal) die(refusal);
+    emit({ number: n, committed: true });
+    say(`#${n} review.md written`);
     return;
   }
 
