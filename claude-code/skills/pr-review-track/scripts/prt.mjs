@@ -30,6 +30,9 @@ import {
 
 /** Statuses only the submitter may write. */
 const MACHINE_ONLY_STATUSES = new Set(['queued', 'submitting', 'submitted', 'partial', 'blocked', 'error', 'superseded']);
+import {
+  newJob, planNext, orderQueue, finishedJob, failedJob, JOB_KINDS, mintToken,
+} from './lib/jobs.mjs';
 import { submitReady, diffFingerprint, findOpenTx } from './lib/submit.mjs';
 import * as store from './lib/store.mjs';
 
@@ -122,6 +125,7 @@ COMMANDS.help = () => {
     draft <N> [--findings f.json] [--kind initial|re-review]
                                            write review.md (carries notes; never over a protected file)
     ask [<N>...] [--promote]               read notes to the assistant, or promote @ai shorthand
+    job add|list|next|done|fail|cancel|release   the background review queue
     open <N>...                            open review.md in the configured editor
     nudge [<N>...] [--limit 10]            draft reminders for unanswered feedback
 
@@ -979,6 +983,247 @@ COMMANDS.status = async () => {
   store.writeAtomic(file, text);
   emit({ number: n, status: next });
   say(`#${n} → ${next}`);
+};
+
+/**
+ * Who this session is, for the ownership record.
+ *
+ * Both come from the harness. Falling back to the process keeps `prt` usable
+ * from a plain terminal, where there is no session to speak of and the only
+ * honest answer is "whoever is typing".
+ */
+function sessionId() {
+  return process.env.CLAUDE_CODE_SESSION_ID || `pid-${process.pid}`;
+}
+function sessionPid() {
+  const n = Number(process.env.CLAUDE_PID);
+  return Number.isInteger(n) && n > 0 ? n : process.pid;
+}
+
+/** The queue: every tracked PR carrying a job, as `{ number, job }`. */
+function jobEntries(base) {
+  return store.listTracked(base.root, base.repo)
+    .map((number) => ({ number, job: store.readState(base.root, base.repo, number)?.job ?? null }))
+    .filter((e) => e.job);
+}
+
+function saveJob(base, number, job) {
+  const prev = store.readState(base.root, base.repo, number) ?? {};
+  store.writeState(base.root, base.repo, number, { ...prev, job });
+}
+
+/**
+ * Ownership, as a value rather than an exit.
+ *
+ * `die()` calls process.exit, which does not run a `finally` — so anything that
+ * exits while holding the mutex leaks it until the TTL breaks it, and the next
+ * command reports a busy queue for no reason a human could see. Every refusal
+ * decided inside the lock is returned and acted on after it releases.
+ */
+function ownRepo(base, { force = false } = {}) {
+  return store.claimOwner(base.root, base.repo, { session: sessionId(), pid: sessionPid(), force });
+}
+
+/**
+ * May this worker write the action file, right now?
+ *
+ * Both halves have to be answered at the moment of writing rather than when the
+ * job started. A token that is no longer the current attempt belongs to a
+ * worker that was superseded — by a takeover or a retry — whose output would
+ * overwrite the draft that replaced it. And a status can become `ready` while a
+ * job runs: `draft` checks it before a network round trip and writes long
+ * afterwards, which is exactly the window in which a human arms a file.
+ */
+function guardJobWrite(base, number, token) {
+  const state = store.readState(base.root, base.repo, number);
+  const job = state?.job;
+  if (!job) return { ok: false, reason: `#${number} has no running job — nothing handed you a token` };
+  if (job.owner?.attemptToken !== token) {
+    return { ok: false, reason: `#${number}: that token is not the current attempt — this job was restarted or cancelled, so nothing was written` };
+  }
+  const existing = store.readActionFile(base.root, base.repo, number);
+  const status = existing ? parseStatus(existing) : null;
+  if (PROTECTED_STATUSES.has(status)) {
+    return { ok: false, reason: `#${number}: review.md is "${status}" now — refusing to write over it` };
+  }
+  return { ok: true, state, job };
+}
+
+/**
+ * The background review queue.
+ *
+ * Every verb that mutates job state does so inside `store.withJobLock`, and
+ * every refusal decided in there comes back as a value. Reading — `list` — takes
+ * neither the lock nor ownership, so a second session can always see what is
+ * happening even when it may not touch it.
+ */
+COMMANDS.job = async () => {
+  const base = await context();
+  const verb = argv._[1] ?? die('usage: prt job add|list|next|commit|done|fail|cancel|release');
+  const numbers = argv._.slice(2).filter((a) => /^\d+$/.test(a)).map(assertSafeNumber);
+  const session = sessionId();
+
+  if (verb === 'list') {
+    const rows = orderQueue(jobEntries(base)).map(({ number, job }) => ({
+      number, kind: job.kind, state: job.state, priority: job.priority,
+      attempts: job.attempts, queuedAt: job.queuedAt, tier: job.tier ?? null,
+      token: job.owner?.attemptToken ?? null, committedAt: job.committedAt ?? null,
+      lastError: job.lastError ?? null,
+    }));
+    const owner = store.readOwner(base.root, base.repo);
+    emit({ repo: base.repo, owner, jobs: rows });
+    if (!JSON_OUT) {
+      say(owner ? `queue owner: session ${owner.session} (pid ${owner.pid}), since ${owner.since}` : 'queue owner: nobody');
+      for (const r of rows) {
+        say(`  #${r.number}  ${r.state.padEnd(7)} ${r.kind}${r.attempts ? `  attempt ${r.attempts}` : ''}${r.lastError ? `  — ${r.lastError}` : ''}`);
+      }
+      if (!rows.length) say('  (empty)');
+    }
+    return;
+  }
+
+  if (verb === 'add') {
+    const kind = argv.flags.kind ?? die('--kind review|re-review|revise is required');
+    if (!JOB_KINDS.has(kind)) die(`not a job kind: ${kind}`);
+    if (!numbers.length) die('usage: prt job add <PR number>... --kind K');
+    const skipped = [];
+    const added = store.withJobLock(base.root, base.repo, () => {
+      const out = [];
+      for (const n of numbers) {
+        const state = store.readState(base.root, base.repo, n);
+        if (!state) { skipped.push({ number: n, why: 'not tracked' }); continue; }
+        if (state.job?.state === 'running') { skipped.push({ number: n, why: 'already running' }); continue; }
+        saveJob(base, n, newJob({
+          kind,
+          priority: argv.flags.priority ?? 'batch',
+          instructions: argv.flags.instructions ?? null,
+          since: argv.flags.since ?? null,
+          tier: argv.flags.tier ?? null,
+        }));
+        out.push(n);
+      }
+      return out;
+    });
+    emit({ added, skipped });
+    if (!JSON_OUT) {
+      for (const s of skipped) say(`#${s.number} skipped — ${s.why}`);
+      say(added.length ? `queued ${added.length} job(s): ${added.join(', ')}` : 'nothing queued');
+    }
+    return;
+  }
+
+  if (verb === 'next') {
+    const max = argv.flags.max ? Number(argv.flags.max) : Infinity;
+    const result = store.withJobLock(base.root, base.repo, () => {
+      // Claiming inside the mutex is what makes "one drainer" true: two sessions
+      // asking at the same instant are serialised here, so exactly one writes
+      // the owner record and the other reads it and loses.
+      const claim = ownRepo(base, { force: !!argv.flags.force });
+      if (!claim.ok) return { refused: claim };
+
+      const plan = planNext(jobEntries(base), {
+        session, maxConcurrent: base.cfg.maxConcurrentJobs ?? 4, max, mintToken,
+      });
+      for (const e of plan.recovered) {
+        const prev = store.readState(base.root, base.repo, e.number) ?? {};
+        store.writeState(base.root, base.repo, e.number, { ...prev, job: null, lastJob: e.lastJob });
+      }
+      for (const e of plan.reaped) saveJob(base, e.number, e.job);
+      for (const e of plan.start) saveJob(base, e.number, e.job);
+      store.touchOwner(base.root, base.repo, { session, pid: sessionPid() });
+      return { plan, how: claim.how };
+    });
+    if (result.refused) die(result.refused.reason);
+
+    const started = result.plan.start.map((e) => ({
+      number: e.number, kind: e.job.kind, tier: e.job.tier,
+      token: e.job.owner.attemptToken, payload: e.job.payload, attempts: e.job.attempts,
+    }));
+    emit({
+      repo: base.repo, owner: result.how, started,
+      reaped: result.plan.reaped.map((e) => ({ number: e.number, state: e.job.state })),
+      recovered: result.plan.recovered.map((e) => ({ number: e.number, outcome: e.lastJob.outcome })),
+      running: result.plan.running.map((e) => e.number),
+    });
+    if (!JSON_OUT) {
+      if (result.how === 'crashed' || result.how === 'idle') say(`took over the queue from a ${result.how === 'crashed' ? 'crashed' : 'stalled'} session`);
+      for (const e of result.plan.recovered) say(`#${e.number} recovered — its draft was already written`);
+      for (const e of result.plan.reaped) say(`#${e.number} was orphaned → ${e.job.state}`);
+      for (const s of started) say(`#${s.number} start ${s.kind} (attempt ${s.attempts}) token ${s.token}`);
+      if (!started.length) say('nothing to start');
+    }
+    return;
+  }
+
+  if (verb === 'done' || verb === 'fail') {
+    const n = numbers[0] ?? die(`usage: prt job ${verb} <PR number> --token T`);
+    const tok = argv.flags.token ?? die('--token is required — `job next` hands it to the worker');
+    const refusal = store.withJobLock(base.root, base.repo, () => {
+      const state = store.readState(base.root, base.repo, n);
+      if (!state) return `#${n} is not tracked`;
+      const job = state.job;
+      if (!job) return `#${n} has no job`;
+      // Finishing is allowed by whoever started it, even after the repo changed
+      // hands: what a superseded worker must not do is start or write anything.
+      if (job.owner?.attemptToken !== tok) {
+        return `#${n}: that token is not the current attempt — this job was restarted or cancelled`;
+      }
+      if (verb === 'done') {
+        store.writeState(base.root, base.repo, n, {
+          ...state, job: null, lastJob: finishedJob(job, { outcome: argv.flags.outcome ?? 'done' }),
+        });
+      } else {
+        saveJob(base, n, failedJob(job, { error: argv.flags.error ?? 'failed' }));
+      }
+      store.touchOwner(base.root, base.repo, { session, pid: sessionPid() });
+      return null;
+    });
+    if (refusal) die(refusal);
+    emit({ number: n, verb });
+    say(`#${n} ${verb === 'done' ? 'done' : 'failed'}`);
+    return;
+  }
+
+  if (verb === 'cancel') {
+    const targets = argv.flags.all ? jobEntries(base).map((e) => e.number) : numbers;
+    if (!targets.length) die('usage: prt job cancel <PR number>... | --all');
+    const refused = [];
+    const cancelled = store.withJobLock(base.root, base.repo, () => {
+      const out = [];
+      for (const n of targets) {
+        const state = store.readState(base.root, base.repo, n);
+        if (!state?.job) continue;
+        // Dropping the record of a job whose agent is still running would leave
+        // a worker with a token nobody is expecting. Stop the agent first.
+        if (state.job.state === 'running' && !argv.flags.force) {
+          refused.push(n);
+          continue;
+        }
+        store.writeState(base.root, base.repo, n, {
+          ...state,
+          job: null,
+          lastJob: { kind: state.job.kind, outcome: 'cancelled', attempts: state.job.attempts, finishedAt: new Date().toISOString() },
+        });
+        out.push(n);
+      }
+      return out;
+    });
+    emit({ cancelled, refused });
+    if (!JSON_OUT) {
+      for (const n of refused) say(`#${n} is running — stop its agent first, then \`prt job cancel ${n} --force\``);
+      say(`cancelled ${cancelled.length} job(s)`);
+    }
+    return;
+  }
+
+  if (verb === 'release') {
+    const released = store.releaseOwner(base.root, base.repo, { session, force: !!argv.flags.force });
+    emit({ released });
+    say(released ? `released the ${base.repo} queue` : 'not the owner — use --force to take it anyway');
+    return;
+  }
+
+  die(`"${verb}" is not a job verb`);
 };
 
 COMMANDS.validate = async () => {
