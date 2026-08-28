@@ -17,7 +17,8 @@
 //
 //   node budget.mjs               human-readable report
 //   node budget.mjs --json        machine-readable, for a skill to route on
-//   node budget.mjs --no-cache    force a rescan (results are cached 60s)
+//   node budget.mjs --no-cache    force a rescan (results are cached 30 min)
+//   node budget.mjs --max-age 5m  accept a cache no older than this
 //   node budget.mjs --set-weekly 2000M --set-daily 400M
 //
 // Exit code is 0 normally, 3 when the tier is `codex` — so a shell caller can
@@ -26,14 +27,21 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { pathToFileURL } from 'node:url';
 
 const HOME = os.homedir();
 const PROJECTS = process.env.PRBUDGET_PROJECTS || path.join(HOME, '.claude', 'projects');
 const CONFIG = process.env.PRBUDGET_CONFIG || path.join(HOME, '.claude', 'pr-review', 'budget.json');
-// Scanning a week of transcripts costs a few seconds. A batch of ten reviews
-// asking the same question ten times would spend a minute learning nothing new.
+// Scanning a month of transcripts costs seconds and a good chunk of the caller's
+// patience. Nothing downstream needs it fresher than that: the answer is a
+// coarse tier, and pace moves slowly enough that a half-hour-old reading picks
+// the same one. So the default resolution is 30 minutes — a session's worth of
+// reviews pays the scan once, and `--no-cache` / `--max-age` are there for the
+// rare caller that genuinely needs the current number.
 const CACHE = path.join(path.dirname(CONFIG), 'budget-cache.json');
-const CACHE_TTL_MS = 60_000;
+const CACHE_TTL_MS = process.env.PRBUDGET_CACHE_TTL_MS
+  ? Number(process.env.PRBUDGET_CACHE_TTL_MS)  // 0 disables the cache entirely
+  : 30 * 60_000;
 
 const HOUR = 3600_000;
 const DAY = 24 * HOUR;
@@ -86,6 +94,12 @@ function loadConfig() {
 function saveConfig(cfg) {
   fs.mkdirSync(path.dirname(CONFIG), { recursive: true });
   fs.writeFileSync(CONFIG, `${JSON.stringify(cfg, null, 2)}\n`);
+  // A cached tier computed against the old budgets says nothing about the new
+  // ones. At a 30-minute TTL that stale answer would outlive the change it was
+  // meant to reflect, so setting a budget drops the cache.
+  try {
+    fs.rmSync(CACHE, { force: true });
+  } catch { /* a cache we cannot drop will expire on its own */ }
 }
 
 /** Accept 2000M / 1.5B / 750000 as a token count. */
@@ -94,6 +108,20 @@ export function parseTokens(s) {
   if (!m) throw new Error(`not a token count: ${s}`);
   const mult = { k: 1e3, m: 1e6, b: 1e9 }[(m[2] || '').toLowerCase()] ?? 1;
   return Math.round(Number(m[1]) * mult);
+}
+
+/** Accept 30m / 90s / 2h / 45000 (ms) as a duration. */
+export function parseDuration(s) {
+  const m = /^([\d.]+)\s*(ms|s|m|h)?$/i.exec(String(s ?? '').trim());
+  if (!m) throw new Error(`not a duration: ${s}`);
+  const mult = { ms: 1, s: 1000, m: 60_000, h: 3600_000 }[(m[2] || 'ms').toLowerCase()];
+  return Math.round(Number(m[1]) * mult);
+}
+
+function fmtAge(ms) {
+  if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
+  if (ms < 3600_000) return `${Math.round(ms / 60_000)} min`;
+  return `${(ms / 3600_000).toFixed(1)}h`;
 }
 
 function fmt(n) {
@@ -213,18 +241,27 @@ function elapsedFraction(windowKey, now) {
   return Math.max(0.02, (now - start.getTime()) / (7 * DAY));
 }
 
-/** Cached report, so a batch of reviews pays the scan once. */
+/**
+ * Cached report, so a session's worth of reviews pays the scan once. The result
+ * carries `cachedAt` and `cacheAgeMs` so a caller that reports the tier can say
+ * how old the reading behind it is.
+ */
 export function cachedReport({ maxAgeMs = CACHE_TTL_MS, config = loadConfig() } = {}) {
   try {
     const c = JSON.parse(fs.readFileSync(CACHE, 'utf8'));
-    if (Date.now() - Date.parse(c.now) < maxAgeMs) return { ...c, cached: true };
+    const age = Date.now() - Date.parse(c.now);
+    if (age >= 0 && age < maxAgeMs) return { ...c, cached: true, cachedAt: c.now, cacheAgeMs: age };
   } catch { /* no usable cache */ }
   const r = report({ config });
   try {
     fs.mkdirSync(path.dirname(CACHE), { recursive: true });
     fs.writeFileSync(CACHE, JSON.stringify(r));
-  } catch { /* a cache we cannot write is not an error */ }
-  return { ...r, cached: false };
+  } catch (e) {
+    // Not fatal — but say it, because the symptom of a silently unwritable
+    // cache is every caller paying the full scan and nobody knowing why.
+    process.stderr.write(`[budget] cache not written (${e.code ?? e.message}); every run will rescan: ${CACHE}\n`);
+  }
+  return { ...r, cached: false, cachedAt: r.now, cacheAgeMs: 0 };
 }
 
 export function report({ now = Date.now(), config = loadConfig() } = {}) {
@@ -344,7 +381,11 @@ function main() {
     }
   }
 
-  const r = args.includes('--no-cache') ? report({ config: cfg }) : cachedReport({ config: cfg });
+  const maxAgeIdx = args.indexOf('--max-age');
+  const maxAgeMs = maxAgeIdx === -1 ? CACHE_TTL_MS : parseDuration(args[maxAgeIdx + 1]);
+  // `--no-cache` means "do not *read* the cache" — the fresh reading it paid for
+  // still gets stored, so the next caller inherits it.
+  const r = cachedReport({ config: cfg, maxAgeMs: args.includes('--no-cache') ? 0 : maxAgeMs });
 
   if (args.includes('--json')) {
     process.stdout.write(`${JSON.stringify(r, null, 2)}\n`);
@@ -360,6 +401,9 @@ function main() {
     }
     process.stdout.write(`\ntier: ${r.tier.toUpperCase()} — ${r.why}\n`);
     process.stdout.write(`${TIER_ADVICE[r.tier]}\n`);
+    if (r.cached) {
+      process.stdout.write(`\nCached reading from ${fmtAge(r.cacheAgeMs)} ago — --no-cache to rescan.\n`);
+    }
     if (r.basis === 'baseline') {
       process.stdout.write(
         `\nNo budget configured, so pace compares against your own trailing 28-day rate.\n` +
@@ -371,4 +415,26 @@ function main() {
   if (r.tier === 'codex') process.exitCode = 3;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) main();
+/**
+ * Was this file run directly, rather than imported?
+ *
+ * The obvious spelling — comparing import.meta.url to a 'file://' + argv[1]
+ * string — is wrong in exactly the way that matters here. `~/.claude/skills/pr-review`
+ * is a symlink into the toolbox checkout, and Node resolves `import.meta.url`
+ * to the *real* path while `process.argv[1]` keeps the symlinked one the caller
+ * typed. The two strings never match, `main()` never runs, and the script exits
+ * 0 having printed nothing — a silent no-op for every documented invocation.
+ * Comparing realpaths fixes that; going through `pathToFileURL` also gets the
+ * escaping right for paths containing spaces or `#`.
+ */
+function isMain() {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return import.meta.url === pathToFileURL(fs.realpathSync(entry)).href;
+  } catch {
+    return false;
+  }
+}
+
+if (isMain()) main();

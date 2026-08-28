@@ -29,18 +29,29 @@ node "$PRT" doctor      # confirms repo, reviewer, editor, and GraphQL budget
 
 If `doctor` fails, stop and report — every command below depends on it.
 
-**Check the budget before any batch.** Reviewing ten PRs is the most expensive
-thing this skill does, and the `pr-review` pipeline scales itself to what is
-left:
+**Decide the tier once per session, then stop asking.** Reviewing ten PRs is the
+most expensive thing this skill does, and the `pr-review` pipeline scales itself
+to what is left:
 
 ```bash
-node ~/.claude/skills/pr-review/scripts/budget.mjs --json    # cached 60s
+BUDGET=~/.claude/skills/pr-review/scripts/budget.mjs
+[ -f "$BUDGET" ] || BUDGET=~/workspace-pulsar/pulsar-contributor-toolbox/claude-code/skills/pr-review/scripts/budget.mjs
+node "$BUDGET" --json    # cached 30 min
 ```
 
-Pass the reported `tier` straight through to every `/pr-review` call
-(`--tier <tier>`) so the whole batch runs at one consistent depth rather than
-each PR re-deciding. Tell the user which tier the batch ran at, and at `lean` or
-`codex` say plainly that each PR got one independent reviewer rather than two.
+The reading is cached at a resolution of **30 minutes** and reports its own age
+(`cached`, `cacheAgeMs`); a stale-by-minutes estimate picks the same tier, so
+take it. Run this **once**, at the start of the session's first batch, and reuse
+the answer for everything that follows — including later batches within the same
+sitting. Do not re-run it per PR, per round, or per `re-review`. Re-measure only
+when the session has been running long enough that the cache has expired anyway
+*and* a lot has been spent since, or when the user asks.
+
+Pass the tier straight through to every `/pr-review` call (`--tier <tier>`).
+That both keeps the batch at one consistent depth and stops each PR re-deriving
+the tier — `pr-review` skips the budget script entirely when it is given one.
+Tell the user which tier the batch ran at, and at `lean` or `codex` say plainly
+that each PR got one independent reviewer rather than two.
 
 ## Invariants — never violate these
 

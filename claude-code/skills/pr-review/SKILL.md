@@ -88,6 +88,13 @@ Codex reviewers that actually ran.
 
 ### Claude Code host
 
+**If the caller passed `--tier`, that is the tier — do not run the budget script
+at all.** A caller who names a tier has already decided (`pr-review-track` does
+this for a whole batch); re-deriving it wastes seconds and can silently disagree.
+Say in the output that the tier was given rather than measured.
+
+Otherwise:
+
 ```bash
 BUDGET=~/.claude/skills/pr-review/scripts/budget.mjs
 [ -f "$BUDGET" ] || BUDGET=~/workspace-pulsar/pulsar-contributor-toolbox/claude-code/skills/pr-review/scripts/budget.mjs
@@ -96,11 +103,17 @@ node "$BUDGET" --json
 
 It reports a `tier` from the pace at which the allowance is being consumed — the
 share of the budget already spent divided by the share of the window elapsed.
-Above 1.0 means the window runs out early. Results are cached for 60 s, so a
-batch of reviews pays the scan once.
+Above 1.0 means the window runs out early.
 
-Honour the tier. `--tier` overrides it; say so in the output when it does. If the
-script is missing or errors, use `standard` and note it.
+The reading is **cached for 30 minutes** and the response says how stale it is
+(`cached`, `cacheAgeMs`). That resolution is deliberate: pace moves slowly, the
+output is a coarse tier, and a scan costs seconds — so a session's worth of
+reviews pays for one scan. Take the cached answer. Only reach for `--no-cache`
+(or `--max-age 5m`) when something just changed the picture — a budget was set,
+or a very large batch has run since. If stderr says the cache could not be
+written, every run is rescanning; report that rather than absorbing the cost.
+
+Honour the tier. If the script is missing or errors, use `standard` and note it.
 
 | tier | Round 1 | Cross-validation | Claude spend |
 |---|---|---|---|
@@ -125,7 +138,7 @@ earn a consensus pipeline. Say that you did.
   - Extract the PR number (required, first positional argument)
   - Extract `--repo <owner/repo>` if provided (pass as `--repo` flag to `gh` commands)
   - Extract `--prompt <text>` if provided (use as custom review focus)
-  - Extract `--tier <name>` if provided (overrides step 0)
+  - Extract `--tier <name>` if provided (replaces step 0 — the budget script does not run)
   - Extract `--solo` if provided (equivalent to `--tier solo`)
   - Extract `--since <sha>` if provided (review only `<sha>..<head>` — an incremental re-review)
   - Extract `--out <dir>` if provided (also write machine-readable findings there; see step 8)
