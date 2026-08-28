@@ -536,6 +536,22 @@ function fixtureAnalysis(over = {}) {
   };
 }
 
+test('a fresh draft carries the pr-actions block, unless the PR is already merged', () => {
+  const draftFor = (over) => renderActionFile({
+    repo: 'apache/pulsar',
+    analysis: fixtureAnalysis(over),
+    kind: 'initial',
+    diffFingerprint: 'deadbeef',
+    reviewerLogin: 'lhotari',
+  });
+  assert.match(draftFor({}), /<!-- prt:pr-actions\nupdate-branch: false\ntrigger-ci: false\n-->/);
+  assert.equal(
+    draftFor({ state: 'MERGED', merged: true }).includes('prt:pr-actions'),
+    false,
+    'a merged PR has no branch left to update and no CI left to release',
+  );
+});
+
 test('a generated file parses cleanly and plans exactly what it shows', () => {
   const analysis = fixtureAnalysis({
     threads: [{

@@ -55,6 +55,12 @@ GraphQL queries and writes a baseline `pr.json` per PR.
 `sync` never drafts. It answers "what is my current position on every PR I have
 touched"; `re-review` is what turns that into drafts.
 
+It does make one repair to files it finds: a `review.md` for an unmerged PR that
+has no `prt:pr-actions` block — because it was drafted before the block existed
+— gets one below its verdict, both flags `false`. `refresh`, `status` and
+`ask --promote` do the same. See
+[action-file.md](action-file.md#prtpr-actions--acting-on-the-pull-request-itself).
+
 Cost on ~130 PRs: 3 search queries + ~16 batched detail queries. Aliased GraphQL
 batching means one request covers many PRs for one rate-limit point.
 
@@ -259,8 +265,9 @@ left, so `prt refresh <N>` after it.
 
 `status` reads line 1, and can set `draft`, `hold` or `skip`. It refuses to set
 `ready` — that is your approval signature, so you write it in the file — and it
-refuses every status the submitter owns. `doctor` prints the resolved repo, reviewer,
-editor, GraphQL budget, and how many PRs are tracked per repo.
+refuses every status the submitter owns. Setting a status also backfills a
+missing `prt:pr-actions` block, as `sync` does. `doctor` prints the resolved
+repo, reviewer, editor, GraphQL budget, and how many PRs are tracked per repo.
 
 ## Environment
 

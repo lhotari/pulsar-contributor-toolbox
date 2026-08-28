@@ -18,7 +18,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-import { parseActionFile, planActions, setPrActionField } from '../lib/actionfile.mjs';
+import { parseActionFile, planActions, setPrActionField, ensurePrActions } from '../lib/actionfile.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SKILL = path.resolve(HERE, '../..');
@@ -119,6 +119,94 @@ test('setPrActionField rewrites one line and leaves every other byte alone', () 
   // A file without the block is returned unchanged rather than repaired.
   const none = file({ block: false });
   assert.equal(setPrActionField(none, 'update-branch', 'false'), none);
+});
+
+// ------------------------------------------------------------- the backfill
+//
+// The block was added after drafts already existed. A file written before it
+// would otherwise never gain the two buttons until the next full regeneration,
+// which throws away every judgement call baked into its prose — so every
+// command that rewrites `review.md` repairs the omission in place instead.
+
+/** The fixture as it was drafted before the block existed. */
+const old = (extra = {}) => file({ status: 'draft', block: false, ...extra });
+
+test('a file drafted before the block gets one, directly below the verdict', () => {
+  const after = ensurePrActions(old());
+  assert.ok(
+    after.indexOf('<!-- prt:pr-actions') > after.indexOf('<!-- prt:verdict'),
+    'the block belongs under the verdict its flags are armed alongside',
+  );
+  assert.ok(
+    after.indexOf('<!-- prt:pr-actions') < after.indexOf('<!-- prt:body'),
+    'and above the sections that follow, where a fresh draft writes it',
+  );
+  const p = parseActionFile(after);
+  assert.deepEqual(p.errors, []);
+  assert.deepEqual(p.prActions, { updateBranch: false, triggerCi: false });
+  assert.deepEqual(kinds(after), ['review'], 'backfilling adds the buttons, it never presses them');
+});
+
+test('the backfilled block is byte-identical to a generated one', () => {
+  const sentinel = (t) => t.slice(t.indexOf('<!-- prt:pr-actions')).split('\n').slice(0, 4).join('\n');
+  assert.equal(sentinel(ensurePrActions(old())), sentinel(file({ status: 'draft' })));
+});
+
+test('backfilling twice changes nothing the second time', () => {
+  const once = ensurePrActions(old());
+  assert.equal(ensurePrActions(once), once);
+});
+
+test('a file that already has the block is returned untouched, wherever it sits', () => {
+  const armed = file({ status: 'draft', updateBranch: true });
+  assert.equal(ensurePrActions(armed), armed, 'an armed flag is never reset by a repair');
+  const moved = old().replace(
+    '<!-- prt:body -->',
+    '<!-- prt:pr-actions\nupdate-branch: false\ntrigger-ci: false\n-->\n\n<!-- prt:body -->',
+  );
+  assert.equal(ensurePrActions(moved), moved);
+});
+
+test('a merged PR gets no block: no branch left to update, no CI left to release', () => {
+  assert.equal(ensurePrActions(old(), { merged: true }), old());
+});
+
+test('an armed or in-flight file is never rewritten behind the human', () => {
+  for (const status of ['ready', 'queued', 'partial']) {
+    assert.equal(ensurePrActions(old({ status })), old({ status }), `${status} must not be touched`);
+  }
+  for (const status of ['draft', 'hold', 'blocked', 'submitted']) {
+    assert.notEqual(ensurePrActions(old({ status })), old({ status }), `${status} is still being edited`);
+  }
+});
+
+test('no verdict to hang it under means no block, not a guess', () => {
+  const noVerdict = old().replace('<!-- prt:verdict\nevent: COMMENT\n-->\n\n', '');
+  assert.equal(ensurePrActions(noVerdict), noVerdict);
+  // Nor is an unterminated verdict quietly built on top of.
+  const broken = old().replace('event: COMMENT\n-->', 'event: COMMENT');
+  assert.equal(ensurePrActions(broken), broken);
+});
+
+test('a `##` heading inside a note is prose, not the next section', () => {
+  const before = old().replace(
+    '<!-- prt:body -->',
+    '<!-- prt:ask\nid: a1\nre: verdict\n-->\n## why COMMENT?\n<!-- /prt -->\n\n## Review summary\n\n<!-- prt:body -->',
+  );
+  const after = ensurePrActions(before);
+  assert.ok(
+    after.indexOf('<!-- prt:pr-actions') > after.indexOf('## why COMMENT?'),
+    'a note about the verdict stays attached to it',
+  );
+  assert.ok(after.indexOf('<!-- prt:pr-actions') < after.indexOf('## Review summary'));
+  assert.deepEqual(parseActionFile(after).errors, []);
+});
+
+test('a CRLF file stays a CRLF file', () => {
+  const after = ensurePrActions(old().replace(/\n/g, '\r\n'));
+  assert.ok(after.includes('<!-- prt:pr-actions\r\nupdate-branch: false\r\n'));
+  assert.equal(/[^\r]\n/.test(after), false, 'no bare LF was introduced');
+  assert.deepEqual(parseActionFile(after).errors, []);
 });
 
 // --------------------------------------------------------------- through gh
@@ -317,4 +405,34 @@ test('a branch that will not merge fails loudly and leaves the flag armed', () =
   assert.equal(after.split('\n')[0], 'Status: partial', 'the review posted; the branch update did not');
   assert.match(after, /update-branch: true/, 'still armed, so `prt recover` retries what was asked for');
   assert.match(after, /merge conflict/);
+});
+
+// -------------------------------------------------- the backfill, through gh
+
+function prt(...args) {
+  return spawnSync(process.execPath, [path.join(SKILL, 'scripts/prt.mjs'), ...args, '--repo', REPO], {
+    encoding: 'utf8',
+    env: { ...process.env, PATH: `${BIN}:${process.env.PATH}`, PRT_ROOT: ROOT },
+  });
+}
+
+test('a command that rewrites review.md repairs the missing block on the way past', () => {
+  const dir = setupPr(old());
+  const r = prt('status', String(PR), 'hold');
+  assert.equal(r.status, 0, r.stderr);
+
+  const after = fs.readFileSync(path.join(dir, 'review.md'), 'utf8');
+  assert.equal(after.split('\n')[0], 'Status: hold', 'the status change still happened');
+  assert.match(after, /<!-- prt:pr-actions\nupdate-branch: false\ntrigger-ci: false\n-->/);
+  assert.deepEqual(parseActionFile(after).errors, []);
+});
+
+test('a merged PR keeps the file it has', () => {
+  const dir = setupPr(old());
+  fs.writeFileSync(
+    path.join(dir, 'pr.json'),
+    JSON.stringify({ schema: 1, repo: REPO, number: PR, title: 't', state: 'MERGED', merged: true }),
+  );
+  assert.equal(prt('status', String(PR), 'hold').status, 0);
+  assert.equal(fs.readFileSync(path.join(dir, 'review.md'), 'utf8').includes('prt:pr-actions'), false);
 });

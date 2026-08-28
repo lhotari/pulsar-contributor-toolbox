@@ -135,6 +135,109 @@ export function setPrActionField(text, field, value) {
   return lines.join('\n');
 }
 
+/**
+ * The `prt:pr-actions` section, exactly as a fresh draft writes it.
+ *
+ * It lives with the format rather than in the renderer because a file drafted
+ * before the block existed gets it backfilled (`ensurePrActions`), and a
+ * backfilled block whose wording had drifted from the generated one would read
+ * as a second, subtly different feature.
+ */
+export const PR_ACTIONS_SECTION = [
+  '## Pull request actions',
+  '',
+  '<!-- prt:pr-actions',
+  'update-branch: false',
+  'trigger-ci: false',
+  '-->',
+  '',
+  '*Run when you set line 1 to `ready`, after everything above has been posted, then set back to `false`.*',
+  '',
+  '- `update-branch` — merge the base branch into this PR, as the **Update branch** button does.',
+  '  It updates nothing if the head has moved since this file was drafted, and reports a merge',
+  '  conflict rather than guessing at it.',
+  "- `trigger-ci` — GitHub's **Approve workflows to run** for this PR's waiting runs. `event: APPROVE`",
+  '  already does this, so it is for letting CI run *without* approving the PR.',
+  '',
+  'Both together update the branch first, then approve the runs that appear on the new head.',
+];
+
+/** Line-1 values whose bytes belong to the human or to the submitter mid-flight. */
+const NO_BACKFILL_STATUSES = new Set(['ready', 'queued', 'partial']);
+
+/**
+ * Give a file drafted before `prt:pr-actions` existed the block it is missing,
+ * directly below the verdict the two flags are armed alongside.
+ *
+ * Both flags land `false`: this adds the buttons, it never presses them
+ * (invariant 3). The text comes back byte-for-byte unchanged when the block is
+ * already there, when there is no verdict to hang it under, when the PR is
+ * merged — neither updating the branch nor releasing CI means anything after a
+ * merge — or when line 1 says the human has armed the file or the submitter is
+ * part-way through it.
+ */
+export function ensurePrActions(text, { merged = false } = {}) {
+  if (merged) return text;
+  if (NO_BACKFILL_STATUSES.has(parseStatus(text) ?? '')) return text;
+
+  const lines = text.split('\n');
+  const bare = (s) => String(s ?? '').replace(/\r$/, '');
+  const sentinelOf = (i) => OPEN_START.exec(bare(lines[i]));
+
+  /** Last line of the sentinel opening at `i`, or -1 if it never closes. */
+  const sentinelEnd = (i, rest) => {
+    if (COMMENT_END.test(rest)) return i;
+    for (let j = i + 1; j < lines.length; j++) {
+      const line = bare(lines[j]);
+      // A sentinel that opens before this one closed never closed at all: the
+      // next block's own `-->` is not this block's terminator.
+      if (OPEN_START.test(line) || CLOSE.test(line)) break;
+      if (COMMENT_END.test(line)) return j;
+    }
+    return -1;
+  };
+
+  let verdictEnd = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const m = sentinelOf(i);
+    if (!m) continue;
+    // Already present — wherever the human moved it to.
+    if (m[1] === 'pr-actions') return text;
+    if (m[1] === 'verdict' && verdictEnd < 0) {
+      verdictEnd = sentinelEnd(i, m[2]);
+      // An unterminated verdict is a parse error the human has to see, not
+      // something to build on top of.
+      if (verdictEnd < 0) return text;
+    }
+  }
+  if (verdictEnd < 0) return text;
+
+  // "Below the verdict" means where a fresh draft puts it: after the verdict's
+  // prose and any notes attached to it, above whatever section comes next. A
+  // `##` inside a block body is markdown the human wrote rather than a heading,
+  // so those blocks are stepped over whole.
+  let at = lines.length;
+  for (let i = verdictEnd + 1; i < lines.length; i++) {
+    const m = sentinelOf(i);
+    if (m && (m[1] === 'ask' || m[1] === 'answer')) {
+      const end = sentinelEnd(i, m[2]);
+      i = end < 0 ? lines.length : end;
+      while (i < lines.length && !CLOSE.test(bare(lines[i]))) i++;
+      continue;
+    }
+    if (m || /^##\s/.test(bare(lines[i]))) {
+      at = i;
+      break;
+    }
+  }
+
+  const cr = /\r\n/.test(text) ? '\r' : '';
+  const block = [...PR_ACTIONS_SECTION, ''];
+  if (at > 0 && bare(lines[at - 1]) !== '') block.unshift('');
+  lines.splice(at, 0, ...block.map((l) => l + cr));
+  return lines.join('\n');
+}
+
 /** Parse the `key: value` lines inside a sentinel. Values are plain scalars. */
 function parseSentinelFields(lines) {
   const fields = {};

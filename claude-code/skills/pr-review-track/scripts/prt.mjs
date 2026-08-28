@@ -25,7 +25,7 @@ import { parseDiff, commentableAnchors, validateAnchor } from './lib/diff.mjs';
 import {
   parseActionFile, parseStatus, setStatus, contentHash, appendLog, planActions,
   PROTECTED_STATUSES, IN_FLIGHT_STATUSES, STATUSES,
-  carryAsks, collectAsks, maxAskOrdinal, promoteShorthand, askState,
+  carryAsks, collectAsks, maxAskOrdinal, promoteShorthand, askState, ensurePrActions,
 } from './lib/actionfile.mjs';
 
 /** Statuses only the submitter may write. */
@@ -266,6 +266,26 @@ COMMANDS.approved = async () => {
   }
 };
 
+/**
+ * Give an existing `review.md` the `prt:pr-actions` block if it was drafted
+ * before that block existed.
+ *
+ * Every command that rewrites the file runs this, so the two buttons turn up on
+ * the drafts already sitting in the tree rather than only on the next
+ * regenerated one. Nothing is written when there is nothing to add, and the
+ * flags always arrive `false` — see `ensurePrActions` for what it declines to
+ * touch.
+ */
+function backfillPrActions(base, number, merged) {
+  const file = store.actionFilePath(base.root, base.repo, number);
+  if (!fs.existsSync(file)) return false;
+  const text = fs.readFileSync(file, 'utf8');
+  const next = ensurePrActions(text, { merged });
+  if (next === text) return false;
+  store.writeAtomic(file, next);
+  return true;
+}
+
 COMMANDS.sync = async () => {
   const base = await context();
   const limit = argv.flags.limit ? Number(argv.flags.limit) : Infinity;
@@ -289,6 +309,7 @@ COMMANDS.sync = async () => {
   const added = [];
   const updated = [];
   const closed = [];
+  const backfilled = [];
   for (const number of all) {
     const pr = details.get(number);
     if (!pr) continue;
@@ -317,16 +338,18 @@ COMMANDS.sync = async () => {
       analysis,
     };
     store.writeState(base.root, base.repo, number, state);
+    if (backfillPrActions(base, number, state.merged)) backfilled.push(number);
     if (pr.state !== 'OPEN') closed.push(number);
     else if (wasTracked) updated.push(number);
     else added.push(number);
   }
 
   writeBoard(base);
-  emit({ repo: base.repo, added, updated, closed, engaged: remote.size, tracked: all.length });
+  emit({ repo: base.repo, added, updated, closed, backfilled, engaged: remote.size, tracked: all.length });
   if (!JSON_OUT) {
     say(`  added   ${added.length}${added.length ? `: ${added.slice(0, 15).join(', ')}${added.length > 15 ? '…' : ''}` : ''}`);
     say(`  updated ${updated.length}`);
+    if (backfilled.length) say(`  pr-actions block added to ${backfilled.length} draft(s): ${backfilled.join(', ')}`);
     say(`  closed/merged ${closed.length}${closed.length ? ` (run \`prt cleanup\`)` : ''}`);
     say('');
     say(`Baseline written. Ask for a re-review to draft responses: \`prt list --status draft\``);
@@ -396,11 +419,12 @@ COMMANDS.refresh = async () => {
       lastSyncAt: new Date().toISOString(),
       analysis,
     });
-    rows.push({ number: n, headMoved: analysis.headMoved, threads: analysis.threadCounts });
+    const backfilled = backfillPrActions(base, n, !!pr.merged);
+    rows.push({ number: n, headMoved: analysis.headMoved, threads: analysis.threadCounts, backfilled });
   }
   writeBoard(base);
   emit({ refreshed: rows });
-  if (!JSON_OUT) for (const r of rows) say(`#${r.number}  ${r.headMoved ? 'head moved' : 'head unchanged'}  ·  ${summarizeCounts(r.threads)}`);
+  if (!JSON_OUT) for (const r of rows) say(`#${r.number}  ${r.headMoved ? 'head moved' : 'head unchanged'}  ·  ${summarizeCounts(r.threads)}${r.backfilled ? '  ·  pr-actions block added' : ''}`);
 };
 
 /**
@@ -791,8 +815,9 @@ COMMANDS.ask = async () => {
       const floor = Math.max(prev?.asks?.ordinalFloor ?? 0, maxAskOrdinal(text));
       const generation = prev?.tracking?.generation ?? 1;
       const { text: promotedText, promoted } = promoteShorthand(text, { startOrdinal: floor + 1, generation });
+      const nextText = ensurePrActions(promotedText, { merged: !!prev?.merged });
+      if (nextText !== text) store.writeAtomic(file, nextText);
       if (promoted.length) {
-        store.writeAtomic(file, promotedText);
         store.writeState(base.root, base.repo, n, {
           ...(prev ?? {}),
           asks: { ordinalFloor: Math.max(floor, maxAskOrdinal(promotedText)) },
@@ -949,7 +974,8 @@ COMMANDS.status = async () => {
     // CLI means invariant 2 rests on the tool, not on an agent's good manners.
     die(`prt will not set "ready" — that is the approval signature.\n  Open ${file} and change line 1 yourself.`);
   }
-  const text = setStatus(fs.readFileSync(file, 'utf8'), next);
+  const merged = !!store.readState(base.root, base.repo, n)?.merged;
+  const text = ensurePrActions(setStatus(fs.readFileSync(file, 'utf8'), next), { merged });
   store.writeAtomic(file, text);
   emit({ number: n, status: next });
   say(`#${n} → ${next}`);

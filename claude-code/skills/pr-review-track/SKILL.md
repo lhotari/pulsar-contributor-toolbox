@@ -72,6 +72,11 @@ that each PR got one independent reviewer rather than two.
    so the same rule covers them: always generate them `false`, and say in prose
    when one looks worth setting (a PR behind its base, a fork PR whose CI is
    waiting for approval).
+   Adding the block is not arming it. A draft written before `prt:pr-actions`
+   existed has no buttons for the human to type into, so whenever you update
+   such a file, give it one below `prt:verdict` with both flags `false` — unless
+   the PR is merged, where neither flag means anything. `prt sync`, `refresh`,
+   `status` and `ask --promote` do the same repair on their way past.
 4. **Never let a generator overwrite a protected file** (`ready`/`queued`/
    `partial`/`hold`/`skip`). `prt draft` refuses by default — use
    `--to review.next.md`. Do not reach for `--force` to get past it: `--force`
@@ -262,9 +267,24 @@ sits on bytes nobody approved.
 3. Edit in place. Never modify line 1, and never modify anything inside
    `prt:doc`: the head SHA and diff fingerprint are what the submitter
    pre-flights against, so a stale one must fail loudly rather than be tidied up.
-4. `node "$PRT" validate <N> --repo <owner/repo>` — expect no errors and no
+4. If the file has no `prt:pr-actions` block and the PR is not merged, add one
+   directly below the `prt:verdict` block — the human cannot arm a button that
+   is not in the file:
+
+   ```markdown
+   ## Pull request actions
+
+   <!-- prt:pr-actions
+   update-branch: false
+   trigger-ci: false
+   -->
+   ```
+
+   Both flags `false`, always (invariant 3). Say in your report that you added
+   it, and mention when one looks worth setting.
+5. `node "$PRT" validate <N> --repo <owner/repo>` — expect no errors and no
    warnings, and check the action count still matches what you intended.
-5. Report what changed, and what you deliberately left alone.
+6. Report what changed, and what you deliberately left alone.
 
 ### What to preserve
 
@@ -360,6 +380,10 @@ as `Status: ready` and `event: APPROVE`.
 **Never quote a note back into the review.** It is theirs, written to you, about
 the PR author. The submitter blocks a twelve-word verbatim overlap, but that is
 a backstop, not a licence to write up to eleven.
+
+Answering a note is an edit to `review.md`, so the rest of the revision rules
+apply too — including giving a file drafted before `prt:pr-actions` that block
+(step 4 of [the revision procedure](#procedure)).
 
 When you report back, say what you answered, what you declined and why, and what
 is still open.

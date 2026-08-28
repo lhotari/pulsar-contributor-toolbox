@@ -188,6 +188,20 @@ re-reading the head and its runs until they appear or
 not gate this PR's workflows has nothing to approve. That wait is also the one
 place `prt watch` will sit on a single PR for up to a minute.
 
+**A file drafted before this block existed is repaired, not left behind.** The
+generator is not the only writer: `prt sync`, `prt refresh`, `prt status` and
+`prt ask --promote` each add the missing block on their way past, and so does a
+model hand-revising the file. It goes directly below `prt:verdict` — after the
+verdict's prose and any notes attached to it, above whatever section comes next.
+
+The repair is skipped in exactly four cases: the block is already there
+(wherever the human moved it to); there is no verdict, or no complete one, to
+hang it under — a nudge file has none; the PR is merged, where there is no
+branch left to update and no CI left to release; or line 1 says `ready`,
+`queued` or `partial`, which are bytes the human signed or the submitter is
+part-way through. Both flags always arrive `false`: the repair puts the buttons
+in the file, it never presses them.
+
 ### `prt:body` — the review's summary comment
 
 ```
