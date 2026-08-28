@@ -599,18 +599,26 @@ export function renderBoard({ repo, rows, generatedAt = new Date().toISOString()
     '',
   ];
 
-  const inProgress = ordered.filter(draftLink);
+  // Unfinished means either half: a draft file that is not done with, or a job
+  // that has not finished. The second half is the queue's whole point — work
+  // that is running has no `review.md` yet, and a review nobody can see is
+  // precisely what this section exists to prevent.
+  const jobCell = (r) => (r.job
+    ? `${r.job.kind} ${r.job.state}${r.job.attempts > 1 ? ` (attempt ${r.job.attempts})` : ''}${r.job.lastError ? ` — ${cell(r.job.lastError)}` : ''}`
+    : '');
+  const inProgress = ordered.filter((r) => draftLink(r) || r.job);
   if (inProgress.length) {
     out.push(`## reviews in progress (${inProgress.length})`, '');
     out.push('_Reviews I started and have not finished: a `review.md` exists and its status is');
-    out.push(`neither \`submitted\` nor \`skip\`.${storeDir ? ` Links are relative to \`${storeDir}\`.` : ''}_`);
+    out.push(`neither \`submitted\` nor \`skip\`, or a job for it is queued, running or failed.${storeDir ? ` Links are relative to \`${storeDir}\`.` : ''}_`);
     out.push('');
     // The author is here for the same reason it is in every bucket table: whose
     // PR it is decides how a half-finished review gets picked back up.
-    out.push('| PR | status | author | draft | bucket | title |');
-    out.push('|---|---|---|---|---|---|');
+    out.push('| PR | status | job | author | draft | bucket | title |');
+    out.push('|---|---|---|---|---|---|---|');
     for (const r of inProgress) {
-      out.push(`| [#${r.number}](${r.url}) | \`${r.status}\` | ${r.author ?? '?'} | [review.md](${draftLink(r)}) | ${r.bucket} | ${title(r)} |`);
+      const link = draftLink(r) ? `[review.md](${draftLink(r)})` : '—';
+      out.push(`| [#${r.number}](${r.url}) | \`${r.status}\` | ${jobCell(r)} | ${r.author ?? '?'} | ${link} | ${r.bucket} | ${title(r)} |`);
     }
     out.push('');
   }

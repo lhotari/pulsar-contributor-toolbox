@@ -16,6 +16,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { renderBoard } from '../lib/render.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PRT = path.resolve(HERE, '../prt.mjs');
@@ -98,8 +99,8 @@ test('the in-progress section names only the reviews that are unfinished', () =>
 
   // Whose PR it is decides how a half-finished review gets picked back up, so
   // the author is in this table and not only in the bucket tables below.
-  assert.match(section, /\| PR \| status \| author \| draft \| bucket \| title \|/);
-  assert.match(section, /\| `draft` \| someone \| \[review\.md\]\(pr-42\/review\.md\) \|/);
+  assert.match(section, /\| PR \| status \| job \| author \| draft \| bucket \| title \|/);
+  assert.match(section, /\| `draft` \|  \| someone \| \[review\.md\]\(pr-42\/review\.md\) \|/);
 
   // ...and the bucket table below carries the same link on its status cell.
   assert.match(content, /\| \[`draft`\]\(pr-42\/review\.md\) \|/);
@@ -125,4 +126,43 @@ test('a board with nothing half-finished has no section and no links', () => {
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+// A running review has no review.md yet, and "reviews in progress" is exactly
+// where a human looks for work they started. Leaving it out of that section
+// would leave the queue's whole reason for existing invisible.
+
+test('a review that is running appears in reviews in progress before any file exists', () => {
+  const md = renderBoard({
+    repo: 'o/r',
+    rows: [
+      { number: 1, url: 'u1', title: 'running one', author: 'a', status: 'none', reviewPath: null, bucket: 'new-commits-to-check', job: { kind: 're-review', state: 'running', attempts: 1 } },
+      { number: 2, url: 'u2', title: 'queued one', author: 'b', status: 'none', reviewPath: null, bucket: 'stale', job: { kind: 'review', state: 'queued', attempts: 0 } },
+      { number: 3, url: 'u3', title: 'a real draft', author: 'c', status: 'draft', reviewPath: 'pr-3/review.md', bucket: 'stale' },
+    ],
+  });
+  const start = md.indexOf('## reviews in progress');
+  const section = md.slice(start, md.indexOf('\n## ', start + 5));
+  assert.ok(start > -1);
+  assert.match(section, /#1/, 'running work is unfinished work, file or no file');
+  assert.match(section, /re-review running/);
+  assert.match(section, /#2/);
+  assert.match(section, /#3/, 'and the drafts that were always here still are');
+});
+
+test('a failed job says so on the board, because it needs a decision', () => {
+  const md = renderBoard({
+    repo: 'o/r',
+    rows: [{ number: 4, url: 'u', title: 't', author: 'a', status: 'none', reviewPath: null, bucket: 'stale', job: { kind: 'review', state: 'failed', attempts: 2, lastError: 'no worktree' } }],
+  });
+  assert.match(md, /failed/);
+  assert.match(md, /no worktree/);
+});
+
+test('a PR with neither draft nor job stays out of the section', () => {
+  const md = renderBoard({
+    repo: 'o/r',
+    rows: [{ number: 5, url: 'u', title: 't', author: 'a', status: 'none', reviewPath: null, bucket: 'stale' }],
+  });
+  assert.doesNotMatch(md, /## reviews in progress/);
 });

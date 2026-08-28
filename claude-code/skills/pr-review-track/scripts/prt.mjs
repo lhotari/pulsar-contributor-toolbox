@@ -176,6 +176,8 @@ COMMANDS.doctor = async () => {
     say(`  editor     ${info.editor}`);
     say(`  graphql    ${rl.remaining}/${rl.limit} points, resets ${rl.resetAt}`);
     for (const r of info.trackedRepos) say(`  tracking   ${r.repo}: ${r.prs} PR(s)`);
+    const q = queueLine(base);
+    if (q) say(`  ${q}`);
   }
 };
 
@@ -929,6 +931,8 @@ COMMANDS.list = async () => {
       if (r.threads) say(`${' '.repeat(8)}${r.threads}`);
     }
     say(`\n${rows.length} tracked PR(s) in ${base.repo}.`);
+    const q = queueLine(base);
+    if (q) say(q);
   }
 };
 
@@ -953,6 +957,7 @@ function writeBoard(base) {
       reviewPath: text
         ? path.relative(dir, store.actionFilePath(base.root, base.repo, n)).split(path.sep).join('/')
         : null,
+      job: st.job ?? null,
       bucket: st.analysis ? bucketOf({ analysis, status }) : 'unknown',
       threads: st.analysis ? summarizeCounts(analysis.threadCounts) : '',
       ci: analysis.ci,
@@ -1029,6 +1034,16 @@ function jobEntries(base) {
 function saveJob(base, number, job) {
   const prev = store.readState(base.root, base.repo, number) ?? {};
   store.writeState(base.root, base.repo, number, { ...prev, job });
+}
+
+/** One line of queue state, for the commands a human reads first. */
+function queueLine(base) {
+  const q = jobEntries(base);
+  if (!q.length) return null;
+  const n = (state) => q.filter((e) => e.job.state === state).length;
+  const owner = store.readOwner(base.root, base.repo);
+  const who = owner ? (owner.session === sessionId() ? 'this session' : `session ${owner.session}`) : 'nobody';
+  return `queue: ${n('running')} running, ${n('queued')} queued, ${n('failed')} failed · owner: ${who}`;
 }
 
 /**
