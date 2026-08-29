@@ -408,8 +408,28 @@ Rules that matter:
   line from `severity` + `claim`.
 - `coverage` must say `diff-only` when the worktree was unavailable, `reviewers` must list
   only the reviewers that actually ran, and `tier` must be the tier actually used.
+- **`summary` and every `body` are the two fields that reach a public pull request**, so
+  write them as if a Pulsar committer who has never heard of this skill is the only
+  reader — evidence, file:line, failure scenario, nothing else. Keep this pipeline's
+  internal mechanics out of them: the tier, the effort, round numbers, internal roles
+  (adjudicator, validator, refutation pass), the shape (`two-model`, `single-reviewer`),
+  and which pass raised the finding. Those facts are not lost — they have their own
+  fields. `reviewers` and `coverage` become a `**Draft produced by:**` line in the
+  draft's `prt:context`, and `confidence` / `agreement` / `crossValidation` become an
+  italic line above the comment; both stay on the human's machine, and `tier` stays in
+  the JSON and in the terminal report below. Saying that AI
+  assisted, or naming the models, is a separate matter and is fine in outgoing text —
+  it is a disclosure the human makes on purpose. `pr-review-track`'s pipeline-mechanics
+  lint refuses a submit whose outgoing text carries the mechanics, so a `body` written
+  the wrong way costs the human a round.
 
 ## Output format
+
+This is the **terminal report**, written for the one person running the session on
+their own machine. It is not a draft comment and no part of it is posted — which is
+exactly why the `Tier`, `Reviewers`, `Agreement` and `Cross-validation` lines belong
+here and only here. Do not carry them into `summary` or a finding `body` (above); a
+finding is not more true for having been raised in round 2.
 
 ```
 ## PR #<NUMBER> Review: <title>
@@ -437,6 +457,8 @@ No issues found. ✓  (if nothing survives)
 
 The **Tier** line is not decoration. A `lean` Claude Code review saw one
 independent reviewer, not two; a Codex-hosted review used only the Codex
-reviewers listed. The reader is entitled to know that before trusting it. Never
-present a thinner review as a full consensus one — and if the diff was capped
-or the worktree was unavailable, say that here too.
+reviewers listed. The user running this review is entitled to know that before
+trusting it. Never present a thinner review as a full consensus one — and if the
+diff was capped or the worktree was unavailable, say that here too. The PR author
+is not that reader: what reaches them is `summary` and the finding bodies, and
+those are entitled to the evidence, not to the provenance.
