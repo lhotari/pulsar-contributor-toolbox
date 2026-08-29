@@ -3,6 +3,15 @@
 // The transaction machine, driven against a fake `gh`. These are the tests that
 // matter most: everything here only runs when something has already gone wrong,
 // which is exactly why it cannot be checked by reading the code.
+//
+// The pipeline-mechanics lint lives in `tooling-lint.test.mjs`, which reaches
+// GitHub for nothing. The one test kept here is the one that has to prove
+// `preflight` consults it at all.
+//
+// The lint HATCHES are here too, at the other end of their life: what survives
+// `prt draft` regenerating the file underneath them. That half is only provable
+// by running the generator, and the fake `gh` this file already sets up is what
+// makes running it cheap.
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -10,6 +19,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { parseActionFile, HUMAN_DOC_KEYS } from '../lib/actionfile.mjs';
+import { renderActionFile } from '../lib/render.mjs';
+import { carryDocHatches } from '../lib/submit.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SKILL = path.resolve(HERE, '../..');
@@ -80,7 +93,7 @@ function writeScenario(name, rules, callLog) {
   return p;
 }
 
-function actionFile({ event = 'COMMENT', body = 'Summary.', inline = true, head = HEAD } = {}) {
+function actionFile({ event = 'COMMENT', body = 'Summary.', inline = true, head = HEAD, doc = [] } = {}) {
   const parts = [
     'Status: ready',
     '',
@@ -90,6 +103,7 @@ function actionFile({ event = 'COMMENT', body = 'Summary.', inline = true, head 
     `pr: ${PR}`,
     `head: ${head}`,
     'base-ref: master',
+    ...doc,
     '-->',
     '',
     '<!-- prt:verdict',
@@ -99,7 +113,8 @@ function actionFile({ event = 'COMMENT', body = 'Summary.', inline = true, head 
   ];
   if (body) parts.push('<!-- prt:body -->', body, '<!-- /prt -->', '');
   if (inline) {
-    parts.push('<!-- prt:inline', 'id: i1', 'path: A.java', 'line: 11', 'side: RIGHT', '-->', 'Inline text.', '<!-- /prt -->', '');
+    const text = inline === true ? 'Inline text.' : inline;
+    parts.push('<!-- prt:inline', 'id: i1', 'path: A.java', 'line: 11', 'side: RIGHT', '-->', text, '<!-- /prt -->', '');
   }
   return `${parts.join('\n')}\n`;
 }
@@ -362,7 +377,14 @@ test('an empty-bodied review never matches a reply artifact', () => {
   assert.equal(calls(log2).filter(isWrite).length, 1, 'the artifact is not our review; the real post must still happen');
 });
 
-test('--dry-run never writes, even with an interrupted transaction open', () => {
+// The title used to read "--dry-run never writes", which is not a property this
+// code has: the dry run goes through `capture()` first, so it writes a whole
+// `outbox/<ts>/` — `approved.md` plus a `tx.json` marked abandoned — and it
+// rewrites `BOARD.md`. What it never does, and what the assertion here has
+// always actually checked, is reach GitHub, including by resuming a transaction
+// an earlier crash left open. The file the human is editing is untouched, and
+// that is now asserted rather than assumed.
+test('--dry-run reaches GitHub for nothing, and leaves review.md alone', () => {
   const dir = setupPr(actionFile());
   const log = path.join(ROOT, 'dry.jsonl');
   const crash = writeScenario('dry', baseRules([
@@ -375,9 +397,11 @@ test('--dry-run never writes, even with an interrupted transaction open', () => 
   const scenario = writeScenario('dry2', baseRules([
     { when: { args: ['--method', 'POST'], arg: 'pulls/1/reviews' }, stdout: '{"id":9,"state":"COMMENTED","html_url":"u"}' },
   ]), log2);
+  const review = fs.readFileSync(path.join(dir, 'review.md'), 'utf8');
   const r = runPrt(['submit', '1', '--repo', REPO, '--dry-run'], scenario);
   assert.equal(calls(log2).filter(isWrite).length, 0, 'a dry run must never resume a transaction into GitHub');
   assert.match(`${r.stdout}`, /would/i);
+  assert.equal(fs.readFileSync(path.join(dir, 'review.md'), 'utf8'), review, 'the file the human edits is byte-identical');
   assert.ok(before >= 0);
 });
 
@@ -439,4 +463,192 @@ test('the approved snapshot, not later edits, is what gets posted', () => {
   fs.writeFileSync(path.join(dir, 'review.md'), actionFile({ body: 'COMPLETELY DIFFERENT' }));
   assert.match(fs.readFileSync(path.join(txDir, 'approved.md'), 'utf8'), /Summary\./);
   assert.equal(approved.includes('COMPLETELY DIFFERENT'), false);
+});
+
+// ---------------------------------------------------------- pipeline mechanics
+//
+// Only the wiring lives here — `toolingLint: true` in DEFAULT_CONFIG, the
+// `preflight` gate, and the refusal text the human actually reads. What the
+// lint does and does not flag is `tooling-lint.test.mjs`, which needs no `gh`.
+
+test('preflight refuses a review that describes how it was run, and the hatch it prints clears it', () => {
+  const leak = actionFile({ body: 'One process note: this was not the two-model consensus pipeline.' });
+  const accept = [{
+    when: { args: ['--method', 'POST'], arg: 'pulls/1/reviews' },
+    stdout: '{"id":99,"state":"COMMENTED","html_url":"https://x/1#r99"}',
+  }];
+
+  const dir = setupPr(leak);
+  const log = path.join(ROOT, 'tooling.jsonl');
+  runPrt(['submit', '1', '--repo', REPO], writeScenario('tooling', baseRules(accept), log));
+
+  assert.equal(calls(log).filter(isWrite).length, 0, 'nothing reaches GitHub');
+  const out = fs.readFileSync(path.join(dir, 'review.md'), 'utf8');
+  assert.equal(out.split('\n')[0], 'Status: blocked');
+  // The refusal has to be actionable on its own: it names the hits and the exact
+  // line that clears them, because the human reading it cannot see this code.
+  assert.match(out, /tooling-reviewed: pipeline-shape, consensus/);
+
+  // And that line does clear it. Same bytes, one POST.
+  setupPr(leak.replace('base-ref: master', 'base-ref: master\ntooling-reviewed: pipeline-shape, consensus'));
+  const log2 = path.join(ROOT, 'tooling-hatched.jsonl');
+  const r = runPrt(['submit', '1', '--repo', REPO], writeScenario('tooling-hatched', baseRules(accept), log2));
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(calls(log2).filter(isWrite).length, 1, 'the hatch lets the same bytes post');
+});
+
+// -------------------------------------------------- acknowledgements that last
+//
+// `renderActionFile` emits a fixed key list into `prt:doc`, so until this was
+// fixed EVERY hatch the human had typed was destroyed by the next `prt draft` —
+// the pre-existing `security-reviewed: yes` included, which meant the documented
+// escape from the security lint had to be re-typed against text nobody had
+// changed. These pin both halves of the rule that replaced it: an
+// acknowledgement is carried forward, but only over hits the human has seen.
+
+/** A tracked PR with no action file yet, so the first `draft` carries nothing. */
+function setupEmptyPr() {
+  const dir = setupPr('');
+  fs.unlinkSync(path.join(dir, 'review.md'));
+  return dir;
+}
+
+function writeFindings(name, summary) {
+  const p = path.join(ROOT, `${name}.json`);
+  fs.writeFileSync(p, JSON.stringify({ summary, recommendedEvent: 'COMMENT' }));
+  return p;
+}
+
+/** The `prt:doc` fields of a generated file. */
+const docOf = (text) => parseActionFile(text).doc;
+
+/** Verbatim from the pipeline-mechanics fixtures; trips exactly `tier`. */
+const TIER_LEAK = 'The rollout is staged: Tier 2 first, then the standard tier.';
+
+test('a hatch the human typed survives the next `prt draft`, and only while it is still earned', () => {
+  const dir = setupEmptyPr();
+  const review = path.join(dir, 'review.md');
+  const scenario = writeScenario('carry', baseRules(), path.join(ROOT, 'carry.jsonl'));
+  const leak = writeFindings('carry-leak', TIER_LEAK);
+  const clean = writeFindings('carry-clean', 'Two small things below; nothing blocking.');
+  const draft = (findings) => {
+    const r = runPrt(['draft', '1', '--repo', REPO, '--findings', findings], scenario);
+    assert.equal(r.status, 0, r.stderr);
+    return `${r.stdout}${r.stderr}`;
+  };
+
+  draft(leak);
+  assert.equal(docOf(fs.readFileSync(review, 'utf8'))['tooling-reviewed'], undefined, 'the generator never writes a hatch itself');
+
+  // The human judges the hit benign and says so, in the one place only they may
+  // write. Nothing else about the file changes.
+  fs.writeFileSync(review, fs.readFileSync(review, 'utf8').replace('base-ref: master', 'base-ref: master\ntooling-reviewed: tier'));
+
+  const second = draft(leak);
+  const gen2 = fs.readFileSync(review, 'utf8');
+  assert.equal(docOf(gen2)['tooling-reviewed'], 'tier', 'the acknowledgement survived the regeneration');
+  assert.equal(docOf(gen2).generation, '2', 'and it is genuinely a new generation, not the old file');
+  assert.match(second, /kept your `tooling-reviewed: tier`/, 'carrying it is never silent');
+
+  // The findings change and the passage is gone. The hatch has no work left, so
+  // it does not stay behind armed against whatever the next round writes.
+  const third = draft(clean);
+  assert.equal(docOf(fs.readFileSync(review, 'utf8'))['tooling-reviewed'], undefined, 'the text it excused is gone, so it is gone');
+  assert.match(third, /dropped your `tooling-reviewed`/);
+});
+
+test('--no-carry drops the acknowledgement along with the notes', () => {
+  const dir = setupEmptyPr();
+  const review = path.join(dir, 'review.md');
+  const scenario = writeScenario('nocarry', baseRules(), path.join(ROOT, 'nocarry.jsonl'));
+  const leak = writeFindings('nocarry-leak', TIER_LEAK);
+
+  runPrt(['draft', '1', '--repo', REPO, '--findings', leak], scenario);
+  fs.writeFileSync(review, fs.readFileSync(review, 'utf8').replace('base-ref: master', 'base-ref: master\ntooling-reviewed: tier'));
+  const r = runPrt(['draft', '1', '--repo', REPO, '--findings', leak, '--no-carry'], scenario);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(docOf(fs.readFileSync(review, 'utf8'))['tooling-reviewed'], undefined);
+});
+
+test('a whole-file `yes` carries only over outgoing text the human already read', () => {
+  const known = 'The CVE-2026-12345 mitigation is already public in the PR title.';
+  const hatched = (body) => actionFile({ body, doc: ['security-reviewed: yes'] });
+
+  // Same bytes, still tripping: carried, and the human is not asked again. This
+  // is the whole point — a new commit regenerates an identical review body.
+  assert.deepEqual(
+    carryDocHatches(hatched(known), actionFile({ body: known })).carried,
+    { 'security-reviewed': 'yes' },
+  );
+
+  // A second CVE appended to the SAME paragraph. `securityLint` takes the first
+  // match of each pattern per text, so it reports one hit either way and a
+  // hit-by-hit comparison would carry the hatch straight over the new one.
+  const grew = carryDocHatches(hatched(known), actionFile({ body: `${known}\n\nSeparately, CVE-2026-99999 is not.` }));
+  assert.deepEqual(grew.carried, {});
+  assert.match(grew.dropped[0].why, /outgoing text that was not in the one you read/);
+
+  // An untouched body, but a new inline comment nobody has read.
+  const added = carryDocHatches(hatched(known), actionFile({ body: known, inline: 'A different inline comment.' }));
+  assert.deepEqual(added.carried, {});
+
+  // Gone entirely: nothing left to excuse.
+  const gone = carryDocHatches(hatched(known), actionFile({ body: 'Nothing to report.' }));
+  assert.deepEqual(gone.carried, {});
+  assert.match(gone.dropped[0].why, /nothing in this generation trips that lint/);
+
+  // And a previous file this tool cannot read carries nothing: no blocks, no
+  // outgoing text, no hit to cover. The failure direction is the safe one.
+  assert.deepEqual(carryDocHatches('not an action file at all\nsecurity-reviewed: yes\n', hatched(known)).carried, {});
+});
+
+test('a labelled hatch carries label by label, and can only ever shrink', () => {
+  const both = `${TIER_LEAK}\n\nThe reviewers split on the pooling question.`;
+  const prev = actionFile({ body: both, doc: ['tooling-reviewed: tier, reviewer-split'] });
+
+  assert.deepEqual(
+    carryDocHatches(prev, actionFile({ body: both })).carried,
+    { 'tooling-reviewed': 'tier, reviewer-split' },
+  );
+  // Only `tier` is still tripped, so only `tier` comes back.
+  assert.deepEqual(
+    carryDocHatches(prev, actionFile({ body: TIER_LEAK })).carried,
+    { 'tooling-reviewed': 'tier' },
+  );
+  // A label the previous hatch never named is never acquired by carrying.
+  const narrow = actionFile({ body: both, doc: ['tooling-reviewed: tier'] });
+  assert.deepEqual(carryDocHatches(narrow, actionFile({ body: both })).carried, { 'tooling-reviewed': 'tier' });
+});
+
+test('nothing but a human decision is eligible to travel between generations', () => {
+  // The direction that matters more. `head`, `base`, `base-ref` and
+  // `diff-fingerprint` are the submitter's preconditions, re-checked against
+  // live GitHub before anything posts; a carried one would be checked against
+  // itself and pass every time.
+  const machine = ['schema', 'repo', 'pr', 'kind', 'generation', 'generated', 'reviewer',
+    'head', 'base', 'base-ref', 'diff-fingerprint', 'reviewed-at'];
+  for (const key of machine) assert.equal(HUMAN_DOC_KEYS.includes(key), false, key);
+
+  // The renderer is the second lock: a caller handing it a whole previous doc
+  // gets the analysis's head back, not the one it passed.
+  const stale = renderActionFile({
+    repo: REPO,
+    analysis: { number: PR, title: 't', url: 'u', author: 'a', authorAssociation: 'MEMBER', headOid: HEAD,
+      baseRefName: 'master', additions: 1, deletions: 0, changedFiles: 1, labels: [], threads: [],
+      threadCounts: {}, newIssueComments: [], newReviewsByOthers: [] },
+    kind: 're-review',
+    reviewerLogin: 'me',
+    carriedDoc: { head: 'f'.repeat(40), 'diff-fingerprint': 'sha256:stale', 'security-reviewed': 'yes' },
+  });
+  assert.equal(docOf(stale).head, HEAD);
+  assert.equal(stale.includes('f'.repeat(40)), false, 'the stale head reached the file nowhere');
+  assert.equal(stale.includes('sha256:stale'), false);
+  assert.equal(docOf(stale)['security-reviewed'], 'yes', 'the human key on the same object still travels');
+
+  // And every hatch the submitter actually reads is on the list, so adding a
+  // fourth lint cannot quietly reintroduce the treadmill this replaced.
+  const source = fs.readFileSync(path.join(SKILL, 'scripts/lib/submit.mjs'), 'utf8');
+  const read = [...source.matchAll(/doc\??\.?\[\s*'([a-z][a-z-]*-reviewed)'\s*\]/g)].map((m) => m[1]);
+  assert.equal(read.length >= 3, true, 'the scan still finds the hatch reads it is guarding');
+  for (const key of new Set(read)) assert.equal(HUMAN_DOC_KEYS.includes(key), true, key);
 });

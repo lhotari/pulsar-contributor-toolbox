@@ -133,7 +133,9 @@ Anchors are validated at generation time too, so a finding that could never post
 arrives as `post: false` with the reason attached rather than wasting your edit.
 
 **It carries the human's notes forward.** `@ai` shorthand in the old file is
-promoted; open `prt:ask` blocks are kept, answered ones for one more generation.
+promoted — including a note typed *inside* a block, which is lifted out; open
+`prt:ask` blocks are kept beside what they are about, and answered ones move to
+the `## Resolved notes` log at the end of the file for one more generation.
 A note whose comment survived at a different id is re-bound **by anchor, not by
 id** — inline ids are positional, so next round's `i3` may be a different
 finding. A note whose comment is gone is orphaned to `re: gone` with `was:`
@@ -141,16 +143,86 @@ recording where it pointed, never dropped. Every promotion, re-bind and orphan
 is printed. `--no-carry` drops them (the old file is still in `history/`).
 
 If the old file's notes cannot be parsed safely, `draft` **refuses** rather than
-overwriting them.
+overwriting them — including any `@ai` note still written as one after promotion,
+whether the lift declined it or nothing can lift it at all (`prt:log`, a block's
+header). Those carry no better than an unreadable file: `carryAsks` moves
+`prt:ask` blocks and nothing else, so the words would go to `history/` and out
+of the working copy with nothing said. The refusal names every such line. Fix the
+note, or `--no-carry`.
 
-### `ask [<N>…] [--promote] [--json]`
+**It carries the human's lint acknowledgements forward too**, and only those:
+`security-reviewed`, `ask-quote-reviewed` and `tooling-reviewed` are the only
+`prt:doc` keys that survive a regeneration, because every other one is a
+measurement the submitter re-checks. Each is re-earned against the new draft
+rather than inherited — a labelled hatch keeps only the labels this generation
+still trips, and a blanket `yes` is dropped the moment any outgoing passage is
+one you have not read. Both directions are printed. `--no-carry` drops these as
+well. The rules are in [`action-file.md`](action-file.md).
+
+### `ask [<N>…] [--promote] [--tidy] [--json]`
 
 Read the notes in an action file: `●` open and blocking, `○` open but deferred,
-`✓` closed, with the derived state and the latest answer.
+`✓` closed, with the derived state and the latest answer — `edited` there means a
+note whose question was rewritten after it was answered, which is open — then `!`
+for every
+`@ai` line that is not a `prt:ask` block yet, with where it sits, the one edit
+that fixes it, and its first line. That last group is why the command can be
+trusted: a note is listed from the moment it is typed, not from the moment it is
+promoted, and the remedy on the row is the note's own — never a `--promote` that
+cannot lift this particular one. The listing is read
+from the blocks wherever they sit, so a note filed under `## Resolved notes` is
+still listed and still marked `✓` — at the end now, because the list is in file
+order and filing moved it there. `no notes` prints only when the command had
+nothing at all to say — never under a line about a note it just described.
 
-`--promote` turns `@ai` shorthand into canonical `prt:ask` blocks in place,
-printing each id and the target it inferred. It refuses on a file the submitter
-may be reading (`ready`, `queued`, `partial`).
+`--promote` turns `@ai` shorthand into canonical `prt:ask` blocks. A note in a
+gap is promoted in place; a note typed inside a block is **lifted** — deleted
+from the block and re-emitted as a `prt:ask` just after that block's terminator,
+with `follows:` set to the pair when it came out of a `prt:ask` or `prt:answer`.
+Each promotion prints its id, the target it inferred, and the block it came out
+of, and records the question it wrote as `q:`. A note the **lift** declines — one
+butted straight up against prose, or one that is the whole of a block that cannot
+go empty — is left exactly where it is and says so, by line and reason.
+
+The same run also **accepts a question you rewrote**. A note whose text no longer
+matches its `q:` is open already — `prt ask` shows it as `edited` and the submit
+refuses it, with or without this flag — and `--promote` is what settles the
+bookkeeping: it moves `q:` onto your wording and writes `re-q:` onto the old
+answer, pinning that answer to the wording it really answered. The note stays
+open, and the run prints a line saying so. Answering it again is what closes it.
+
+A note nothing can lift is the gap in this flag, and it is worth knowing before
+you trust its output: inside `prt:log`, inside a block's `<!-- prt:… -->`
+header, inside a block whose sentinel or terminator is broken, or inside a block
+of an unknown kind, `--promote` cannot lift it. It says so — one
+`NOT PROMOTED` line per note, carrying the same remedy the `!` row carries —
+rather than printing `no un-promoted @ai notes` over a file that has one, which
+is what it used to do while `prt validate` went on refusing that same file over
+that same note. The all-clear is now printed only over a file the scanner finds
+none in, so `prt ask`, `--promote` and `prt validate` agree.
+
+`--tidy` files the other end of the lifecycle: every note that has a terminal
+answer moves, with its answers, as one verbatim slice, into the
+`## Resolved notes` log at the end of the file, under one line naming the id,
+the derived state, the `did:` verb, the generation, and the first sentence of
+the answer's last paragraph. Without it a pair is filed one generation later,
+when `prt draft` next regenerates — too late to be the answer to "I have
+answered it, now move it". Pairs it cannot move losslessly are left alone and
+each says why. Running it twice is a byte-for-byte no-op.
+
+It reconciles in both directions, because the section is bytes while the state
+above it is derived on every read. So the same run also **takes a pair back**:
+delete an answer and the note reopens, and `--tidy` moves the pair out of the
+section to beside its target and drops the line that called it handled; edit an
+answer to a different disposition and the line above it is re-derived in place;
+and a section left with nothing under it loses its heading, unless what is left
+is a paragraph you typed. Each of those prints its id too.
+
+Both are opt-in, because both rewrite a file the human is editing, and both
+archive the old file to `history/` first — only when there is something to
+write, so a run over every tracked PR does not bury the copies that matter.
+`--promote --tidy` is one write and one archive. They refuse on a file the
+submitter may be reading (`ready`, `queued`, `partial`).
 
 There is deliberately **no `--addressed` flag**. Closing a note requires prose
 saying what was done, prose is judgement, and judgement is the model's half of
@@ -176,6 +248,12 @@ machines and survives a lost tracking directory.
 
 PRs whose oldest unanswered point exceeds `nudgeMaxAgeDays` (90) are listed
 separately and not drafted — they need a decision, not a reminder.
+
+A nudge overwrites whatever draft was there, so it carries that file's notes
+across — open ones under `## Notes to the assistant`, resolved ones into
+`## Resolved notes`, same split as `draft`. A PR whose `review.md` holds an
+`@ai` note that would not survive the rewrite is **skipped** with the reason
+printed — same gate as `draft`: a reminder can wait, a retyped note cannot.
 
 ### `prt job add|list|next|commit|done|fail|cancel|release`
 
@@ -228,7 +306,37 @@ round trip too early. See
 ### `validate [<N>…]`
 
 Parses the action file, plans the actions, and checks every anchor against the
-live diff. Never contacts GitHub for writes. Exit code 1 if anything is wrong.
+live diff, which it fetches from GitHub. Never contacts GitHub for writes.
+
+**`✗` and exit 1 mean `prt submit` will refuse this file.** Every check here is
+one of its refusals, and they are not a second implementation: parse errors come
+from the same parser, the four content refusals from the same
+`contentRefusals()`, and `on-anchor-fail` is read the way the submitter reads it,
+so a `demote`/`drop` comment whose anchor is gone warns rather than fails the
+verdict.
+
+**`✓` and exit 0 do not promise the reverse.** They mean nothing in the *bytes*
+stops the post. What is left is live state, read at submit time — the PR still
+open, the head unmoved, no unsubmitted review of yours, the threads where the
+draft left them — plus the two questions about *when* rather than *what*:
+`Status:` has to read `ready`, and there has to be something left to post.
+
+The four content refusals, printed as `refuses:` lines:
+
+| refusal | cleared by |
+|---|---|
+| a security disclosure in outgoing text | `security-reviewed: yes` in `prt:doc` |
+| an open note of yours (`●`, including one whose question you rewrote) | answering it, `blocking: no`, or `closed: yes` |
+| pipeline mechanics in outgoing text | `tooling-reviewed: <labels>` in `prt:doc` |
+| outgoing text quoting a private note back | `ask-quote-reviewed: yes` in `prt:doc` |
+
+Each prints the same sentence the submit-time refusal prints, hatch included, so
+clearing one never requires tripping a submit first. See
+[action-file.md](action-file.md#the-pipeline-mechanics-lint).
+
+An `edited` note that is `blocking: no` is the one member of that family
+`prt submit` does not refuse, so it prints as a `warning:` and leaves the verdict
+alone — named, but not counted as something that stops a post.
 
 ### `submit <N>… | --all-ready [--dry-run]`
 

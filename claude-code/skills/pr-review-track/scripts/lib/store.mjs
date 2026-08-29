@@ -38,8 +38,9 @@ export const DEFAULT_CONFIG = {
   // How many review jobs may run at once. Each one is a subagent that spawns
   // its own reviewers, so this is a ceiling on fan-out, not on ambition.
   maxConcurrentJobs: 4,
-  // A file must be unmodified for this long before the watcher acts on it,
-  // so a half-saved edit is never submitted.
+  // A file must be unmodified for this long before the watcher acts on it. With
+  // `capture`'s double read it is the second half of the defence against
+  // submitting a buffer mid-write; neither alone is a proof.
   quiesceSeconds: 3,
   // Remind an author about points they have not answered, once the oldest has
   // gone unanswered this long.
@@ -56,8 +57,15 @@ export const DEFAULT_CONFIG = {
   // Refuse to post text that looks like an undisclosed vulnerability report.
   // See CLAUDE.md critical rule 6 / SECURITY.md.
   securityLint: true,
-  // Never let the generator write APPROVE; the human must type the verdict.
-  // Status: ready then authorises the complete action file without a second flag.
+  // Refuse to post text describing the pipeline's internal mechanics — tier,
+  // effort, rounds, roles, shape, which pass raised a finding. NOT the fact that
+  // AI assisted, which is a deliberate disclosure. See SKILL.md, "Keep the
+  // pipeline's internal mechanics out of anything that posts".
+  toolingLint: true,
+  // Keep the generator from writing APPROVE; the human types the verdict, and
+  // `Status: ready` then authorises the whole action file without a second flag.
+  // This is the only thing enforcing that, so turning it off really does let a
+  // draft arrive pre-approved.
   requireExplicitApprove: true,
   // Archive rather than delete on cleanup.
   cleanupMode: 'archive', // 'archive' | 'purge'

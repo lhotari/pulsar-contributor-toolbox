@@ -84,6 +84,20 @@ finding and can re-aim it rather than losing it.
 first line — the generator does that automatically from `severity` + `claim`, so
 do not repeat it.
 
+**`summary` and `findings[].body` are the only two fields that reach the pull
+request**, and neither may describe how the review was produced: no tier, no
+effort, no round numbers, no internal roles (adjudicator, validator, refutation
+pass), no shape (`two-model`, `single-reviewer`), no "raised by the second pass".
+Those facts have their own fields and their own destination — `reviewers` and
+`coverage` render as the `**Draft produced by:**` line inside `prt:context`, and
+`confidence`, `agreement` and `crossValidation` render as an italic line above
+the inline comment. Neither is ever posted. `tier` is read by nothing the
+generator renders; it is here for the human's terminal report and for the record.
+Writing the mechanics into `summary` or a `body` instead trips the
+pipeline-mechanics lint and costs the human a round — see
+[action-file.md](action-file.md#the-pipeline-mechanics-lint). Disclosing that AI
+assisted, or naming the models, is not in that set and posts freely.
+
 **`threadAssessments[].assessment`** — describe what the evidence supports, not
 what you hope:
 

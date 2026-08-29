@@ -26,6 +26,7 @@ import {
   parseActionFile, parseStatus, setStatus, contentHash, appendLog, planActions,
   PROTECTED_STATUSES, IN_FLIGHT_STATUSES, STATUSES,
   carryAsks, collectAsks, maxAskOrdinal, promoteShorthand, askState, ensurePrActions,
+  relocateResolvedAsks, unpromotedNotes, notesLostByRegenerating,
 } from './lib/actionfile.mjs';
 
 /** Statuses only the submitter may write. */
@@ -33,7 +34,7 @@ const MACHINE_ONLY_STATUSES = new Set(['queued', 'submitting', 'submitted', 'par
 import {
   newJob, planNext, orderQueue, finishedJob, failedJob, JOB_KINDS, mintToken,
 } from './lib/jobs.mjs';
-import { submitReady, diffFingerprint, findOpenTx } from './lib/submit.mjs';
+import { submitReady, diffFingerprint, findOpenTx, contentRefusals, carryDocHatches } from './lib/submit.mjs';
 import * as store from './lib/store.mjs';
 
 const VERSION = '1.0.0';
@@ -124,13 +125,13 @@ COMMANDS.help = () => {
     anchors <N>                            commentable (path,line,side) positions
     draft <N> [--findings f.json] [--kind initial|re-review]
                                            write review.md (carries notes; never over a protected file)
-    ask [<N>...] [--promote]               read notes to the assistant, or promote @ai shorthand
+    ask [<N>...] [--promote] [--tidy]      read notes, promote @ai shorthand, file answered ones
     job add|list|next|done|fail|cancel|release   the background review queue
     open <N>...                            open review.md in the configured editor
     nudge [<N>...] [--limit 10]            draft reminders for unanswered feedback
 
   Posting  (the only commands that write to GitHub)
-    validate <N>...                        parse + preflight without posting
+    validate <N>...                        parse + lint (fetches the diff to check anchors)
     submit <N>... | --all-ready            post files whose line 1 says "ready"
     watch [--interval S] [--once]          poll for "ready" files and post them
     recover <N>                            reconcile an interrupted transaction
@@ -592,7 +593,20 @@ COMMANDS.draft = async () => {
     // Promotion happens on an in-memory copy only. Writing a normalisation back
     // into a file that may be `ready` under a running watcher is the one thing
     // that must never happen here.
-    const { text: promotedText, promoted } = promoteShorthand(existing, { startOrdinal: floor + 1, generation });
+    const { text: promotedText, promoted, refused } = promoteShorthand(existing, { startOrdinal: floor + 1, generation });
+    // A note that is still an `@ai` line after promotion is one regeneration
+    // from being gone: `carryAsks` carries `prt:ask` blocks and nothing else, so
+    // the words would move to history/ and out of the working copy without a
+    // word. Same refusal, same escape hatch as an unreadable note.
+    //
+    // The gate is what the SCANNER still sees, not what the lift refused. Those
+    // are different sets: the lift never looks inside `prt:log` or a block's
+    // header, so gating on `refused` alone missed exactly the notes nothing can
+    // rescue — the ones most in need of a stop.
+    const lost = notesLostByRegenerating(promotedText, refused);
+    if (lost.length) {
+      die(`refusing to regenerate #${n}: an \`@ai\` note in the existing review.md would not survive it:\n  ${lost.map((r) => `<!-- prt:${r.where} --> at line ${r.line}: ${r.why}`).join('\n  ')}\nFix it, or pass --no-carry to drop it (the old file is kept in history/).`);
+    }
     // Thread and conversation-comment ids count too. Building this from
     // findings alone orphaned every `t*`/`c*`-bound note on every draft.
     const { ids: newIds, anchors: newAnchors } = expectedBlockIds({ analysis, findings });
@@ -602,7 +616,7 @@ COMMANDS.draft = async () => {
     }
   }
 
-  const text = renderActionFile({
+  const renderOpts = {
     repo: base.repo,
     analysis,
     delta,
@@ -616,7 +630,31 @@ COMMANDS.draft = async () => {
     carriedAsks: carried.asks,
     carriedAnswers: carried.answers,
     askChanges: carried.changes,
-  });
+  };
+
+  // The human's `*-reviewed:` acknowledgements, carried the same way their notes
+  // are — and for the same reason. Without this, `security-reviewed: yes` was
+  // destroyed by every regeneration and had to be re-typed against text nobody
+  // had changed.
+  //
+  // The draft is rendered once with no hatches, so `carryDocHatches` sees what
+  // this generation trips unexcused, and re-rendered with whatever survived.
+  // Two renders rather than one splice: the renderer stays the only thing that
+  // ever writes `prt:doc`, which is the rule that keeps a stale `head:` out of
+  // it. Linting the first render answers for the second because every postable
+  // body is written from `findings` and `analysis` alone — nothing outgoing is
+  // clock- or filesystem-dependent, so the two renders differ only in the
+  // `generated:` stamp and the lines below. Keep that true of any new block
+  // whose body can post, or this decision stops being about what will post.
+  //
+  // `--no-carry` drops these too. It is the "start this file clean" exit, and an
+  // acknowledgement is the human's decision exactly as their notes are.
+  let hatches = { carried: {}, dropped: [] };
+  let text = renderActionFile(renderOpts);
+  if (existing && !argv.flags['no-carry']) {
+    hatches = carryDocHatches(existing, text);
+    if (Object.keys(hatches.carried).length) text = renderActionFile({ ...renderOpts, carriedDoc: hatches.carried });
+  }
 
   const target = argv.flags.to
     ? path.join(ctx.prPath, String(argv.flags.to))
@@ -674,10 +712,12 @@ COMMANDS.draft = async () => {
       carried: carried.asks.length, open: openAsks.length, retired: carried.retired ?? 0,
       promoted: carried.promoted, changes: carried.changes,
     },
+    doc: hatches,
   });
   say(`drafted ${target}`);
   for (const p of carried.promoted ?? []) {
-    say(`  promoted @ai note → ask ${p.id} (re: ${p.re}${p.inferred ? ', inferred from position' : ''}) at line ${p.line}`);
+    const from = p.lifted ? `, lifted out of <!-- prt:${p.lifted} -->` : '';
+    say(`  promoted @ai note → ask ${p.id} (re: ${p.re}${p.follows ? `, follows: ${p.follows}` : ''}${p.inferred ? ', inferred from position' : ''}) at line ${p.line}${from}`);
   }
   for (const c of carried.changes ?? []) {
     say(c.kind === 'rebound'
@@ -685,7 +725,22 @@ COMMANDS.draft = async () => {
       : `  ask ${c.id}: its target ${c.from} is gone — if an earlier round posted that comment, check outbox/`);
   }
   if (openAsks.length) say(`  ${openAsks.length} open note(s) carried: ${openAsks.map((x) => x.id).join(', ')}`);
+  // Filing was the one transition this report stayed silent about. The
+  // generation that RETIRES a pair says so on the next line; the generation that
+  // MOVED it to the foot of the file said nothing, so a human looking for a note
+  // they had just answered had to go and find where it went.
+  const filedAsks = carried.asks.filter((x) => x.open === false);
+  if (filedAsks.length) {
+    say(`  ${filedAsks.length} answered note(s) filed under "## Resolved notes": ${filedAsks.map((x) => x.id).join(', ')}`);
+  }
   if (carried.retired) say(`  ${carried.retired} answered note(s) retired to history/`);
+  // Never silent in either direction. A carried hatch is one the human is no
+  // longer being asked about, and a dropped one is a submit that is about to
+  // block again — both are things they would rather read here than discover.
+  for (const [k, v] of Object.entries(hatches.carried)) {
+    say(`  kept your \`${k}: ${v}\` — this generation still trips that lint`);
+  }
+  for (const d of hatches.dropped) say(`  dropped your \`${d.key}\` acknowledgement — ${d.why}`);
   for (const w of carried.warnings ?? []) say(`  warning: ${w}`);
   if (carried.dropped?.length) {
     say(`  --no-carry: dropped ${carried.dropped.length} note(s) — ${carried.dropped.join(', ')}. The previous file is in history/.`);
@@ -747,7 +802,18 @@ COMMANDS.nudge = async () => {
     let askFloor = prev?.asks?.ordinalFloor ?? 0;
     if (before) {
       askFloor = Math.max(askFloor, maxAskOrdinal(before));
-      const { text: promotedText } = promoteShorthand(before, { startOrdinal: askFloor + 1, generation });
+      const { text: promotedText, refused } = promoteShorthand(before, { startOrdinal: askFloor + 1, generation });
+      // Same reason the reminder skips an unreadable file: a note that survives
+      // promotion would be overwritten by the nudge, and a reminder can wait
+      // where a retyped note cannot. Same gate as `prt draft`, and for the same
+      // reason it is the scanner's answer and not the lift's.
+      const lost = notesLostByRegenerating(promotedText, refused);
+      if (lost.length) {
+        skipped.push({ number: n, why: `its review.md has an @ai note that would not survive a rewrite: ${lost[0].why}` });
+        say(`  #${n}: SKIPPED — an @ai note inside <!-- prt:${lost[0].where} --> at line ${lost[0].line} would not survive a rewrite, so the file was left alone.`);
+        say(`      ${lost[0].why}`);
+        continue;
+      }
       nudgeAsks = carryAsks(promotedText, { generation, ordinalFloor: askFloor });
       // Overwriting a file whose notes cannot be read would destroy them from
       // the working copy. Skip the reminder instead — it can wait; the notes
@@ -764,6 +830,10 @@ COMMANDS.nudge = async () => {
         say(`  #${n}: carried ${nudgeAsks.asks.length} note(s) into the reminder draft`);
       }
     }
+    // No `carryDocHatches` here, and that is the rule's own answer rather than
+    // an omission: a reminder replaces the review's outgoing text with generated
+    // boilerplate, so every acknowledgement the review carried has nothing left
+    // to excuse and would be dropped by the same check `prt draft` applies.
     const text = renderNudgeFile({
       repo: base.repo, analysis, generation, reviewerLogin: base.login,
       carriedAsks: nudgeAsks.asks, carriedAnswers: nudgeAsks.answers,
@@ -812,36 +882,92 @@ COMMANDS.nudge = async () => {
 };
 
 /**
- * Read the notes in an action file, and promote any `@ai` shorthand into
- * canonical blocks.
+ * Read the notes in an action file, promote any `@ai` shorthand into canonical
+ * blocks, and file answered notes into the `## Resolved notes` log at the end.
  *
  * There is deliberately no `--addressed` flag. Closing a note requires prose
  * saying what was done, prose is judgement, and judgement is the model's half
  * of the split — a flag that closed one without a body is exactly what the
  * mandatory-answer-body rule exists to forbid.
+ *
+ * `--tidy` is opt-in for the same reason `--promote` is: it rewrites a file the
+ * human is editing, so no command performs the move on a file nobody asked to
+ * touch. Without it a pair is filed one generation later, when `prt draft` next
+ * regenerates — too late to be the answer to "after resolving, move it".
  */
+/**
+ * The two note collections in a file, in the one shape every `prt ask` row uses.
+ *
+ * `notes` is the half that used to be missing: an `@ai` line the human typed and
+ * never promoted is a note, and listing notes is what this command is for.
+ * Reading only `prt:ask` blocks is how one goes unseen — the same silence the
+ * shorthand exists to end — and it is the state a file is in for every minute
+ * between typing a note and running `--promote`, which is most of the minutes
+ * there are.
+ */
+function askRow(text) {
+  const { asks, answers } = collectAsks(text);
+  return {
+    asks: asks.map((a) => ({
+      id: a.id, re: a.re, state: a.state, open: a.open, blocking: a.blocking,
+      raised: a.raised, follows: a.follows, was: a.was, question: a.question,
+      answer: (answers.filter((x) => x.to === a.id).pop() ?? null),
+    })),
+    notes: unpromotedNotes(text),
+  };
+}
+
 COMMANDS.ask = async () => {
   const base = await context();
   const numbers = (argv._.slice(1).length ? argv._.slice(1) : store.listTracked(base.root, base.repo)).map(assertSafeNumber);
   const rows = [];
+  // "no notes" is the message for a run that found nothing to say. Printed under
+  // "LEFT ALONE — the @ai note in <!-- prt:body -->", or under a refusal to touch
+  // a `ready` file, it is the tool contradicting itself two lines apart — and a
+  // tool that says "no notes" about a file with notes in it is doing the one
+  // thing this whole mechanism exists to stop. Counting the lines actually
+  // printed is the only predicate that cannot drift from what was printed: the
+  // row-shape predicate this replaces missed both cases above, because neither
+  // branch fills in the field it looked at.
+  let said = 0;
+  const report = (line) => { said++; say(line); };
   for (const n of numbers) {
     const file = store.actionFilePath(base.root, base.repo, n);
     if (!fs.existsSync(file)) continue;
     const text = fs.readFileSync(file, 'utf8');
     const status = parseStatus(text);
 
-    if (argv.flags.promote) {
+    if (argv.flags.promote || argv.flags.tidy) {
       // Never rewrite a file a submission may be reading or about to capture.
       if (PROTECTED_STATUSES.has(status) && status !== 'hold') {
-        say(`#${n}: "${status}" — refusing to rewrite. Set it back to draft or hold first.`);
+        report(`#${n}: "${status}" — refusing to rewrite. Set it back to draft or hold first.`);
+        // What was refused, so `--json` carries the same fact the line does.
+        rows.push({ number: n, status, file, refusedToRewrite: status, ...askRow(text) });
         continue;
       }
       const prev = store.readState(base.root, base.repo, n);
       const floor = Math.max(prev?.asks?.ordinalFloor ?? 0, maxAskOrdinal(text));
       const generation = prev?.tracking?.generation ?? 1;
-      const { text: promotedText, promoted } = promoteShorthand(text, { startOrdinal: floor + 1, generation });
-      const nextText = ensurePrActions(promotedText, { merged: !!prev?.merged });
-      if (nextText !== text) store.writeAtomic(file, nextText);
+      const { text: promotedText, promoted, refused, resealed } = argv.flags.promote
+        ? promoteShorthand(text, { startOrdinal: floor + 1, generation })
+        : { text, promoted: [], refused: [], resealed: [] };
+      // Promote first, then file: a note promoted in this same run may already
+      // have an answer beside it, and it belongs in the log with the rest rather
+      // than a round later. One write for both, so `--promote --tidy` archives
+      // once — two archives in the same millisecond collide on the ISO stamp.
+      const tidied = argv.flags.tidy
+        ? relocateResolvedAsks(promotedText)
+        : { text: promotedText, moved: [], skipped: [], reopened: [], refreshed: [], refused: null };
+      const nextText = ensurePrActions(tidied.text, { merged: !!prev?.merged });
+      if (nextText !== text) {
+        // Lifting a note edits prose the human typed inside a block — the only
+        // writer here that does — so it is the only one that owes them an undo.
+        // Inside the conditional on purpose: `prt ask --promote` with no
+        // arguments walks every tracked PR, and archiving the unchanged ones
+        // would bury the copies that matter under sixty that do not.
+        store.archiveActionFile(base.root, base.repo, n);
+        store.writeAtomic(file, nextText);
+      }
       if (promoted.length) {
         store.writeState(base.root, base.repo, n, {
           ...(prev ?? {}),
@@ -849,37 +975,108 @@ COMMANDS.ask = async () => {
         });
       }
       for (const p of promoted) {
-        say(`#${n}: promoted @ai note → ask ${p.id} (re: ${p.re}${p.inferred ? ', inferred from position' : ''}) at line ${p.line}`);
+        const from = p.lifted ? `, lifted out of <!-- prt:${p.lifted} -->` : '';
+        report(`#${n}: promoted @ai note → ask ${p.id} (re: ${p.re}${p.follows ? `, follows: ${p.follows}` : ''}${p.inferred ? ', inferred from position' : ''}) at line ${p.line}${from}`);
       }
-      if (!promoted.length) say(`#${n}: no un-promoted @ai notes`);
-      rows.push({ number: n, promoted });
+      // Say it out loud. A note left behind still blocks the submit, but the
+      // human has to know it is theirs to fix — silence here reads exactly like
+      // "there was nothing to promote".
+      for (const rf of refused) {
+        report(`#${n}: LEFT ALONE — the @ai note in <!-- prt:${rf.kind} --> at line ${rf.line}: ${rf.why}`);
+      }
+      for (const m of tidied.moved) report(`#${n}: filed ${m.id} (${m.state}) under "## Resolved notes"`);
+      // The other direction says so too, and says what it means: an ask that
+      // reopened is live work again, and the human has just been told the log
+      // stopped claiming otherwise.
+      for (const rr of tidied.reopened) {
+        report(`#${n}: took ${rr.id} back out of "## Resolved notes" — its answer is gone, so it is open again (re: ${rr.re})`);
+      }
+      // "It now reads addressed" on its own named the one thing that had not
+      // changed, on a run that had just replaced the whole line. The line is the
+      // tool's, but it is a line in a section a human reads, so a rewrite that
+      // takes bytes with it says which bytes.
+      // Ellipsed from BOTH ends: words a human appended sit at the tail, and a
+      // head-only clip of a long derived gist shows them none of it.
+      const clip = (s) => (s.length <= 100 ? s : `${s.slice(0, 40)}…${s.slice(-55)}`);
+      for (const rf of tidied.refreshed) {
+        report(rf.replaced
+          ? `#${n}: rewrote the handling line for ${rf.id} — it now reads ${rf.state}, replacing "${clip(rf.replaced)}" (the old file is in history/)`
+          : `#${n}: re-derived the handling line for ${rf.id} — it now reads ${rf.state}`);
+      }
+      // Every pair that did not move says why, so "nothing to file" is never read
+      // as "and I am not telling you what I skipped".
+      for (const s of tidied.skipped) report(`#${n}: left ${s.id} where it is — ${s.why}`);
+      if (tidied.refused) report(`#${n}: not tidying — ${tidied.refused}`);
+      // A resealed note is the human's edit being ACCEPTED as the question. It
+      // has to be said out loud for the same reason a lift does: the command
+      // just rewrote two sentinels in a file they are reading, and the note they
+      // typed over is now live work that nothing has answered.
+      for (const rs of resealed) {
+        report(`#${n}: ${rs.id}'s question has been rewritten since it was answered — it is open again, and the old answer is now marked as answering the old wording`);
+      }
+      // The notes nothing can lift: inside `prt:log`, inside a block's header,
+      // inside a block whose sentinel or terminator is broken, inside a block of
+      // an unknown kind. `promoted` and `refused` both come from the LIFT, and
+      // the lift never looks at any of those — so both counters read 0 and this
+      // command answered `no un-promoted @ai notes` over a file that plainly had
+      // one, while `prt validate` went on refusing that same file over that same
+      // note. The scanner sees all four places, and carries the remedy that
+      // applies to each, so it is what the sentence is derived from.
+      const unliftable = argv.flags.promote ? unpromotedNotes(nextText).filter((x) => !x.liftable) : [];
+      for (const x of unliftable) {
+        const at = x.where === 'gap' ? 'in a gap' : `in <!-- prt:${x.where} -->`;
+        report(`#${n}: NOT PROMOTED — the @ai note ${at} at line ${x.line}: ${x.remedy.replace(/<N>/g, String(n))}`);
+      }
+      if (argv.flags.promote && !promoted.length && !refused.length && !resealed.length && !unliftable.length) {
+        report(`#${n}: no un-promoted @ai notes`);
+      }
+      if (argv.flags.tidy && !tidied.moved.length && !tidied.reopened.length && !tidied.refreshed.length
+        && !tidied.skipped.length && !tidied.refused) {
+        report(`#${n}: no answered notes to file`);
+      }
+      rows.push({
+        number: n, status, file, promoted, refused, resealed, unliftable,
+        moved: tidied.moved, skipped: tidied.skipped, notTidied: tidied.refused,
+        reopened: tidied.reopened, refreshed: tidied.refreshed,
+        // What the file still holds after the rewrite, so the row is about the
+        // file and not only about this one command's edits — and in the same
+        // shape the read mode below emits, because one key with two shapes is a
+        // trap for whoever consumes `--json`.
+        ...askRow(nextText),
+      });
       continue;
     }
 
-    const { asks, answers } = collectAsks(text);
-    const row = {
-      number: n,
-      status,
-      file,
-      asks: asks.map((a) => ({
-        id: a.id, re: a.re, state: a.state, open: a.open, blocking: a.blocking,
-        raised: a.raised, follows: a.follows, was: a.was, question: a.question,
-        answer: (answers.filter((x) => x.to === a.id).pop() ?? null),
-      })),
-    };
+    const row = { number: n, status, file, ...askRow(text) };
     rows.push(row);
-    if (!JSON_OUT && row.asks.length) {
+    if (!JSON_OUT && (row.asks.length || row.notes.length)) {
       const open = row.asks.filter((x) => x.open);
-      say(`#${n} [${status}] — ${row.asks.length} note(s), ${open.length} open`);
+      const un = row.notes.length ? `, ${row.notes.length} un-promoted` : '';
+      report(`#${n} [${status}] — ${row.asks.length} note(s), ${open.length} open${un}`);
       for (const a of row.asks) {
         const mark = a.open ? (a.blocking ? '●' : '○') : '✓';
-        say(`  ${mark} ${a.id}  re: ${a.re}  ${a.state}${a.raised ? `  (${a.raised})` : ''}`);
-        say(`      ${a.question.split('\n')[0].slice(0, 100)}`);
+        report(`  ${mark} ${a.id}  re: ${a.re}  ${a.state}${a.raised ? `  (${a.raised})` : ''}`);
+        report(`      ${a.question.split('\n')[0].slice(0, 100)}`);
+      }
+      // The notes nothing has promoted yet, listed with the ones that have been.
+      //
+      // The remedy is the scanner's own, not a fixed `--promote`. This line used
+      // to name `--promote` for every note, including the ones `--promote` is
+      // documented as unable to lift — a note in `prt:log`, in a block's header,
+      // in a block whose sentinel the human broke. `--promote` then answered "no
+      // un-promoted @ai notes" while `prt validate` went on refusing the file
+      // over exactly those notes: the tool contradicting itself two commands
+      // apart, which is the silence this mechanism exists to end wearing a
+      // different hat.
+      for (const x of row.notes) {
+        const at = x.where === 'gap' ? 'in a gap' : `in <!-- prt:${x.where} -->`;
+        report(`  ! un-promoted, ${at} at line ${x.line} — ${x.remedy.replace(/<N>/g, String(n))}`);
+        report(`      ${x.text.split('\n')[0].slice(0, 100)}`);
       }
     }
   }
   emit({ rows });
-  if (!JSON_OUT && !rows.some((r) => r.asks?.length || r.promoted?.length)) say('no notes');
+  if (!JSON_OUT && !said) say('no notes');
 };
 
 COMMANDS.open = async () => {
@@ -1292,18 +1489,53 @@ COMMANDS.validate = async () => {
     if (!fs.existsSync(file)) continue;
     const text = fs.readFileSync(file, 'utf8');
     const parsed = parseActionFile(text);
-    const row = { number: n, status: parsed.status, errors: parsed.errors, warnings: parsed.warnings, actions: [] };
+    // `refusals` are the things `prt submit` will stop on that are not parse
+    // errors. They are counted separately from `errors` — the file still parses,
+    // and `--json` consumers read `errors` for that — but they carry the same
+    // weight in the two things a script actually reads: the mark and the exit
+    // code. See the verdict below.
+    //
+    // Every one of them comes from `contentRefusals`, which is the function
+    // `preflight` runs: written out twice they drifted, and this command printed
+    // `✓` over a file carrying "remote code execution" because its copy had the
+    // pipeline-mechanics lint and none of the other three.
+    const row = { number: n, status: parsed.status, errors: parsed.errors, warnings: parsed.warnings, refusals: [], actions: [] };
     if (!parsed.errors.length) {
       row.actions = planActions(parsed).map((a) => ({ id: a.id, kind: a.kind }));
-      // Anchor check against the live diff.
+      row.refusals.push(...contentRefusals(parsed, base.cfg));
+      // An `edited` note that is NOT blocking is the one thing in this family
+      // `prt submit` does not refuse, so it cannot be a refusal here — but the
+      // file still reads as settled, with an `addressed` answer sitting under a
+      // question that has moved, and the only thing saying otherwise is a hash.
+      // So it is named as a warning: the point of the whole mechanism is that a
+      // rewritten question is never silent.
+      for (const ask of collectAsks(text).asks) {
+        if (ask.state === 'edited' && !ask.blocking) {
+          row.warnings.push(
+            `note "${ask.id}" was rewritten after it was answered — the answer under it is not an answer to it. `
+            + 'It is `blocking: no`, so this does not stop a submit; answer it again to close it',
+          );
+        }
+      }
+      // Anchor check against the live diff. `on-anchor-fail` decides whether a
+      // dead anchor is fatal, and the verdict has to read it the same way
+      // `preflight` does: a `demote`/`drop` comment whose anchor is gone does
+      // not stop the post, so reporting it as an error here would exit 1 over a
+      // file that submits cleanly — the same drift as the lints above, in the
+      // other direction.
       try {
         const anchors = commentableAnchors(parseDiff(await prDiff(base.repo, n)));
-        for (const c of parsed.inline.filter((x) => x.post && x.subject !== 'file')) {
-          const v = validateAnchor(anchors, {
-            file: c.path, line: c.subject === 'range' ? c.startLine : c.line,
-            endLine: c.line, side: c.side, startSide: c.startSide,
-          });
-          if (!v.ok) row.errors.push(`inline "${c.id}": ${v.reason}${v.nearest ? ` (nearest ${v.nearest})` : ''}`);
+        for (const c of parsed.inline.filter((x) => x.post)) {
+          const v = c.subject === 'file'
+            ? (anchors.has(c.path) ? { ok: true } : { ok: false, reason: `file "${c.path}" is not part of this diff`, nearest: null })
+            : validateAnchor(anchors, {
+              file: c.path, line: c.subject === 'range' ? c.startLine : c.line,
+              endLine: c.line, side: c.side, startSide: c.startSide,
+            });
+          if (v.ok) continue;
+          const why = `inline "${c.id}": ${v.reason}${v.nearest ? ` (nearest ${v.nearest})` : ''}`;
+          if (c.onAnchorFail === 'block') row.errors.push(why);
+          else row.warnings.push(`${why} — \`on-anchor-fail: ${c.onAnchorFail}\`, so the submit will ${c.onAnchorFail === 'drop' ? 'drop it' : 'demote it to a file comment'} rather than stop`);
         }
       } catch (e) {
         row.warnings.push(`could not fetch the diff to validate anchors: ${e.message}`);
@@ -1311,14 +1543,28 @@ COMMANDS.validate = async () => {
     }
     rows.push(row);
     if (!JSON_OUT) {
-      const mark = row.errors.length ? '✗' : '✓';
+      // What the mark and the exit code promise, in the one direction they can:
+      // ✗ / exit 1 means `prt submit` refuses this file — every check above is
+      // one of its refusals, run through the same code, and `on-anchor-fail` is
+      // read the way the submitter reads it.
+      //
+      // ✓ / exit 0 does NOT promise the reverse, and saying it did was the bug:
+      // this printed `✓` over files carrying a security leak, an unanswered
+      // note, or a quoted note, because it had its own copy of one lint out of
+      // four. What ✓ means now is that nothing in the BYTES stops the post. The
+      // rest is live state read at submit time — the PR still open, the head
+      // unmoved, no pending review of yours, the threads where the draft left
+      // them — plus the two questions about when rather than what: `Status:` has
+      // to read `ready`, and there has to be something left to post.
+      const mark = row.errors.length || row.refusals.length ? '✗' : '✓';
       say(`${mark} #${n} [${row.status}] ${row.actions.length} action(s)`);
       for (const e of row.errors) say(`    error:   ${e}`);
+      for (const r of row.refusals) say(`    refuses: ${r}`);
       for (const w of row.warnings) say(`    warning: ${w}`);
     }
   }
   emit({ rows });
-  if (rows.some((r) => r.errors.length)) process.exitCode = 1;
+  if (rows.some((r) => r.errors.length || r.refusals.length)) process.exitCode = 1;
 };
 
 COMMANDS.submit = async () => {

@@ -6,7 +6,7 @@
 
 import { parseDiff } from './diff.mjs';
 import { THREAD_STATES, summarizeCounts, recommendEvent } from './analyze.mjs';
-import { renderAsk, STATUSES, PR_ACTIONS_SECTION } from './actionfile.mjs';
+import { renderAsk, askHandlingLine, STATUSES, PR_ACTIONS_SECTION, RESOLVED_NOTES_SECTION, HUMAN_DOC_KEYS } from './actionfile.mjs';
 
 const EVIDENCE_LABEL = {
   [THREAD_STATES.AWAITING_MY_REPLY]: 'the author replied and is waiting on me',
@@ -115,37 +115,43 @@ export function renderActionFile({
   carriedAsks = [],
   carriedAnswers = [],
   askChanges = [],
+  carriedDoc = {},
 }) {
-  // Asks are rendered beside whatever they are about: a note on inline i7 is
+  // An OPEN ask is rendered beside whatever it is about: a note on inline i7 is
   // unjudgeable away from i7's text. Orphans get their own section, since they
   // have no target left to sit beside.
-  // Every carried ask must reach the new file. A note that is rendered nowhere
-  // is a note destroyed, so `emitted` tracks what has been placed and an
-  // unplaced-notes sweep at the end catches anything whose target this function
-  // does not know how to place.
+  //
+  // A RESOLVED one has already been acted on, so it no longer needs its target
+  // beside it — it goes to the `## Resolved notes` log at the end, one line of
+  // disposition each. That split is exhaustive by construction (`askState`
+  // returns exactly one of open/deferred, which are open, and
+  // addressed/declined/withdrawn, which are not), so every carried ask reaches
+  // the file: the ones that are open through `emitted` plus the unplaced sweep,
+  // the rest through the log. A note that is rendered nowhere is a note
+  // destroyed, and neither half can drop one silently.
+  //
+  // The test is `open === false`, not `!open`: an ask that reached here without
+  // a derived state must fall on the open side. A note wrongly left open is
+  // noise; a note wrongly filed is one the human stops being asked about.
   const emitted = new Set();
-  const asksFor = (target) => carriedAsks.filter((a) => a.re === target);
+  const resolvedAsks = carriedAsks.filter((a) => a.open === false);
+  const asksFor = (target) => carriedAsks.filter((a) => a.open !== false && a.re === target);
   const answersFor = (askId) => carriedAnswers.filter((x) => x.to === askId);
   const emitAsks = (out, target) => {
     for (const a of asksFor(target)) {
       emitted.add(a.id);
-      const closed = a.closed || a.state === 'addressed' || a.state === 'declined';
-      if (closed) {
-        out.push(`<details><summary>ask ${a.id} — ${a.state}</summary>`);
-        out.push('');
-        out.push(renderAsk(a, answersFor(a.id)));
-        out.push('');
-        out.push('</details>');
-      } else {
-        out.push(renderAsk(a, answersFor(a.id)));
-      }
+      out.push(renderAsk(a, answersFor(a.id)));
       out.push('');
     }
   };
   const a = analysis;
   const rec = recommendEvent(a);
   const proposed = findings?.recommendedEvent ?? rec.event;
-  // APPROVE is never written into the file automatically: the human types it.
+  // APPROVE is not written into the file automatically: the human types it.
+  // That is `requireExplicitApprove`, which defaults to true — it is a config
+  // key rather than a hard-coded rule, so the sentence is about the shipped
+  // default, and a store that turns it off gets a generated `event: APPROVE`.
+  // (The model is separately forbidden to write one; SKILL.md invariant 3.)
   const event = requireExplicitApprove && proposed === 'APPROVE' ? 'COMMENT' : proposed;
 
   const deltaFiles = delta?.diff ? parseDiff(delta.diff) : null;
@@ -171,6 +177,16 @@ export function renderActionFile({
   if (baseOid) out.push(`base: ${baseOid}`);
   if (diffFingerprint) out.push(`diff-fingerprint: ${diffFingerprint}`);
   if (a.myLastReview?.oid) out.push(`reviewed-at: ${a.myLastReview.oid}`);
+  // The human's own acknowledgements, last, after everything measured. They
+  // reach here already re-earned against this generation's outgoing text by
+  // `carryDocHatches`; the allow-list is a second lock on the same door, so that
+  // a caller handing the renderer a whole previous `prt:doc` cannot smuggle a
+  // stale `head:` or `diff-fingerprint:` past the submitter's preflight. Every
+  // key above comes from this call's own arguments — `carriedDoc` can add a
+  // line here, and can never rewrite one of those.
+  for (const key of HUMAN_DOC_KEYS) {
+    if (carriedDoc[key] !== undefined) out.push(`${key}: ${carriedDoc[key]}`);
+  }
   out.push('-->');
   out.push('');
 
@@ -446,7 +462,7 @@ export function renderActionFile({
   // reason this is a sweep rather than two fixed targets — a note bound to a
   // block kind this function has not been taught to place. A note rendered
   // nowhere is a note destroyed, and that must not be possible by omission.
-  const unplaced = carriedAsks.filter((a) => !emitted.has(a.id));
+  const unplaced = carriedAsks.filter((a) => a.open !== false && !emitted.has(a.id));
   if (unplaced.length) {
     const orphans = unplaced.filter((a) => a.re === 'gone');
     out.push('## Notes to the assistant');
@@ -459,14 +475,7 @@ export function renderActionFile({
     }
     for (const a of unplaced) {
       emitted.add(a.id);
-      const closed = a.closed || a.state === 'addressed' || a.state === 'declined';
-      if (closed) {
-        out.push(`<details><summary>ask ${a.id} — ${a.state}</summary>`, '');
-        out.push(renderAsk(a, answersFor(a.id)));
-        out.push('', '</details>');
-      } else {
-        out.push(renderAsk(a, answersFor(a.id)));
-      }
+      out.push(renderAsk(a, answersFor(a.id)));
       out.push('');
     }
   }
@@ -493,7 +502,33 @@ export function renderActionFile({
     out.push('');
     out.push(`*${stillOpen.length} open note(s) to the assistant: ${stillOpen.map((x) => x.id).join(', ')}.${blocking.length ? ` ${blocking.length} of them will refuse a submit until answered.` : ''}*`);
   }
+  // The footer names the log by its heading. The human asked for "the log at the
+  // end of the file", and the file also ends with the submitter's `## Activity
+  // log`, so the one pointer that matters is the one that says which is which.
+  if (resolvedAsks.length) {
+    out.push('');
+    out.push(`*${resolvedAsks.length} note(s) already handled: ${resolvedAsks.map((x) => x.id).join(', ')} — see \`## Resolved notes\` below.*`);
+  }
   out.push('');
+
+  // ---------- the resolved-note log ----------
+  // Last, so the top of the file is the work still to do. Deliberately not
+  // collapsed behind `<details>`: the section is bounded to two generations by
+  // `carryAsks`' `keepClosedFor`, the handling line is already the collapsed
+  // view, and the material that decides whether to arm the review lands in the
+  // answer body — burying that under a disclosure widget below the footer is
+  // exactly the reading this section exists to make easy.
+  if (resolvedAsks.length) {
+    out.push(...RESOLVED_NOTES_SECTION);
+    out.push('');
+    for (const a of resolvedAsks) {
+      emitted.add(a.id);
+      out.push(askHandlingLine(a, answersFor(a.id)));
+      out.push('');
+      out.push(renderAsk(a, answersFor(a.id)));
+      out.push('');
+    }
+  }
 
   return `${squeezeOutsideAsks(out.join('\n'))}\n`;
 }
@@ -740,14 +775,19 @@ export function renderNudgeFile({ repo, analysis, generation = 1, reviewerLogin,
   out.push('');
 
   // A nudge overwrites whatever draft was here, so any notes the human left on
-  // it are carried across rather than destroyed.
-  if (carriedAsks.length) {
+  // it are carried across rather than destroyed. Same split as the review
+  // renderer, and for the same reason: if the two disagreed about where a
+  // resolved note lives, a nudge would silently pull one back up the file.
+  const answersFor = (askId) => carriedAnswers.filter((x) => x.to === askId);
+  const openAsks = carriedAsks.filter((x) => x.open !== false);
+  const resolvedAsks = carriedAsks.filter((x) => x.open === false);
+  if (openAsks.length) {
     out.push('## Notes to the assistant');
     out.push('');
     out.push('*Carried over from the review draft this reminder replaced. Never posted.*');
     out.push('');
-    for (const ask of carriedAsks) {
-      out.push(renderAsk(ask, carriedAnswers.filter((x) => x.to === ask.id)));
+    for (const ask of openAsks) {
+      out.push(renderAsk(ask, answersFor(ask.id)));
       out.push('');
     }
   }
@@ -757,6 +797,17 @@ export function renderNudgeFile({ repo, analysis, generation = 1, reviewerLogin,
   out.push('*`Status: ready` posts the comment above. `Status: skip` drops it and stops this PR');
   out.push('being proposed again until something changes.*');
   out.push('');
+
+  if (resolvedAsks.length) {
+    out.push(...RESOLVED_NOTES_SECTION);
+    out.push('');
+    for (const ask of resolvedAsks) {
+      out.push(askHandlingLine(ask, answersFor(ask.id)));
+      out.push('');
+      out.push(renderAsk(ask, answersFor(ask.id)));
+      out.push('');
+    }
+  }
 
   return `${squeezeOutsideAsks(out.join('\n'))}\n`;
 }

@@ -51,7 +51,14 @@ Pass the tier straight through to every `/pr-review` call (`--tier <tier>`).
 That both keeps the batch at one consistent depth and stops each PR re-deriving
 the tier — `pr-review` skips the budget script entirely when it is given one.
 Tell the user which tier the batch ran at, and at `lean` or `codex` say plainly
-that each PR got one independent reviewer rather than two.
+that each PR got one independent reviewer rather than two. **In the terminal, to
+them.** The tier is the reader-of-this-session's business and nobody else's, so
+it never goes into a draft's outgoing text. **That is your job, not the lint's.**
+The pipeline-mechanics lint refuses the shapes this leak actually takes, and it
+is phrase-based: an ordinary sentence that carries the tier, the shape, the round
+or the model split in words it does not know — "this review ran at the lean
+depth", "finding 3 came out of the second pass" — passes it and posts. It is a
+backstop for a slip, never the reason it is safe to write one.
 
 ## Invariants — never violate these
 
@@ -244,7 +251,9 @@ Full first-pass reviews of the top candidates, prepared for editing.
 5. Report each as it lands; when the queue is empty, arm the watcher.
 
 If `pr-review` degrades (Codex unavailable, no worktree, diff-only), say so per
-PR — a thinner review must never be presented as a full consensus one.
+PR — a thinner review must never be presented as a full consensus one. To the
+user, in your report; the draft's own record is the `**Draft produced by:**`
+line `prt:context` carries, which never posts.
 
 ## Revisit draft
 
@@ -325,8 +334,13 @@ sits on bytes nobody approved.
 
    Both flags `false`, always (invariant 3). Say in your report that you added
    it, and mention when one looks worth setting.
-5. `node "$PRT" validate <N> --repo <owner/repo>` — expect no errors and no
-   warnings, and check the action count still matches what you intended.
+5. `node "$PRT" validate <N> --repo <owner/repo>` — expect `✓` and exit 0. `✗`
+   means `prt submit` would refuse this file, and every `error:` and `refuses:`
+   line under it is one of the reasons it would. `✓` means nothing in the bytes
+   stops the post — not that the post will succeed, since the PR's live state is
+   re-read at submit time. A `refuses:` line naming an open note of the human's
+   is yours to answer, not to clear. Check the action count still matches what
+   you intended.
 6. Report what changed, and what you deliberately left alone.
 
 ### What to preserve
@@ -341,10 +355,19 @@ Revision is about wording and emphasis. It must not quietly change the review.
   rather than deleting it.
 - Do not change `event:` in `prt:verdict` unless the human asked. Never write
   `APPROVE` (invariant 3).
-- Keep tooling attribution out of anything that posts. Model names belong in
-  `prt:context` and the italic per-comment lines, which stay local — not in a
-  comment body that lands on a public PR. Revision passes are a common place for
-  this to leak, because the prose gets reshuffled.
+- Keep the pipeline's internal mechanics out of anything that posts: the tier,
+  the effort, round numbers, internal roles (adjudicator, validator, refutation
+  pass), the shape ("two-model", "single-reviewer"), and which pass raised a
+  finding. Those belong in `prt:context` and the italic per-comment lines, which
+  stay local. Saying that AI assisted, and naming the models, is **not** in that
+  set — that is a deliberate disclosure the human makes on purpose, and it posts.
+  Revision passes are a common place for the mechanics to leak, because the prose
+  gets reshuffled. The **pipeline-mechanics lint** catches it over exactly the
+  text that will post: `prt validate` fails the file in the round that wrote it
+  (as a `refuses:` line, since the file parses but will not post), and `prt
+  submit` refuses with the same sentence. Clearing a hit takes `tooling-reviewed: <labels>` in
+  `prt:doc`, which only the human may write — so a leak you introduce costs them
+  the round.
 - **Flag the drift.** The file is now ahead of `cache/findings.json`. Harmless
   while the status is `draft`/`hold`, but a later `prt draft` regenerates from
   the stale findings and silently loses the revision. Say so in your report, and
@@ -376,20 +399,84 @@ line they typed while reading — is a question, an objection, or an instruction
 addressed to you. It is never posted, it survives regeneration, and it stays
 open across rounds until you answer it.
 
-**Discover them.** They arrive in two places, so a subagent cannot miss them:
+**Where a note can be: anywhere in the file.** In the gaps between blocks, and
+equally *inside* one — mid-`prt:body`, under an inline comment, in a thread
+reply, under an answer you already wrote, in a block's `<!-- prt:… -->` header,
+even in a block whose sentinel is half-typed or whose kind is a typo — carrying
+whatever decoration the surrounding prose had (`*@ai …`, `> @ai …`, `- @ai …`,
+`+ @ai …`, `1. @ai …`, `1) @ai …`, indented). One rule reads all of them, so the
+same keystrokes mean the same thing everywhere. The single exception is the
+opening line of a `prt:ask` body, where the `prt:ask` around it *is* the
+promotion and the words are already the question. An in-block note never reaches
+GitHub, because it is a hard parse error and never a silent strip. It is still an
+instruction written to you, and reading only the gaps is exactly how one goes
+unread.
+
+Every `@ai` line you type is **named**: wherever it sits, it is a parse error, so
+`prt validate` exits 1 and nothing submits past it, and `node "$PRT" ask <N>`
+lists it with a `!` from the moment it is typed, followed by the one edit that
+actually fixes that note. To write *about* the token instead of leaving a note,
+put it in backticks — `` `@ai` `` — anywhere in the file. That is the only
+escape; indenting is decoration and still reads as a note.
+
+The one line that is not a new note is the one already exempted above — a
+`prt:ask`'s own question — and **rewriting it there is not silent either**, by a
+different mechanism: the ask carries a `q:` stamp of the words it was created
+with, so a question that no longer matches reopens, `prt ask` shows it as
+`edited`, and `prt submit` refuses. Three shapes are outside that, and it is
+worth knowing which: a note the human withdrew with `closed: yes` (their own
+act outranks a later edit), one marked `blocking: no` (`prt ask` and
+`prt validate` name it, nothing stops the post — which is what that field
+means), and an ask written before the stamp existed, which has no `q:` to
+compare against and so keeps deriving from its answer. Only asks this tool
+created carry the stamp; the pre-stamp ones retire within a round or two.
+
+**Discover them.** Two commands, and only the first sees a note that is still
+shorthand:
 
 ```bash
-node "$PRT" ask <N>            # or --json; ● blocking, ○ non-blocking, ✓ closed
-node "$PRT" context <N>        # the same notes in the `asks` array
+node "$PRT" ask <N>            # ● blocking, ○ non-blocking, ✓ closed, ! not promoted yet
+node "$PRT" context <N>        # the `asks` array — prt:ask blocks ONLY, no shorthand
 ```
 
-Run `node "$PRT" ask <N> --promote` first if the human typed `@ai` shorthand and
-has not run `prt draft` since — an un-promoted note is a parse error, so the
-file will not submit until it is promoted.
+So run `prt ask` before trusting `prt context` to be the whole of what the human
+said. Then `node "$PRT" ask <N> --promote` whenever they typed shorthand and
+have not run `prt draft` since: a note in a gap is promoted in place, one inside
+a block is **lifted** out of it and re-emitted after that block's terminator,
+and every promotion prints the block it came from. One lifted out of a `prt:ask`
+or `prt:answer` gets `follows:` set to the pair it was written under, which is
+what reopens that conversation. A note it cannot lift safely — one butted
+straight up against prose — is left exactly where it is and reported by line and
+reason: **move the note and everything that belongs to it out of the block into
+a gap**, where a note runs to the end of its paragraph. Do not answer that
+refusal with a blank line unless the line below is the review's own text — a
+blank fences the note at its first line, so `@ai please:` over two bullets lifts
+`please:` and posts the bullets. On an armed file the remedy also names the
+precondition: `--promote` will not rewrite a `ready` file.
 
-`prt validate <N>` reports notes the parser could see but not collect: an `@ai`
-line inside a block, or a mistyped block kind like `prt:note`. Both are errors,
-so treat either as an instruction you have not read yet, not as noise.
+Some notes nothing lifts: inside `prt:log`, inside a block's `<!-- prt:… -->`
+header, inside a block whose sentinel or terminator is broken, inside a block of
+an unknown kind. `--promote` cannot help with any of them and does not claim to:
+it prints a `NOT PROMOTED` line per note, carrying the same remedy the `!` row
+carries, and keeps `no un-promoted @ai notes` for a file that really has none.
+`prt draft` and `prt nudge` refuse to regenerate over one at all, naming the
+line, because carry-over moves `prt:ask` blocks and nothing else. Fix what the
+row names and it promotes like any other.
+
+`prt validate <N>` reports the same notes with the same remedies, plus what the
+parser could see but not collect at all — a mistyped block kind like `prt:note`.
+All of it is errors, so treat any of it as an instruction you have not read yet,
+not as noise.
+
+**A note listed as `edited` is one they typed over.** Rewriting the question in
+place is how a maintainer escalates when your answer missed — the words are right
+there, so they type over them. `prt` records the question it promoted as `q:`, so
+it can see that happen: the note reopens and refuses the submit even though an
+`addressed` answer is still sitting under it. Run `prt ask <N> --promote` to
+accept the new wording, read the NEW question, and answer it with a fresh
+`prt:answer` block. Do not delete or reword the old answer, and never write or
+edit `q:` or `re-q:` yourself — they are `prt`'s record of what `prt` wrote, and
+changing one is claiming to have answered something you did not.
 
 **Answer them.** Append a sibling block; never open theirs.
 
@@ -412,6 +499,9 @@ unreachable — I had only checked the callers in this file.
   encouraged: a disposition with nothing to show for it will not parse.
 - `did: drop-inline i3` is cross-checked. Set `post: false` and
   `dropped-by: a6` on that inline in the same edit, or the file will not parse.
+  Stamp the answer `in: g<N>` while you are there: that is what dates the claim,
+  and without it the check keeps applying in later rounds, where the comment is
+  legitimately gone and the answer stops parsing.
 - **Also move the finding to `dropped[]` in `cache/findings.json`** with the
   reason. The file edit alone is a trap: the next `prt draft` regenerates from
   the findings and the comment you dropped comes back.
@@ -419,6 +509,22 @@ unreachable — I had only checked the callers in this file.
 **Never** edit the human's words, set `closed:`, or answer a note by deleting
 it. `closed: yes` is them withdrawing their own question — the same class of act
 as `Status: ready` and `event: APPROVE`.
+
+**Filing an answered note is not deleting it.** Once a note has a terminal
+answer it is no longer live work, so it moves — with its answer, verbatim, as
+one slice — to a `## Resolved notes` log at the end of the file, under one line
+saying how it was handled. `prt draft` does that on the next regeneration and
+`node "$PRT" ask <N> --tidy` does it in the round you answered in. It is a move
+and only a move: the words are untouched, `prt ask` still lists the note, and
+deleting the answer reopens it and blocks the submit again, because the state is
+derived on every read rather than stored. The handling line and the pair's
+position *are* stored — written when it was filed — so both writers re-derive
+them: `prt draft` re-renders, and `--tidy` now reads the section on every run,
+rewriting a line that no longer derives and taking a reopened pair back out
+beside its target. A line the human has appended their own words to is left
+alone, because it still starts with what the state derives to. Between their
+edit and the next of those two commands the section reads as it was last
+written, so `prt ask <N>` is the truth.
 
 **Never quote a note back into the review.** It is theirs, written to you, about
 the PR author. The submitter blocks a twelve-word verbatim overlap, but that is

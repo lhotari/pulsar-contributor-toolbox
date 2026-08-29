@@ -74,10 +74,36 @@ Rules:
   the code GitHub offers to apply.
 - Booleans are strict. `post: ture` is an error, not a silent `false` — a typo
   must stop the run rather than quietly drop a comment you armed.
-- `prt:doc` and `prt:verdict` are attribute-only: the opening sentinel is the
-  whole block, no `<!-- /prt -->`.
+- `prt:doc`, `prt:verdict` and `prt:pr-actions` are attribute-only: the opening
+  sentinel is the whole block, no `<!-- /prt -->`.
 - Every block that produces a post needs a unique `id:`.
 - A one-line form works when there are no fields: `<!-- prt:body -->`.
+
+### Block kinds
+
+Three things about a kind matter, and they are not the same three: whether its
+body reaches GitHub, whether it has a body at all, and what happens to an `@ai`
+note typed inside it.
+
+| kind | reaches GitHub | shape | an `@ai` note typed in its body |
+|---|---|---|---|
+| `body` `inline` `thread` `issue-comment` | **yes**, byte for byte | body | error — it would post; `prt ask <N> --promote` lifts it out |
+| `context` `notes` | never | body | error — collected by nothing; lifted out the same way |
+| `log` | never | body | error, but **not** lifted: the submitter owns those bytes, so move it yourself |
+| `ask` `answer` | never | body | not scanned — this is where a note is meant to end up |
+| `doc` | never | attribute-only | no body to type in |
+| `verdict` `pr-actions` | no text of their own; they set the review event and the PR-level actions | attribute-only | no body to type in |
+
+The last column is about **bodies**. Every kind's `<!-- prt:… -->` **header** is
+scanned as well, `doc`'s, `verdict`'s and `ask`'s included, because
+`parseSentinelFields` keeps `key: value` lines and silently drops the rest — so a
+note typed up there would be thrown away by the file itself. It is an error in
+every kind and lifted in none: a splice inside a sentinel is how a block loses
+its `id:`. Move it below the `-->`.
+
+Everything outside every block is a **gap**: headings, tables, quoted context,
+your scribbles. `tokenize` discards gaps, which is what makes "a note never
+leaks" structural rather than a promise — and it is where a promoted note lands.
 
 ### `prt:doc` — what this draft was generated against
 
@@ -101,10 +127,36 @@ These are **preconditions**, re-checked against live GitHub immediately before
 posting. If the head moved, the PR was retargeted, or the effective diff changed,
 the submitter blocks instead of posting into a document that no longer exists.
 
-One opt-in acknowledgement also lives here:
+Three opt-in acknowledgements also live here. Only a human writes one — the
+model is forbidden to touch `prt:doc` at all:
 
 - `security-reviewed: yes` — required if the outgoing text trips the security
   lint (see below).
+- `ask-quote-reviewed: yes` — required if outgoing text repeats a private
+  `prt:ask` note verbatim (see below).
+- `tooling-reviewed: <labels>` — required if it trips the pipeline-mechanics
+  lint (see below). Unlike the two above it has to name the hits it excuses; a
+  bare `yes` is refused.
+
+**These survive `prt draft` regenerating the file, and nothing else in
+`prt:doc` does.** They are the only keys carried over from the previous
+generation; every line above them is re-measured, because four of them are the
+preconditions the submitter re-checks against live GitHub and a carried one
+would be checked against itself. An acknowledgement is re-earned rather than
+inherited, so it travels only as far as the text it excused:
+
+- `tooling-reviewed` carries label by label. `tier, consensus` over a draft that
+  still trips only `tier` comes back as `tooling-reviewed: tier`. It can shrink
+  and it can never grow.
+- The two blanket `yes` hatches excuse the whole file, so they carry only when
+  their lint still fires *and* every outgoing passage in the new draft is
+  byte-for-byte one you already read. Any new or reworded body, inline comment
+  or thread reply drops them and you are asked again.
+
+`prt draft` prints every acknowledgement it kept and every one it dropped, with
+the reason. `--no-carry` drops them along with the notes, and `prt nudge` carries
+none of them — a reminder replaces the outgoing text with generated boilerplate,
+so every acknowledgement would have nothing left to excuse anyway.
 
 ### `prt:verdict` — the review resolution
 
@@ -323,6 +375,7 @@ blocking: yes
 closed: no
 follows: a2
 raised: g4
+q: sha256:9f1c0b4e2a7d5c8130ee46b2
 -->
 this one's wrong — the null check is upstream, drop it
 <!-- /prt -->
@@ -330,16 +383,17 @@ this one's wrong — the null check is upstream, drop it
 
 | field | values | who writes it | notes |
 |---|---|---|---|
-| `id` | `a<n>`, unique for the life of the PR | `prt` | assigned by promotion; a retired id is never reissued |
+| `id` | `a<n>`, unique for the life of the PR | `prt` | assigned by promotion, from a high-water mark kept in the PR's `state.json` — so a retired id is not reissued once the ask itself has left the file |
 | `re` | a block `id` · `verdict` · `body` · `general` · `gone` | you, maintained by `prt` | defaults to `general` |
 | `blocking` | `yes` / `no` | you | **defaults to `yes`** — see below |
 | `closed` | `yes` / `no` | **you only** | withdraw your own question |
 | `follows` | an earlier ask id | you | chains a follow-up when an answer did not satisfy |
 | `raised` | `g<N>` | `prt` | the generation you wrote it in |
 | `was` | `path:line` | `prt` | only on an orphan (`re: gone`) |
+| `q` | `sha256:…` | `prt` | the question as promotion wrote it — see *Rewriting a note reopens it* |
 
 **The shorthand.** Typing four lines while reading a draft is friction you will
-not pay at 23:00, so type this instead, at column 0, anywhere *outside* a block:
+not pay at 23:00, so type this instead, anywhere in the file:
 
 ```
 @ai i3 — drop this, the null check upstream makes it unreachable
@@ -347,10 +401,45 @@ not pay at 23:00, so type this instead, at column 0, anywhere *outside* a block:
 @ai follows a5 — still not convinced; the clamp moved, it did not go away.
 ```
 
-A note runs to the next blank line. A leading `i3` / `verdict` / `body` /
+One rule reads a note wherever it sits — gap, block body, or block header, in a
+block whose sentinel you have not finished typing, in a block whose kind is a
+typo — so the same keystrokes mean the same thing everywhere. Markdown
+decoration in front of the token is ignored, because a stray italic marker left
+over from the surrounding prose is how the first note that mattered went unread.
+The decoration a note may wear is exactly what markdown calls a leader: the
+blockquote `>`, the emphasis `*` and `_`, all four bullet markers `-` `*` `+`,
+an ordered marker `1.` or `1)`, leading whitespace, and any combination of them
+(`> - *@ai …`). What the line may **not** carry before `@ai` is anything else,
+and the token must be whole: `@ai-worker`, `@ai.assistant@…` and `@aider` are
+handles, not notes.
+
+**Backticks are the escape, everywhere.** To write *about* the token rather than
+leave a note, put it in backticks: `` `@ai` ``. Indenting used to work in a gap
+and does not any more — one escape that holds in every part of the file beats
+two that disagree about the middle of a `prt:body`.
+
+A note runs to the next blank line — or, if you wrote it as a list item (any of
+`-` `*` `+` `1.` `1)`), to the next item at the same level, so `- @ai …` inside
+a list takes only its own bullet. A leading `i3` / `verdict` / `body` /
 `general` / `follows aN` binds it; otherwise it binds to the **nearest preceding
 block**, and the promotion prints what it inferred so the guess is never silent.
+A `##` heading **in a gap** between that block and the note stops the search at
+`general`, because a note under a new heading is not a reaction to whatever came
+before it — most of all under `## Resolved notes` at the foot of the file, where
+the nearest preceding block would otherwise be hundreds of lines above. A `##`
+heading inside a block's *body* is your markdown, not a section boundary, and
+does not move the binding.
+
+**Naming a note chains off it rather than targeting it.** `@ai a1 — still not
+convinced` is the same thing as `@ai follows a1 — …`, and the same thing a note
+typed inside a1's own `prt:ask` or `prt:answer` becomes: `follows: a1`, with
+`re:` inherited from a1 so the follow-up sits beside the comment the
+conversation is about. An ask is not a comment, so binding `re: a1` would leave
+the next `prt draft` unable to find it and orphan the note to `re: gone`.
 `prt draft` promotes automatically; `prt ask <N> --promote` does it on demand.
+Ids are handed out in **file order**, whether a note was typed in a gap or lifted
+out of a block, so the promotion report lists your notes in the order you wrote
+them.
 
 The leading token is only *removed* from your text when a punctuation separator
 follows it — `@ai i3 — drop this` stores "drop this", while `@ai i3 drop this`
@@ -364,11 +453,103 @@ practice, and a silently swallowed instruction is the worst thing this format
 could do. So it reaches both `prt validate` (exit 1) and the submitter, which
 refuses. Promoted, or the submit stops — there is no third path.
 
-**`@ai` inside a body that posts is a hard error**, and the text is *not*
-stripped: the format promises a body is posted byte for byte, so quietly editing
-it would decouple the posted bytes from `outbox/<txId>/approved.md`. To write
-about `@ai` as prose, indent it one space — the same escape the format already
-teaches for sentinels.
+That is the invariant, and it holds for **every `@ai` line, in every placement**:
+named by an error, and never overwritten without a word. It is pinned by a test
+that types one into a gap, a posted body, a block's header, `prt:log`, an
+unknown block kind, a `prt:ask` body and a `prt:answer` body, and requires all
+seven to produce a parse error, an exit-1 `prt validate` and an `!` row. There is
+exactly one line it does not cover, and it is the one the next section is about:
+a `prt:ask`'s own question, which is not a new note but an old one being
+rewritten — a different mechanism, and not a silent one either. See
+*Rewriting a note reopens it*.
+
+`prt ask <N>` lists un-promoted notes beside the promoted ones, so a note is
+visible from the moment it is typed rather than from the moment it is promoted;
+and `prt draft` and `prt nudge` both refuse to regenerate over a note that would
+not survive it, naming the line (pass `--no-carry` to drop it deliberately — the
+old file is kept in `history/`).
+
+A note somewhere `--promote` can reach is additionally **promoted**, or
+**refused** by line and reason on the same run. The places it cannot reach —
+`prt:log`, a block's header, a block whose sentinel or terminator is broken, a
+block of an unknown kind — get a third line, `NOT PROMOTED`, carrying the same
+remedy `prt ask <N>` prints beside the `!` row. `no un-promoted @ai notes` is
+printed only over a file the scanner finds none in, so all three commands now
+agree about whether a file is clear.
+
+**`@ai` inside a block is still a hard error**, and the text is *not* stripped at
+submit time: the format promises a body is posted byte for byte, so quietly
+editing it would decouple the posted bytes from `outbox/<txId>/approved.md`. The
+remedy is `prt ask <N> --promote`, which **lifts** the note out on disk — it
+deletes the note's line from the block and writes a `prt:ask` just after that
+block's `<!-- /prt -->`, bound to the block it was typed in. The old file goes to
+`history/` first, and you see the edit in the file before you arm it.
+
+A lift takes exactly **one line**, and only when the line below it is blank, an
+HTML comment, another note, the sibling list item that ends it, or the end of the
+block. In a gap a note may run to the end of its paragraph, which is free because
+nothing in a gap is posted; in a body the next line is usually the next sentence
+of your review, and there is no way to tell "the rest of my note" from "the rest
+of my summary". So a note butted straight up against the line below it is
+reported and left where it is. **Move it, and everything that belongs to it, out
+of the block into a gap** — a gap note runs to the end of its paragraph, so the
+continuation comes with it whichever reading was true. A blank line after the
+note works too, but it lifts the note's *first line only* and the rest stays in
+the block and posts, so reach for it only when the line below is the review's own
+text; and if the line was never a note, put the token in backticks. A note that
+is a block's *entire* body is left alone too
+whenever emptying that block would change the file rather than shorten it:
+emptying a `prt:body` posts a review with no summary at all, an emptied
+`prt:ask` parses as a free stub and takes its `id:` with it, and an emptied
+`prt:answer` with a terminal disposition stops parsing. Whether the block should
+go is your call.
+
+**A note inside a `prt:ask` or `prt:answer` body is lifted like any other, and
+binds with `follows:`.** That is the natural place to object to an answer you
+have just read, so the words have to go somewhere: the lift writes a new
+`prt:ask` after the pair, `follows:` the ask it was written under, which reopens
+the conversation the answer had closed. The one line that is *not* read as a new
+note is the opening line of a `prt:ask` body — the `prt:ask` around it is the
+promotion, so those words were already collected and handed to the model.
+
+That exemption is about the words the **tool** wrote there, and it is not a blind
+spot for words you write over them: typing a new question into that line does not
+make a second note, it changes the question — and a question that no longer
+matches its `q:` reopens the note. See *Rewriting a note reopens it*.
+
+A **bulleted** note is fenced by the next item at its own level, so `- @ai …`
+inside a list is lifted and the list closes up around it. A *deeper* item is not
+a fence — it can be a child of the note — and a note that is not itself a list
+item is not fenced by one either: `@ai please:` followed by two bullets is a note
+whose bullets belong to it, and taking only the first line would truncate your
+instruction into the review, so that is reported instead. Both are the case the
+paragraph above is about: move the note and its continuation out of the block,
+rather than fencing it with a blank line and leaving the rest to post.
+
+Four places are never lifted at all, because a splice there would destroy what
+the block is for or delete lines that may belong to a different block:
+
+- `prt:log`, the submitter's own append-only record;
+- a block's `<!-- prt:… -->` **header**, where `id:` and `post:` live;
+- a block missing its `<!-- /prt -->`, or whose sentinel never reaches its
+  `-->` — its body runs on to the next sentinel, so its extent is a guess;
+- a block whose kind is not one this tool knows (`prt:scratchpad`, `prt:note`).
+
+These are the ones `--promote` cannot lift, and it says so rather than going
+quiet: each prints as `NOT PROMOTED`, with the same remedy `prt ask <N>` gives
+beside its `!` row. `prt validate` names them by line, and `prt draft` and
+`prt nudge` refuse to regenerate over them. Do what the row says — move the note
+below the `-->`, close the sentinel, fix the kind — and it is promoted like any
+other.
+
+**What a lift leaves behind is one blank line, exactly where the note was.** So
+when your note stood at a place that was already a paragraph boundary — blank
+above, blank below, or written straight under a paragraph that a blank already
+closed — the body comes back byte-identical. When you typed it into the *middle*
+of a paragraph, splitting it, the split stays: `A.` `B.` on consecutive lines,
+annotated between them, come back with a blank line between them. Whitespace
+only, never your prose, and you see it in the file before you arm it — but if
+the paragraph mattered, close it back up yourself.
 
 ### `prt:answer` — the model's reply. Never posted.
 
@@ -387,32 +568,88 @@ Dropped it. You are right that the upstream check makes the branch unreachable.
 |---|---|---|
 | `to` | an ask `id` in this file | must resolve, else error |
 | `disposition` | `addressed` · `declined` · `deferred` | strict; a typo is an error, never a silent value |
-| `did` | `drop-inline <id>` · `edit-inline <id>` · `edit-thread <id>` · `edit-body` · `edit-verdict` · `answer-only` · `none` | `drop-inline` is cross-checked |
+| `did` | `drop-inline <id>` · `edit-inline <id>` · `edit-thread <id>` · `edit-body` · `edit-verdict` · `answer-only` · `none` | `drop-inline` is cross-checked against the round `in:` names |
 | `in` | `g<N>` | the generation it was answered in |
+| `re-q` | `sha256:…` | written by `prt` only when the question moves out from under this answer; absent means "the ask's `q:`" |
 
 An answer carries no `id:` — it is not postable, so it must not claim a slot in
 the id namespace.
 
+**One terminal answer per question, not per ask.** A second `addressed` or
+`declined` for the same wording is an error. A second one for a question that has
+since been *rewritten* is not — that is how a reopened note gets closed again.
+
 **Two guards make the model's claim honest.** A body is mandatory for
 `addressed` and `declined`, so it cannot mark its own homework done without
 showing the work. And `did: drop-inline i3` is checked against the file: if `i3`
-is absent, or still says `post: true`, the file will not parse. The model can
-write a wrong paragraph; it cannot write one that contradicts the file's state.
+still says `post: true` the file will not parse, in any round; and if `i3` is
+absent altogether, the file will not parse **in the round the answer was written
+in** — `in: g<N>` is what dates it.
+
+That round bound is the whole of the second guard's scope, and it is deliberate.
+A dropped finding leaves `findings.json`, so one generation later "there is no
+i3" is not a contradiction, it is what dropping i3 *means* — and reading it as an
+error there made an honest answer unparseable, which in turn made `prt draft`
+refuse (it will not regenerate over notes it cannot read) and left the file with
+no exit but `--no-carry` or a falsified `did:`. So the guard bites where a wrong
+claim is still a wrong claim: the model cannot write a paragraph that
+contradicts the file it is writing into.
 
 **State is derived, never stored.** A stored `state:` field and an answer body
 are two facts that can disagree — "addressed" with nothing to show for it.
 Deriving makes that unrepresentable:
 
 ```
-closed: yes                        -> withdrawn
-a terminal answer (addressed|declined) -> that disposition
-a deferred answer                  -> deferred (still open)
-otherwise                          -> open
+closed: yes                                     -> withdrawn
+a LIVE terminal answer (addressed|declined)     -> that disposition
+a LIVE deferred answer                          -> deferred (still open)
+answers, but none of them live                  -> edited (still open)
+otherwise                                       -> open
 ```
 
-There is no reopen transition. Unsatisfied by an answer? Write a new note with
-`follows: aN` — the chain stays linear and auditable. (Deleting the answer block
-also reopens it, precisely because the state is derived.)
+An answer is **live** when it still answers the question the note carries: its
+own `re-q:` if it has one, otherwise the ask's `q:`. Neither present — a note
+written before those fields existed — is live, so nothing in the store you
+already have changes state.
+
+There is no reopen transition you *write*. Unsatisfied by an answer? Write a new
+note with `follows: aN` — the chain stays linear and auditable. (Deleting the
+answer block also reopens it, precisely because the state is derived.)
+
+### Rewriting a note reopens it
+
+Typing over the question is the other natural way to escalate — the model got it
+wrong, the words are right there — so it means what it looks like:
+
+- `prt` records the question at the moment it promotes it, as `q:`. That is the
+  one moment it can honestly say "these are the words I wrote".
+- Rewrite the question and the answer under it stops being an answer to it. The
+  note goes to **`edited`**, which is open: `prt ask` lists it with `●`, and
+  both `prt validate` and `prt submit` refuse it. (`blocking: no` demotes that
+  to a `warning:` in `validate` and stops nothing, which is what the field
+  means — named, not enforced.)
+- `prt ask <N> --promote` then accepts the new wording — it moves `q:` forward
+  and writes `re-q:` onto the old answer, pinning it to the wording it really
+  answered. The note stays open; the old answer stays on the page.
+- Answering it again closes it. The new answer needs no `re-q:` of its own.
+
+Regeneration carries all of that: `q:` and `re-q:` are copied, never recomputed,
+so a `prt draft` cannot quietly re-close a note you have just reopened.
+
+**The limit.** A note promoted before `q:` existed has no record of its original
+wording, so editing it is undetectable and it stays closed. Nothing spuriously
+reopens, which is the direction that matters, but the guarantee only covers notes
+`prt` created — from this version on, all of them. It follows the QUESTION only:
+editing an *answer* body changes nothing, because an answer is the model's record
+of what it did rather than a statement of what you asked. To object to an answer,
+type a note under it — that is lifted into a new ask with `follows:`.
+
+**Where a note sits is derived from that state too.** Open and deferred notes
+stay beside what they are about — a note on `i7` is unjudgeable away from `i7`'s
+text. The other three states are past tense, so the pair moves to
+`## Resolved notes` at the end (below). Nothing about the move is
+stored either: delete the answer and the note is open again, and the next
+`prt draft` puts it straight back beside its target.
 
 ### An open note refuses the submit
 
@@ -423,10 +660,11 @@ also reopens it, precisely because the state is derived.)
 The escape is one field: `blocking: no` for "just something to remember next
 round", or `closed: yes` to withdraw the question.
 
-This lives in `preflight()`, deliberately not in the parser. An open note is the
-*normal* state of a draft being worked on, so as a parse error it would make
-every mid-round `prt validate` fail — and the revisit loop depends on that
-signal staying clean.
+This lives in `contentRefusals()`, which `preflight` and `prt validate` both
+run — so the two commands agree about it — and deliberately **not** in the
+parser. As a parse error it would also stop `prt draft`, since `carryAsks`
+refuses to regenerate over notes it cannot read: the round in which you are
+answering your own note would be the round you could not draft.
 
 ### Dropping a comment because of a note
 
@@ -444,21 +682,86 @@ submission. Clear it with `ask-quote-reviewed: yes` in `prt:doc` if the sentence
 genuinely belongs in the review; only you can, since the model may not edit
 `prt:doc`.
 
+### `## Resolved notes`
+
+The log of notes that are already handled, at the end of the file. A note with a
+terminal state — `addressed`, `declined` or `withdrawn` — is no longer live work,
+so it moves here with its answers, as **one verbatim slice of the file**: the
+question is your bytes and the answer is the model's, and neither is re-rendered
+on the way. Above each pair is one derived line — id, state, `did:` verb,
+generation, and the first sentence of the answer's **last** paragraph — because
+an answer opens with what was changed and closes with what you still have to
+weigh, and the closing half is the half that decides whether the pair is worth
+opening. It is *derived* — computed from the ask and its answers, never stored as
+a field — but it is derived when the pair is filed and written into the file as
+ordinary text, so it is bytes from then on.
+
+`prt draft` places them here on every regeneration; `prt ask <N> --tidy` does it
+in the round you answered in. `carryAsks` retires a resolved note one generation
+later, so the section is bounded to what you have just handled, and the rest is
+in `history/`.
+
+**Deleting an answer reopens its note, and the note blocks the submit again** —
+that state is derived on every read, so it is always right. The file's furniture
+is bytes and follows one step behind, so both writers reconcile it: `prt draft`
+re-renders, and `--tidy` reads the section on every run and
+
+- rewrites a handling line that no longer derives — the answer under it changed,
+  so a `declined` you rewrote to `addressed` stops standing as `declined`;
+- moves a **reopened** pair back out of the section, beside the block it is
+  `re:` bound to, dropping the line that called it handled;
+- drops the heading and its framing when nothing is left under them — and never
+  when a paragraph of yours is.
+
+**Adding your own words to a handling line is safe.** The line is the natural
+place to push back on what the model just reported, so a line that *begins* with
+what the state derives to now is read as that line plus your sentence: the
+derived half is already correct, and nothing is rewritten. Only a line that no
+longer derives at all is replaced — and when the replacement takes bytes the
+tool did not write, the run says which bytes rather than only naming the state.
+
+All of it is reported by id, like every other move. Between your edit and the
+next of those two commands the section still reads as it was last written, so
+`prt ask <N>` remains the thing to believe.
+
+It is **not** inside `prt:log`, even though that is literally the log at the end
+of the file, and the reasons are mechanical rather than aesthetic. `tokenize`
+has no nesting, so a `prt:ask` inside `prt:log` ends the log block at the ask's
+own sentinel and the file stops parsing. `appendLog` splices at the first
+`<!-- /prt -->` after the log sentinel, which would then be the note's — so the
+next submit would write its timestamped line into the middle of your question.
+And `contentHash` cuts the file at that sentinel, so a note moved inside it would
+drop out of the hash that records "the human edited this draft".
+
+A pair is left where it is, with a printed reason, whenever the move cannot be
+proved lossless: prose of yours sitting between the note and its answer, an
+unbalanced `<details>` wrapper, or two blocks claiming one id. And nothing moves
+at all in a file with an unterminated block, whose spans run into the block
+below.
+
 ### Notes and hashes
 
 `payloadHash` excludes notes entirely, so annotating a file does **not**
 invalidate a payload that was already approved. `contentHash` includes them,
-because writing one *is* a human edit.
+because writing one *is* a human edit — and `## Resolved notes` sits above the
+`prt:log` sentinel, which is where `contentHash` stops looking, so filing a note
+stays a visible edit rather than a silent one.
 
 ### `prt:context` / `prt:notes` / `prt:log`
 
 Never posted. `context` holds the generated evidence, `notes` holds dropped
-findings, `log` is the append-only activity record the submitter writes.
+findings, `log` is the append-only activity record the submitter writes. Its own
+`## Activity log` heading lives *inside* that block — the section above is a
+different log, and the footer says which is which.
 
 ## What happens when you set `Status: ready`
 
-1. **Capture** — the file is read twice and the two reads must be identical, so a
-   half-saved editor buffer can never be captured. The exact bytes are copied to
+1. **Capture** — the file is read twice, 150ms apart, and the two reads must be
+   identical, so a buffer still being written is refused rather than captured.
+   (It narrows the window; it does not close it — an editor that pauses longer
+   than that between two writes can present the same partial file twice. The
+   watcher's `quiesceSeconds` is the other half of the same defence.) The exact
+   bytes are copied to
    `outbox/<txId>/approved.md` and journalled in `outbox/<txId>/tx.json`. Status
    becomes `queued`; from here your edits no longer affect this run.
 2. **Preflight** — every precondition is re-checked against live GitHub:
@@ -468,7 +771,8 @@ findings, `log` is the append-only activity record the submitter writes.
    - every inline anchor still exists in the diff
    - every thread precondition still holds
    - no open blocking `prt:ask` note is left unanswered
-   - the security lint (below), and the ask-quote lint
+   - the security lint and the pipeline-mechanics lint (both below), and the
+     ask-quote lint
 
    Any failure ⇒ `Status: blocked`, reasons appended to the activity log,
    **nothing posted**.
@@ -498,9 +802,52 @@ Outgoing text matching `CVE-…`, "vulnerability", "exploit", "RCE", "privilege
 escalation", "auth bypass", "security flaw" blocks the submission. Apache
 Pulsar's rule is absolute: never disclose a vulnerability — or the security
 nature of a change — in a public PR (`SECURITY.md`). If the wording is genuinely
-not a disclosure, add `security-reviewed: yes` to the `prt:doc` block.
+not a disclosure, add `security-reviewed: yes` to the `prt:doc` block. It is
+carried into the next generation as long as that generation's outgoing text is
+text you have already read (see `prt:doc` above).
 
 Disable with `"securityLint": false` in `config.json` — but consider why first.
+
+## The pipeline-mechanics lint
+
+**Disclosing that AI assisted is legal and stays legal.** "I ran an AI-assisted
+review of this PR", "a local review with Claude Code", an `Assisted-by:` trailer,
+naming which models ran — all of it posts. apache/pulsar's own `AGENTS.md` asks
+contributors to *consider* exactly that attribution, under the ASF Generative
+Tooling guidance it links. This lint does not touch any of it.
+
+What it refuses is the pipeline's *internal mechanics* leaking out of
+`prt:context` into a body: the **tier**, the **effort**, the **round** numbers,
+the internal **roles** (adjudicator, validator, refutation pass), the **shape**
+(`two-model`, `single-reviewer`), and **which pass raised a finding**. Those are
+terms of art from `pr-review`'s own report format; they mean nothing to a Pulsar
+reader and imply a rigour ranking nobody asked for.
+
+Nine phrases, and every one of them is contextual — `tier`, `round 2`,
+`validator`, `consensus` and `cross-validate` are all ordinary Pulsar vocabulary
+(tiered storage, SASL handshake rounds, `*Validator` types, BookKeeper's
+consensus, PIP-478's config axes). A hit needs the word standing next to the
+pipeline sense of itself: `` Tier `lean` ``, `the round-3 refute pass`, `effort
+xhigh`, `not the two-model consensus pipeline`, `the reviewers split on it`.
+The measurements behind each are in the `toolingLint` doc comment.
+
+An earlier version had a second arm that blocked *this* PR's own reviewer names.
+It is deleted: over 33,945 real apache/pulsar comments it flagged 77, and 71 of
+those 77 were deliberate disclosures written by the maintainer himself.
+
+The scan covers exactly what `planActions` will post and nothing else, so its
+scope narrows with `event:` — under `REPLY` only the thread bodies are linted,
+because only the thread bodies are sent.
+
+`prt validate` refuses over a hit, in the same round that wrote it, printing the
+same sentence `prt submit` refuses with. If a hit is genuinely about the code, or you do mean to
+describe the pipeline, add `tooling-reviewed: <the labels it printed>` to the
+`prt:doc` block. It has to name them: one acknowledged `tier` must not silence an
+unrelated `reviewer-split` somewhere else in the same file. Naming them is also
+what lets `prt draft` carry the hatch label by label into the next generation,
+keeping only the labels that generation still trips (see `prt:doc` above).
+
+Disable with `"toolingLint": false` in `config.json` — but consider why first.
 
 ## Configuration
 
@@ -521,6 +868,7 @@ Disable with `"securityLint": false` in `config.json` — but consider why first
   "quiesceSeconds": 3,
   "workflowApprovalWaitSeconds": 60,
   "securityLint": true,
+  "toolingLint": true,
   "requireExplicitApprove": true,
   "cleanupMode": "archive"
 }

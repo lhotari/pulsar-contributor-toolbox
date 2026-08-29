@@ -16,7 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 
-import { parseActionFile, planActions, contentHash, payloadHash, setStatus, setPrActionField, appendLog, blockingAsks } from './actionfile.mjs';
+import { parseActionFile, planActions, contentHash, payloadHash, setStatus, setPrActionField, appendLog, blockingAsks, HUMAN_DOC_KEYS } from './actionfile.mjs';
 import { parseDiff, commentableAnchors, validateAnchor } from './diff.mjs';
 import {
   prDiff, fetchPr, submitReview, replyToComment, resolveThread, pendingReviews, describeApiError, httpStatusOf,
@@ -88,8 +88,12 @@ export function findOpenTx(prPath) {
 }
 
 /**
- * Step 1 — capture. Reads `review.md` twice and requires the two reads to be
- * identical, so a half-saved editor buffer can never be captured. Produces an
+ * Step 1 — capture. Reads `review.md` twice, 150ms apart, and requires the two
+ * reads to be identical, so a buffer still being written is refused rather than
+ * captured. That narrows the window rather than closing it: an editor that
+ * pauses longer than the interval between two writes can present the same
+ * partial file to both reads, which is why the watcher also waits for
+ * `quiesceSeconds` of no modification before it acts at all. Produces an
  * immutable snapshot; from here on the human may keep editing the file without
  * affecting what gets posted.
  */
@@ -240,6 +244,35 @@ export async function preflight(ctx, parsed, tx) {
     }
   }
 
+  reasons.push(...contentRefusals(parsed, config));
+
+  return { reasons, pr, currentDiff, anchorProblems };
+}
+
+/**
+ * The refusals that are decidable from the bytes alone — no network, no clock,
+ * no live PR.
+ *
+ * It exists as its own function because `prt validate` has to reach the same
+ * verdict as `prt submit` on everything it is able to check, and the only way to
+ * guarantee that is for both to run this code. Written out twice they drifted
+ * once already: `validate` grew a copy of the pipeline-mechanics lint and none
+ * of the other three, then printed `✓` and exited 0 over a file carrying
+ * "remote code execution" — which is exactly what a batch loop gates on.
+ *
+ * The split is offline/online, NOT important/unimportant. What stays in
+ * `preflight` is everything that depends on state this function cannot see: the
+ * PR still being open, the head not having moved, no pending review of yours,
+ * the threads where the draft left them, and the anchors against the diff of the
+ * moment. `capture` adds the two questions about *when* rather than *what* —
+ * `Status:` has to read `ready`, and there has to be something left to post.
+ *
+ * Order is the order a human should read them in: a security leak first, then
+ * their own unanswered note, then the two lints about the outgoing prose.
+ */
+export function contentRefusals(parsed, config = {}) {
+  const reasons = [];
+
   if (config.securityLint) {
     const hits = securityLint(parsed);
     if (hits.length) {
@@ -250,19 +283,45 @@ export async function preflight(ctx, parsed, tx) {
     }
   }
 
-  // An unanswered note of your own refuses the post. This lives in preflight,
-  // not in `parseActionFile`: an open ask is the NORMAL state of a draft being
-  // worked on, so as a parse error it would make every mid-round `prt validate`
-  // fail — and the revisit loop depends on that signal staying clean.
+  // An unanswered note of your own refuses the post. This lives here and not in
+  // `parseActionFile`: an open ask is the NORMAL state of a draft being worked
+  // on, and as a parse error it would also stop `prt draft` from regenerating —
+  // `carryAsks` refuses a file whose notes do not parse — so the round in which
+  // the human is answering their own note would be the round they could not
+  // draft. It is still a refusal, and `prt validate` says so, because a file
+  // that cannot post is a file a batch loop must not arm.
   //
   // The failure it prevents is real: arming a batch days later with your own
   // objection three lines above, and posting under your own name a review you
   // had already said was wrong.
+  //
+  // A note whose QUESTION was rewritten after it was answered says so, in those
+  // words. "Still open" would be the tool describing a note it can see an
+  // `addressed` answer under, and the human reading that would reasonably go
+  // looking for the answer rather than for their own edit.
   for (const ask of blockingAsks(parsed)) {
-    reasons.push(
-      `note "${ask.id}"${ask.re && ask.re !== 'general' ? ` (on ${ask.re})` : ''} is still open: ` +
-        `"${firstLine(ask.question)}". Answer it, or set \`blocking: no\` to defer it, or \`closed: yes\` to withdraw it.`,
-    );
+    const on = ask.re && ask.re !== 'general' ? ` (on ${ask.re})` : '';
+    reasons.push(ask.state === 'edited'
+      ? `note "${ask.id}"${on} was rewritten after it was answered, so the answer below it is not an answer to it: `
+        + `"${firstLine(ask.question)}". Answer it again (\`prt ask ${parsed.doc?.pr ?? '<N>'} --promote\` accepts the new wording first), `
+        + 'or set `blocking: no` to defer it, or `closed: yes` to withdraw it.'
+      : `note "${ask.id}"${on} is still open: `
+        + `"${firstLine(ask.question)}". Answer it, or set \`blocking: no\` to defer it, or \`closed: yes\` to withdraw it.`);
+  }
+
+  if (config.toolingLint) {
+    const hits = toolingLint(parsed);
+    if (hits.length) {
+      reasons.push(
+        `the outgoing text describes how this review was run: ${hits
+          .map((h) => `${h.label} (in ${h.where.join(', ')})`)
+          .join(', ')}. Tiers, efforts, rounds, roles and which pass raised a finding stay in ` +
+          '`prt:context` (SKILL.md) — saying that AI assisted, and naming the models, does not. ' +
+          'If a hit is genuinely about the code, or you do mean to describe the pipeline, add ' +
+          `\`tooling-reviewed: ${hits.map((h) => h.label).join(', ')}\` to the \`<!-- prt:doc -->\` ` +
+          'block. It has to name the hits: a bare `yes` excuses nothing.',
+      );
+    }
   }
 
   if (config.askQuoteLint !== false) {
@@ -276,7 +335,7 @@ export async function preflight(ctx, parsed, tx) {
     }
   }
 
-  return { reasons, pr, currentDiff, anchorProblems };
+  return reasons;
 }
 
 function firstLine(s, max = 90) {
@@ -304,10 +363,31 @@ function wordsOf(s, { code = 'strip' } = {}) {
 }
 
 /**
+ * Every byte `planActions` will post, paired with the id of the action carrying
+ * it. Riding `planActions` rather than an exclusion list is what makes "what a
+ * lint scans" and "what GitHub receives" the same set by construction:
+ * `prt:context`, `prt:notes`, `prt:log`, `prt:ask` and `prt:answer` are not
+ * reachable from here, and a block kind added later is out of scope until it is
+ * wired up to post. It also means the scope narrows with `event:` — under
+ * `REPLY` only thread bodies are planned, so only thread bodies are linted.
+ */
+function outgoingTexts(parsed) {
+  const out = [];
+  for (const action of planActions(parsed)) {
+    if (action.kind === 'review') {
+      if (action.body) out.push(['body', action.body]);
+      for (const c of action.comments) out.push([c.id, c.body]);
+    } else if (action.kind === 'thread-reply') out.push([action.thread.id, action.thread.body]);
+    else if (action.kind === 'issue-comment') out.push([action.id, action.body]);
+  }
+  return out;
+}
+
+/**
  * The one leak the parser cannot close: the model folding a private note into
  * outgoing prose during a revision pass. SKILL.md already warns that revision
- * is where tooling attribution leaks, for the same reason — prose gets
- * reshuffled and provenance is lost.
+ * is where the pipeline's mechanics leak, for the same reason — prose gets
+ * reshuffled and what was private comes with it.
  *
  * 12 consecutive words with code stripped is essentially copy-paste detection.
  * A shorter run false-positives on the common case, where the note IS a
@@ -318,14 +398,7 @@ function wordsOf(s, { code = 'strip' } = {}) {
 export function askQuoteLint(parsed, { run = 12, whole = 6 } = {}) {
   if (parsed.doc?.['ask-quote-reviewed'] === 'yes') return [];
   if (!parsed.asks?.length) return [];
-  const outgoing = [];
-  for (const action of planActions(parsed)) {
-    if (action.kind === 'review') {
-      if (action.body) outgoing.push(action.body);
-      outgoing.push(...action.comments.map((c) => c.body));
-    } else if (action.kind === 'thread-reply') outgoing.push(action.thread.body);
-    else if (action.kind === 'issue-comment') outgoing.push(action.body);
-  }
+  const outgoing = outgoingTexts(parsed).map(([, text]) => text);
   const modes = ['strip', 'keep'];
   const haystacks = new Map(modes.map((m) => [m, outgoing.map((t) => wordsOf(t, { code: m }).join(' '))]));
   const hits = [];
@@ -357,25 +430,313 @@ export function askQuoteLint(parsed, { run = 12, whole = 6 } = {}) {
 
 export function securityLint(parsed) {
   if (parsed.doc['security-reviewed'] === 'yes') return [];
-  const texts = [];
-  for (const action of planActions(parsed)) {
-    if (action.kind === 'review') {
-      if (action.body) texts.push(action.body);
-      texts.push(...action.comments.map((c) => c.body));
-    } else if (action.kind === 'thread-reply') {
-      texts.push(action.thread.body);
-    } else if (action.kind === 'issue-comment') {
-      texts.push(action.body);
-    }
-  }
   const hits = new Set();
-  for (const t of texts) {
+  for (const [, t] of outgoingTexts(parsed)) {
     for (const re of SECURITY_PATTERNS) {
       const m = re.exec(t);
       if (m) hits.add(`"${m[0]}"`);
     }
   }
   return [...hits];
+}
+
+/**
+ * The internal mechanics of the pipeline, in the shapes prose actually takes
+ * when a revision pass folds them out of `prt:context` and into a body. Nine
+ * phrases, each measured against three corpora rather than guessed — see
+ * `toolingLint` for the numbers and for what was measured and thrown away.
+ *
+ * Every one is CONTEXTUAL, and that is the whole design. The bare words here —
+ * `tier`, `round 2`, `validator`, `consensus`, `cross-validate` — are ordinary
+ * Pulsar vocabulary (tiered storage, SASL handshake rounds, 30+ in-tree
+ * `*Validator` types, BookKeeper's consensus, PIP-478's two config axes), and a
+ * blocklist of the bare words was measured and thrown away. A hit needs the word
+ * standing next to the pipeline sense of itself.
+ */
+const TOOLING_PHRASES = [
+  // `Tier \`lean\``, `the codex tier` — never `Tier 0` or `2nd tier storage`.
+  ['tier', /\btiers?\b[^.\n]{0,24}\b(full|standard|lean|codex|solo)\b|\b(full|standard|lean|codex|solo)[- ]tiers?\b/i],
+  // `effort \`xhigh\``, `--effort high`. `xhigh` is distinctive on its own; the
+  // rest need the level adjacent, or "best effort basis(minimal impact" fires.
+  ['effort', /\beffort[\s:=`'"*_-]{1,4}(x?high|medium|low)\b|\bxhigh\b/i],
+  // A round number wearing a pipeline role — `(round 1, native reviewer)`,
+  // `the round-3 refute pass`. Never a bare `round 2`: that is a SASL handshake.
+  ['round', /\bround[- ]?[1-9]\b[\s,(:—-]{0,4}(native|refut\w+|cross[- ]?validat\w+|adversarial|independent|candidate|adjudicat\w+)\b|\bround[- ]?[1-9] (pass|reviewer|review|read|model)\b/i],
+  // `two-model`, `single-reviewer`. `pass` is deliberately NOT a noun here —
+  // PIP-478 and the whole v5 auth API are built on "single-pass" credentials,
+  // down to a `SinglePassAuthentication` type.
+  ['pipeline-shape', /\b(two|three|four|multi|single|dual)-(model|reviewer|agent)\b/i],
+  ['consensus', /\bconsensus\b[^.\n]{0,12}\b(pipeline|review|pass|round)\b/i],
+  ['adjudication', /\badjudicat\w*/i],
+  // Refutation / cross-validation as a named stage, in either word order:
+  // "a second Codex pass framed to refute", "the refutation pass could not".
+  ['refutation', /\b(refut\w+|cross[- ]?validat\w+)\b[^.\n]{0,12}\b(pass|round|reviewer|review|read)\b|\b(pass|round|reviewer|review|read)\b[^.\n]{0,24}\b(to refute|refutation|cross[- ]?validat\w+)\b/i],
+  // A finding attributed to a reviewer-of-N. Loose in the middle on purpose
+  // ("the reviewers, in the end, disagreed") and missing `passes` on purpose —
+  // pip-483.md reads "two passes — split first".
+  ['reviewer-split', /\b(reviewers?|reviews|readers)\b[^.\n]{0,30}\b(split|disagreed|diverged)\b/i],
+  // `validator` as a role returning a verdict, never as a Java type.
+  ['validator-role', /\b(one|both|two|each|a lone|a single|the other) validators?\b[^.\n]{0,28}\b(confirmed|refuted|flagged|raised|agreed|disagreed|split|enumerated|verdict)\b|\b(confirmed|refuted|flagged|raised)\b[^.\n]{0,16}\b(one|both|two|each|either) validators?\b/i],
+];
+
+/**
+ * The pipeline's INTERNAL MECHANICS, kept out of anything that posts.
+ *
+ * The line this draws is not "AI touched this review". Disclosing that is
+ * deliberate practice here, and apache/pulsar's own AGENTS.md:28-29 asks for the
+ * same thing ("Consider attributing AI assistance", an `Assisted-by:` trailer),
+ * under the ASF Generative Tooling guidance it links at :15. "I ran an
+ * AI-assisted review of this PR", "a local review with Claude Code", an
+ * `Assisted-by:` trailer, naming the models — all of that is a legitimate submit
+ * and this lint must never touch it.
+ *
+ * What stays private is the machinery: which TIER ran, at what EFFORT, in how
+ * many ROUNDS, with which internal ROLES (adjudicator, validator, refutation
+ * pass), in what SHAPE (two-model, single-reviewer), and which pass a given
+ * finding came from. Those are terms of art from `pr-review/SKILL.md` that mean
+ * nothing to a Pulsar reader and imply a rigour ranking nobody asked for.
+ *
+ * That distinction is the whole of the rescope, and it cost an entire arm. An
+ * EARLIER VERSION had a second arm that derived a per-PR blocklist from this
+ * review's own reviewer names (the `**Draft produced by:**` line, plus
+ * `cache/findings.json`). It is DELETED, and should not be re-derived:
+ *
+ *   - It refused the practice above. Over 33,945 distinct apache/pulsar comments
+ *     the old lint flagged 78 — 77 of them by that arm alone, and 71 of those 77
+ *     written by the maintainer himself between 2024-09-29 and 2026-08-18:
+ *     "Local Claude Code review comment:", "Claude suggested this type of
+ *     optimization", "I performed analysis with Claude". One of them,
+ *     pull/26197#issuecomment-5048315727, is a disclosure on somebody else's PR,
+ *     which is exactly the reviewer-side provenance the arm called private.
+ *   - It could poison itself. `reviewers[]` is model-authored free text with no
+ *     schema constraint; a lineup written as "Claude Code (Opus 5)" derives the
+ *     token `code`, which matches 2,047 of those 33,945 comments (6.0%).
+ *   - It bought nothing the phrases miss. Both leaks below that it caught
+ *     (pr-26422, pr-26433) are also caught by `pipeline-shape`, `consensus` and
+ *     `adjudication`; the other two name no model at all.
+ *
+ * With it gone, `TOOLING_PHRASES` is the only arm, no model name is contraband,
+ * and `parsed` is the only input — nothing reads the store.
+ *
+ * CALIBRATION (2026-08-29). Three corpora, all re-measured for this rescope:
+ *
+ *  (a) REAL PUBLIC COMMENTS — 33,945 distinct bodies from
+ *      `gh api repos/apache/pulsar/{pulls,issues}/comments --paginate`
+ *      (42,500 raw, 2022-05-13 → 2026-08-29), 6,529 of them by lhotari. Each
+ *      fed through this function as a review body.
+ *  (b) THE LEAKS — the four passages this session actually drafted, from
+ *      pr-26422, pr-26433, pr-26434 and pr-24809. Pinned as fixtures in
+ *      `test/tooling-lint.test.mjs`; each MUST stay caught.
+ *  (c) REAL PULSAR PROSE — 140,207 paragraphs over 5,628 git-tracked files
+ *      (1,151,999 lines) of a master checkout, each fed in as a review body.
+ *      AGENTS.md, CLAUDE.md, CONTRIBUTING.md, `settings.gradle.kts` and
+ *      `pip/*.md` included.
+ *
+ * Per phrase, as (a) comments / (c) paragraphs / leaks caught:
+ *
+ *   tier            0 / 0 / 26433
+ *   effort          0 / 0 / 26433
+ *   round           0 / 0 / —
+ *   pipeline-shape  1 / 0 / 26433, 26434, 26422
+ *   consensus       0 / 0 / 26433, 26434, 26422
+ *   adjudication    0 / 0 / 26433, 26422
+ *   refutation      0 / 0 / 26433
+ *   reviewer-split  0 / 0 / 24809
+ *   validator-role  0 / 0 / —
+ *
+ * Whole set: 1 of 33,945 comments, 0 of 140,207 Pulsar paragraphs, 4 of 4 leaks.
+ *
+ * THE ONE HIT is real and is kept on purpose:
+ * pull/26271#issuecomment-5190365457, "two prior multi-model review passes on
+ * this branch missed". That is pipeline shape by the ruling's own definition, so
+ * the refusal is correct rather than a miscalibration — and narrowing `multi`
+ * away to score a clean zero would be fitting the pattern to one comment.
+ * `tooling-reviewed: pipeline-shape` clears it in one line.
+ *
+ * `round` and `validator-role` catch none of the four leaks, and are here only
+ * because the ruling names both categories and their zeros are load-bearing
+ * evidence rather than vacuous ones: the corpora contain 7 ordinary `round N`
+ * uses (SASL handshakes, PR-description rounds) and 155 ordinary `validator`
+ * uses, and the contextualisation is what takes both to zero. `validator-role`
+ * also has a recall witness — it catches "one validator enumerated every
+ * production construction of CompletionException", real text from pr-25939,
+ * which today sits in `prt:notes` and so is out of scope by one edit.
+ *
+ * MEASURED AND DELETED, so nobody re-derives them:
+ *   - The bare words, as (a) comments / (c) paragraphs. `\btiers?\b` = 2 / 35
+ *     (tiered storage, `settings.gradle.kts` sections); `\bround[- ][1-9]\b` =
+ *     2 / 5 (SASL handshakes); `\bvalidators?\b` = 30 / 125;
+ *     `\bcross[- ]?validat\w*` = 0 / 2 (pip-478's two config axes);
+ *     `(two|…)-(model|reviewer|agent|pass)` = 2 / 38 across 15 files — PIP-478
+ *     and the v5 auth API's "single-pass" credentials. Each of these is in the
+ *     shipped set only with context attached.
+ *   - `\badversarial\b` (2 / 0) and `\bindependent (reviewer|review|pass|read)\b`
+ *     (2 / 0). Both would refuse the maintainer's own disclosures — one of them
+ *     the flagship "Claude as the local reviewer plus OpenAI Codex
+ *     `gpt-5.6-sol` as a second independent pass". Neither catches a leak the
+ *     surviving phrases miss.
+ *   - `(two|three|four|2|3|4) rounds` (5 / 1: "2 rounds of snapshots"),
+ *     `\bround[- ]?[1-9]\b …(review|pass|finding)` (1 / 0: "I had round 2
+ *     reviewed independently"), `(raised|found) by …(adversarial|independent)
+ *     (pass|reviewer)` (1 / 0: "found by running an adversarial pass over the
+ *     fix itself"). All three are the maintainer disclosing his own process.
+ *   - `agreement line`, `native reviewer`, `\brefutation\b`, bare `\brefut(e|ed|
+ *     ing)\b`: 0/0, but each is a sentence memorised from one leak and none
+ *     catches anything the surviving phrases miss. A zero on a phrase the
+ *     corpora could never have produced is not evidence.
+ *   - `(LLM|AI)-assisted` and a vendor-name list. Both match the disclosure this
+ *     lint exists to leave alone — "I ran an AI-assisted review of this PR" is
+ *     the maintainer's own posted wording, and AGENTS.md:28 asks for the same
+ *     attribution from an author.
+ *
+ * KNOWN FALSE NEGATIVES, measured against the paraphrases an adversarial pass
+ * produced. Of 11 near-synonymous forms of the pr-24809 disclosure the shipped
+ * `reviewer-split` catches 10 — the previous narrow form caught 3. The one miss
+ * is "the two passes split on it", given up so pip-483's "two passes — split
+ * first" stays postable. Two whole-sentence paraphrases also escape everything:
+ * "one pass over the diff instead of the usual three rounds", and "Raised by the
+ * native reviewer, then confirmed on an independent second read by a different
+ * model". Both were reachable only by patterns that refuse real disclosures
+ * (see above), so the coverage is not there and is not claimed.
+ *
+ * THE HATCH names what it excuses: a comma-separated list of the labels this
+ * lint printed. A bare `yes` is refused on purpose. Whole-file booleans are
+ * wrong here twice over — one acknowledged `pipeline-shape` would mask an
+ * unrelated `reviewer-split` in another block of the same file, and a blanket
+ * hatch is the one a human re-types reflexively every round until it means
+ * nothing. Naming the labels is also what lets `carryDocHatches` carry this one
+ * across a regeneration label by label, keeping only the ones the new draft
+ * still trips, instead of all-or-nothing.
+ */
+export function toolingLint(parsed) {
+  const excused = new Set(excusedLabels(parsed.doc?.['tooling-reviewed']));
+  const phrases = TOOLING_PHRASES.filter(([label]) => !excused.has(label));
+  const found = new Map();
+  for (const [where, text] of outgoingTexts(parsed)) {
+    for (const [label, re] of phrases) {
+      if (!re.test(text)) continue;
+      if (!found.has(label)) found.set(label, { label, where: [] });
+      const hit = found.get(label);
+      if (!hit.where.includes(where)) hit.where.push(where);
+    }
+  }
+  return [...found.values()];
+}
+
+/** The labels a `tooling-reviewed:` value names. A bare `yes` names none. */
+function excusedLabels(value) {
+  return String(value ?? '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter((s) => s && s !== 'yes');
+}
+
+/**
+ * The three lint hatches, split by the only thing that changes how far one may
+ * travel: whether its value NAMES the hits it excuses.
+ *
+ * `tooling-reviewed` does, so it can be carried label by label.
+ * `security-reviewed` and `ask-quote-reviewed` are a bare `yes` over the whole
+ * file, so there is nothing in them to narrow and their rule has to be blunter.
+ */
+const LABELLED_HATCH = { key: 'tooling-reviewed', labels: (parsed) => toolingLint(parsed).map((h) => h.label) };
+const BLANKET_HATCHES = [
+  { key: 'security-reviewed', fires: (parsed) => securityLint(parsed).length > 0 },
+  { key: 'ask-quote-reviewed', fires: (parsed) => askQuoteLint(parsed).length > 0 },
+];
+
+/** The same file with its hatches removed, so a lint says what it would say unexcused. */
+function unhatched(parsed) {
+  const doc = { ...parsed.doc };
+  for (const key of HUMAN_DOC_KEYS) delete doc[key];
+  return { ...parsed, doc };
+}
+
+/**
+ * The `*-reviewed:` acknowledgements that survive from `prevText` into the
+ * freshly generated `nextText`.
+ *
+ * THE BUG THIS CLOSES is pre-existing and older than the pipeline-mechanics
+ * lint: `renderActionFile` emitted a fixed key list into `prt:doc` and took no
+ * previous doc at all, so every `prt draft` silently destroyed whatever hatch
+ * the human had typed. `security-reviewed: yes` — the documented escape from
+ * the security lint — evaporated on the next round, the same generated text
+ * blocked the same submit, and the human typed the same line again. A hatch
+ * that has to be re-typed every round is one that gets typed without being
+ * read.
+ *
+ * A HATCH IS RE-EARNED, NOT INHERITED, because it acknowledges specific text
+ * ("that `CVE-2026-12345` is the one already in the PR title") and a
+ * regeneration rewrites the text. Nothing survives that does not still have
+ * work to do:
+ *
+ *   - `tooling-reviewed` names its labels, so it carries the intersection:
+ *     `tier, consensus` over a draft that still trips only `tier` comes back as
+ *     `tooling-reviewed: tier`. It can shrink across a regeneration and it can
+ *     never grow, because a label the human did not write cannot be added by
+ *     carrying one that they did.
+ *   - The blanket `yes` hatches excuse the whole file, so a narrowing rule has
+ *     nothing to narrow to. They carry only when the lint still fires AND every
+ *     outgoing passage in the new draft appeared, byte for byte, in the file the
+ *     human acknowledged. Any body, inline comment or thread reply that is new
+ *     or reworded drops the hatch — including a second `CVE-…` appended to a
+ *     paragraph that already had one, which `securityLint` itself would not
+ *     report separately (it takes the first match of each pattern per text).
+ *
+ * WHY THE TWO RULES DIFFER, since the asymmetry is deliberate: the blast radius
+ * of a stale `security-reviewed: yes` is the whole file and the failure is a
+ * vulnerability disclosed on a public PR, so it is worth dropping the hatch on
+ * any text change at all. A stale `tooling-reviewed: tier` excuses one narrow,
+ * contextual regex, and the worst case is one sentence of pipeline jargon
+ * posting — so it keeps the per-label granularity the human typed rather than
+ * being reset by an unrelated edit elsewhere in the file.
+ *
+ * WHAT THIS DOES NOT PROMISE: `tooling-reviewed` is per label, not per passage,
+ * so the same label firing on DIFFERENT words still travels — a body that said
+ * ``Tier `lean` `` and now says "the codex tier" keeps `tooling-reviewed:
+ * tier`. Closing that would need the hatch to name a passage, which is neither
+ * the syntax the human types nor the one the docs describe. What it gets
+ * instead of silence is visibility: `prt draft` prints every key it carried and
+ * every key it dropped, with the reason.
+ *
+ * FAILING CLOSED COSTS NOTHING HERE. `parseActionFile` never throws and the
+ * three lints are total functions of its result, so a previous file this tool
+ * cannot read parses to no actions, no actions trip no lint, and every hatch is
+ * dropped. A wrong drop costs one re-typed line; a wrong carry costs a
+ * disclosure on somebody's pull request.
+ */
+export function carryDocHatches(prevText, nextText) {
+  const prev = parseActionFile(prevText);
+  const next = parseActionFile(nextText);
+  const carried = {};
+  const dropped = [];
+  const drop = (key, why) => dropped.push({ key, why });
+
+  const named = prev.doc?.[LABELLED_HATCH.key];
+  if (named !== undefined) {
+    const acknowledged = new Set(excusedLabels(named));
+    const kept = LABELLED_HATCH.labels(unhatched(next)).filter((label) => acknowledged.has(label));
+    if (kept.length) carried[LABELLED_HATCH.key] = kept.join(', ');
+    // A value naming nothing is one the lint already refuses, so say that
+    // rather than "the labels it named", which would be no labels at all.
+    else if (!acknowledged.size) drop(LABELLED_HATCH.key, `it named no label, and a bare \`yes\` excuses nothing there (it said "${named}")`);
+    else drop(LABELLED_HATCH.key, 'nothing in this generation trips the labels it named');
+  }
+
+  // One comparison for both blanket hatches: "is any outgoing passage new?".
+  // Asking it of the whole payload rather than of each lint's own hits is what
+  // makes it independent of how completely a lint enumerates what it found.
+  const before = new Set(outgoingTexts(prev).map(([, text]) => text));
+  const rewritten = outgoingTexts(next).some(([, text]) => !before.has(text));
+  for (const hatch of BLANKET_HATCHES) {
+    const written = prev.doc?.[hatch.key];
+    if (written === undefined) continue;
+    if (String(written).trim() !== 'yes') drop(hatch.key, `only \`yes\` acknowledges anything there, and it said "${written}"`);
+    else if (!hatch.fires(unhatched(next))) drop(hatch.key, 'nothing in this generation trips that lint any more');
+    else if (rewritten) drop(hatch.key, 'it excuses the whole file, and this generation has outgoing text that was not in the one you read');
+    else carried[hatch.key] = 'yes';
+  }
+  return { carried, dropped };
 }
 
 /**
