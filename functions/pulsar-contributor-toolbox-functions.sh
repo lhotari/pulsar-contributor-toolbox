@@ -1560,7 +1560,7 @@ function ptbx_cherry_pick_check() {
       local NEXT_RELEASE_NUMBER=$(pipx run semver bump patch $PROJECT_VERSION 2>/dev/null)
       PR_QUERY="$PR_QUERY,release/$NEXT_RELEASE_NUMBER"
     fi
-    PR_QUERY="$PR_QUERY -label:cherry-picked/$RELEASE_BRANCH NOT $RELEASE_BRANCH in:title"
+    PR_QUERY="$PR_QUERY -label:cherry-picked/$RELEASE_BRANCH -base:$RELEASE_BRANCH"
     local PR_NUMBERS=$(gh pr list -L 100 --search "$PR_QUERY" --json number --jq '["#"+(.[].number|tostring)] | join("|")')
     local SLUG=$(ptbx_gh_slug origin)
     if [[ -z "$PR_NUMBERS" ]]; then
@@ -1608,7 +1608,7 @@ function ptbx_cherry_pick_move_to_release() {
     local UPSTREAM=origin
     local CURRENTBRANCH=$(git rev-parse --abbrev-ref --symbolic-full-name HEAD)
     local RELEASE_BRANCH=$CURRENTBRANCH
-    local PR_QUERY="label:release/$RELEASE_NUMBER -label:cherry-picked/$RELEASE_BRANCH NOT $RELEASE_BRANCH in:title"
+    local PR_QUERY="label:release/$RELEASE_NUMBER -label:cherry-picked/$RELEASE_BRANCH -base:$RELEASE_BRANCH"
     local PR_NUMBERS=($(gh pr list -L 100 --search "$PR_QUERY" --state all --json number,state --jq '.[] | select(.state == "MERGED" or .state == "OPEN") | .number'))
     if [[ ${#PR_NUMBERS[@]} -eq 0 ]]; then
       echo "No PRs found for query: '$PR_QUERY'"
@@ -1635,7 +1635,7 @@ function ptbx_cherry_pick_add_to_release() {
     local UPSTREAM=origin
     local CURRENTBRANCH=$(git rev-parse --abbrev-ref --symbolic-full-name HEAD)
     local RELEASE_BRANCH=$CURRENTBRANCH
-    local PR_QUERY="label:release/$RELEASE_NUMBER label:cherry-picked/$RELEASE_BRANCH -label:release/$ADD_TO_RELEASE -milestone:$TARGET_BRANCH_MILESTONE -label:cherry-picked/$ADD_TO_RELEASE NOT $RELEASE_BRANCH in:title"
+    local PR_QUERY="label:release/$RELEASE_NUMBER label:cherry-picked/$RELEASE_BRANCH -label:release/$ADD_TO_RELEASE -milestone:$TARGET_BRANCH_MILESTONE -label:cherry-picked/$ADD_TO_RELEASE -base:$RELEASE_BRANCH"
     local PR_NUMBERS=($(gh pr list -L 100 --search "$PR_QUERY" --state all --json number,state --jq '.[] | select(.state == "MERGED" or .state == "OPEN") | .number'))
     if [[ ${#PR_NUMBERS[@]} -eq 0 ]]; then
       echo "No PRs found for query: '$PR_QUERY'"
