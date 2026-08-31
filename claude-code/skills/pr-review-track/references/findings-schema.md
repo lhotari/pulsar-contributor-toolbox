@@ -84,6 +84,16 @@ finding and can re-aim it rather than losing it.
 first line — the generator does that automatically from `severity` + `claim`, so
 do not repeat it.
 
+**Refer to code with permalinks, not with names.** `head` is the commit every
+link in this file is built against; `prt permalink <N> <path>:<start>-<end>`
+builds them. A short, central reference goes in as the **bare URL alone in its
+own paragraph** — `\n\nhttps://…#L192-L206\n\n` inside the body string — which is
+what makes GitHub render the code in the comment; anything longer, or anything
+inside a bullet or a table, takes the inline ``[`File.java:192-206`](…)`` form,
+which never expands. Not the lines the comment is already anchored to: GitHub
+shows those above it. The rules and the judgement behind them are in the skill's
+[Linking to code](../SKILL.md#linking-to-code).
+
 **`summary` and `findings[].body` are the only two fields that reach the pull
 request**, and neither may describe how the review was produced: no tier, no
 effort, no round numbers, no internal roles (adjudicator, validator, refutation
@@ -113,7 +123,10 @@ what you hope:
 **`threadAssessments[].evidence`** — concrete and checkable: commit SHAs, file and
 line numbers, test names, a paraphrase of what the author said. A thread that
 GitHub reports as resolved but has no code change behind it is a finding, not a
-closure.
+closure. These render as a bullet list in `review.md`, where nothing expands, so
+a location here takes the inline ``[`Consumer.java:989`](…)`` form — the human
+reading the draft can then check the claim in one click instead of opening the
+file. `threadAssessments[].reply` posts, so it follows the body rules above.
 
 Only threads with a `reply` or `resolve: true` are written as `post: true`;
 everything else lands as `post: false` context so the human can arm it manually.

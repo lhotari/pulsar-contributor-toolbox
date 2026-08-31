@@ -7,6 +7,7 @@
 import { parseDiff } from './diff.mjs';
 import { THREAD_STATES, summarizeCounts, recommendEvent } from './analyze.mjs';
 import { renderAsk, askHandlingLine, STATUSES, PR_ACTIONS_SECTION, RESOLVED_NOTES_SECTION, HUMAN_DOC_KEYS } from './actionfile.mjs';
+import { codeLink } from './links.mjs';
 
 const EVIDENCE_LABEL = {
   [THREAD_STATES.AWAITING_MY_REPLY]: 'the author replied and is waiting on me',
@@ -17,6 +18,23 @@ const EVIDENCE_LABEL = {
   [THREAD_STATES.RESOLVED_WITH_CHANGE]: 'resolved and the code changed',
   [THREAD_STATES.RESOLVED_BY_ME]: 'I resolved this myself',
 };
+
+/**
+ * The commit a thread's or a finding's line numbers actually mean, or null when
+ * there isn't one.
+ *
+ * `null` is the common, correct answer twice over. A `LEFT`-side anchor counts
+ * lines in the base, which the head permalink does not have; and GitHub nulls a
+ * thread's `line` once the thread is outdated, so what analysis carried is the
+ * *original* line — a number that means nothing at the head. Both cases keep the
+ * plain `path:line` they always had rather than a link to the wrong code.
+ */
+function anchorSha(analysis, anchor) {
+  if (!anchor?.path) return null;
+  if ((anchor.side ?? 'RIGHT') === 'LEFT') return null;
+  if (anchor.isOutdated) return null;
+  return analysis.headOid ?? null;
+}
 
 function fence(s) {
   return String(s ?? '').replace(/\r\n/g, '\n');
@@ -231,7 +249,7 @@ export function renderActionFile({
   if (deltaPaths.length) {
     out.push(`**Files changed since my review** (modules: ${modulesOf(deltaPaths).join(', ')}):`);
     out.push('');
-    for (const p of deltaPaths.slice(0, 40)) out.push(`- \`${p}\``);
+    for (const p of deltaPaths.slice(0, 40)) out.push(`- ${codeLink(repo, a.headOid, p, { full: true })}`);
     if (deltaPaths.length > 40) out.push(`- …and ${deltaPaths.length - 40} more`);
     out.push('');
   }
@@ -315,7 +333,7 @@ export function renderActionFile({
       const loc = `${t.path.split('/').pop()}:${t.line ?? '?'}`;
       out.push(`### thread ${n} — ${loc} — ${t.state}`);
       out.push('');
-      out.push(`\`${t.path}\`${t.line ? `:${t.line}` : ''} · ${EVIDENCE_LABEL[t.state] ?? t.state}`);
+      out.push(`${codeLink(repo, anchorSha(a, t), t.path, { line: t.startLine ?? t.line, endLine: t.startLine ? t.line : null, full: true })} · ${EVIDENCE_LABEL[t.state] ?? t.state}`);
       out.push('');
       if (assess?.evidence?.length) {
         out.push('Evidence:');
@@ -425,6 +443,14 @@ export function renderActionFile({
     const loc = f.path ? `${f.path.split('/').pop()}:${f.line ?? '?'}` : 'general';
     out.push(`### inline ${i + 1} — ${loc}`);
     out.push('');
+    if (f.path) {
+      out.push(codeLink(repo, anchorSha(a, f), f.path, {
+        line: f.endLine && f.line ? Math.min(f.line, f.endLine) : f.line,
+        endLine: f.endLine && f.line ? Math.max(f.line, f.endLine) : null,
+        full: true,
+      }));
+      out.push('');
+    }
     const meta = [f.confidence && `confidence ${f.confidence}`, f.agreement && `raised by ${f.agreement}`, f.crossValidation]
       .filter(Boolean)
       .join(' · ');
@@ -750,7 +776,7 @@ export function renderNudgeFile({ repo, analysis, generation = 1, reviewerLogin,
   out.push('The points with no reply and no code change at the anchor:');
   out.push('');
   for (const t of n.threads ?? []) {
-    out.push(`- \`${t.path}\`${t.line ? `:${t.line}` : ''} — ${t.days} days${t.url ? ` — <${t.url}>` : ''}`);
+    out.push(`- ${codeLink(repo, anchorSha(a, t), t.path, { line: t.line, full: true })} — ${t.days} days${t.url ? ` — <${t.url}>` : ''}`);
   }
   out.push('');
   out.push('> Check at least one of these yourself before arming this. An author who did');

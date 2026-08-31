@@ -22,6 +22,7 @@ import { analyzePr, fetchDelta, summarizeCounts, THREAD_STATES } from './lib/ana
 import { rankCandidates, scoreTracked } from './lib/rank.mjs';
 import { renderActionFile, renderNudgeFile, renderBoard, bucketOf, inlineIdFor, expectedBlockIds } from './lib/render.mjs';
 import { parseDiff, commentableAnchors, validateAnchor } from './lib/diff.mjs';
+import { blobUrl, codeLink, parseLocation, isSha } from './lib/links.mjs';
 import {
   parseActionFile, parseStatus, setStatus, contentHash, appendLog, planActions,
   PROTECTED_STATUSES, IN_FLIGHT_STATUSES, STATUSES,
@@ -123,6 +124,8 @@ COMMANDS.help = () => {
     context <N>                            full analysis as JSON (input for the model)
     diff <N> [--since <sha>]               the diff, or the diff since my last review
     anchors <N>                            commentable (path,line,side) positions
+    permalink <N> <path>:<lines>... [--sha S] [--markdown]
+                                           blob permalinks at the tracked head, for a review to link
     draft <N> [--findings f.json] [--kind initial|re-review]
                                            write review.md (carries notes; never over a protected file)
     ask [<N>...] [--promote] [--tidy]      read notes, promote @ai shorthand, file answered ones
@@ -538,6 +541,50 @@ function compress(nums) {
   }
   return out.join(',');
 }
+
+COMMANDS.permalink = async () => {
+  // Offline on purpose: everything it needs is the tracked head SHA, and a
+  // command a worker calls once per code reference must not cost a request per
+  // link. It also skips `context()`, whose reviewer lookup this has no use for.
+  const root = argv.flags.root || store.DEFAULT_ROOT;
+  const repo = await resolveRepo(argv.flags.repo);
+  const n = assertSafeNumber(argv._[1] ?? die('usage: prt permalink <PR number> <path>:<line>[-<line>]...'));
+  const specs = argv._.slice(2);
+  if (!specs.length) die('usage: prt permalink <PR number> <path>:<line>[-<line>]...  (repo-relative paths; `prt anchors` lists them)');
+
+  const state = store.readState(root, repo, n);
+  // `--sha reviewed` is the code as it stood when I last reviewed — the version
+  // an author's "I fixed that" is being compared against.
+  const asked = argv.flags.sha === true ? null : argv.flags.sha;
+  const named = { head: state?.headOid ?? state?.analysis?.headOid, reviewed: state?.analysis?.myLastReview?.oid };
+  // A name the store knows but has no commit for must say so. Falling through
+  // to "not a commit SHA" would send the reader looking at their spelling
+  // instead of at the PR nobody has reviewed yet.
+  if (asked && asked in named && !named[asked]) {
+    die(`no ${asked} commit recorded for ${repo}#${n} — run \`prt refresh ${n}\`, or pass the SHA itself`);
+  }
+  const sha = asked ? (named[asked] ?? asked) : named.head;
+  if (!sha) die(`no head SHA for ${repo}#${n} — run \`prt track ${n}\` first, or pass --sha <commit>`);
+  if (!isSha(sha)) die(`--sha needs a commit, not "${sha}" — a branch link renders whatever that branch says later`);
+
+  const links = [];
+  for (const spec of specs) {
+    let loc;
+    try { loc = parseLocation(spec); } catch (e) { die(e.message); }
+    if (!loc.path.includes('/')) {
+      die(`give the repo-relative path, not just "${loc.path}" — \`prt anchors ${n}\` lists every path in this PR`);
+    }
+    let url;
+    try { url = blobUrl(repo, sha, loc.path, loc); } catch (e) { die(e.message); }
+    links.push({ ...loc, sha, url, markdown: codeLink(repo, sha, loc.path, { ...loc, full: false }) });
+  }
+
+  emit({ repo, number: n, sha, links });
+  // One URL per line and nothing else: that is the form GitHub expands, so it
+  // is paste-ready into a blank line of a comment. `--markdown` gives the inline
+  // form instead, for prose, lists and tables, where nothing expands.
+  if (!JSON_OUT) for (const l of links) say(argv.flags.markdown || argv.flags.md ? l.markdown : l.url);
+};
 
 COMMANDS.draft = async () => {
   const base = await context();

@@ -285,7 +285,9 @@ export function assessNudge({ pr, login, threads, headMoved, options = {} }) {
     daysSinceMyLastWord: Number.isFinite(quietDays) ? Math.floor(quietDays) : null,
     maxAgeDays,
     lastWordByMe,
-    threads: untouched.map((t) => ({ id: t.id, path: t.path, line: t.line, url: t.url, days: t.daysSinceMyLastComment })),
+    // `side` rides along so a renderer can tell whether the head permalink means
+    // this line: a LEFT anchor counts lines in the base, not in the head.
+    threads: untouched.map((t) => ({ id: t.id, path: t.path, line: t.line, side: t.side, url: t.url, days: t.daysSinceMyLastComment })),
   };
 
   if (pr.author?.login === login) return { ...base, reasonNotDue: 'it is my own PR' };

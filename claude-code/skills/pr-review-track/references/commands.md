@@ -125,6 +125,36 @@ The full diff, or the diff since my last review (`--delta` resolves the SHA).
 Every `(path, line, side)` the PR's diff allows a comment on, as compressed
 ranges. Use it when a comment fails to anchor.
 
+### `permalink <N> <path>:<lines>… [--sha head|reviewed|<commit>] [--markdown]`
+
+Blob permalinks for the code a review refers to, built from the tracked head so
+the SHA is never typed by hand:
+
+```bash
+node "$PRT" permalink 26289 pulsar-client-v5/src/main/java/org/apache/pulsar/client/impl/v5/ScalableConsumerClient.java:192-206
+# https://github.com/apache/pulsar/blob/39784e08…/…/ScalableConsumerClient.java#L192-L206
+```
+
+Takes any number of locations, one per line out, in `path:192-206`, `path:192`
+or `path#L192-L206` form. Paths are repo-relative — a bare file name is refused,
+because guessing which `Consumer.java` was meant is how a link ends up quoting
+the wrong file. The URL names the **upstream** repo even for a fork PR: the head
+commit resolves there, and a fork can be deleted.
+
+Output is the bare URL on its own line — the form GitHub expands into the code
+itself. `--markdown` gives ``[`Consumer.java:1015`](…)`` instead, for prose,
+lists and tables, where nothing expands. `--json` returns every location parsed
+plus its URL.
+
+`--sha` picks the commit: `head` (the default), `reviewed` (the commit my last
+review was made at — the version an author's "fixed that" is being compared
+against), or any commit SHA. A branch name is refused: the line numbers behind
+it move, and the link silently starts quoting different code. The command is
+offline — it reads the tracked `pr.json` and makes no request.
+
+When and how to use these in a review is in the skill's
+[Linking to code](../SKILL.md#linking-to-code).
+
 ### `draft <N> [--findings f.json] [--kind initial|re-review] [--to FILE] [--force]`
 
 Writes `review.md` at `Status: draft`. Refuses to overwrite a protected file

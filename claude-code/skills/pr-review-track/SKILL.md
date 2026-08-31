@@ -182,7 +182,8 @@ and whether the author actually did what was asked.
    - decide `LIKELY_ADDRESSED` / `PARTIALLY_ADDRESSED` / `NOT_ADDRESSED` /
      `RESPONSE_NEEDED` / `OBSOLETE` / `NEEDS_HUMAN_VERIFICATION`
    - collect the evidence that supports it
-   - draft the reply the reviewer would send
+   - draft the reply the reviewer would send, **linking the code it turns on**
+     rather than naming it — see [Linking to code](#linking-to-code)
 
    Also read every entry in `ctx.json.analysis.newIssueComments`. These are
    ordinary PR discussion comments, not file review threads. If the PR author
@@ -350,6 +351,12 @@ Revision is about wording and emphasis. It must not quietly change the review.
 - Keep every load-bearing fact: SHAs, `file:line`, test names, measured numbers,
   reproduction steps. Concision comes out of hedging and restatement, never out
   of evidence.
+- **A permalink stops rendering the moment it stops owning its paragraph.**
+  Tightening prose is exactly how a URL ends up at the end of a sentence or
+  inside a bullet, where GitHub shows a bare link instead of the code. If a
+  revision pulls one in, switch it to the inline
+  ``[`File.java:192-206`](…)`` form on purpose — see
+  [Linking to code](#linking-to-code).
 - Do not add a finding no reviewer verified, and do not drop one to make the
   review shorter. If a point should go, move it to `prt:notes` with the reason
   rather than deleting it.
@@ -391,6 +398,78 @@ benchmark table. Put it in a collapsed block so the comment stays skimmable:
 Files an earlier round staged under `cache/` (`cache/suggested-test-*.java` and
 friends) exist to be inlined this way. Keep ASF licence headers intact on
 anything the author is meant to paste into the repo — RAT fails without them.
+
+## Linking to code
+
+A review that says `Consumer.java:1015` sends the reader off to find it. A review
+that links it shows them the code. GitHub expands a **blob permalink that owns
+its own paragraph** into the lines it points at, so a short reference arrives as
+the code itself:
+
+```
+https://github.com/apache/pulsar/blob/39784e085ef491ffe319433dc465ba9575cadc95/pulsar-client-v5/src/main/java/org/apache/pulsar/client/impl/v5/ScalableConsumerClient.java#L192-L206
+```
+
+That is `ScalableConsumerClient.java:192-206`, rendered in the comment. Never
+assemble one by hand:
+
+```bash
+node "$PRT" permalink <N> <path>:192-206              # the bare URL, paste-ready
+node "$PRT" permalink <N> <path>:192-206 --markdown   # [`File.java:192-206`](…)
+```
+
+### The mechanics
+
+- The URL is `https://github.com/<owner>/<repo>/blob/<commit>/<repo-relative path>#L<start>-L<end>`, or `#L<n>` for one line.
+- **Always an exact commit.** Never `blob/master/…`, never a branch or a tag: the
+  lines behind a moving ref drift, and the link starts quoting code the review
+  never read. For anything in the PR that commit is the head — `head:` in
+  `prt:doc`, `findings.head`, `ctx.analysis.headOid`. `prt permalink` refuses a
+  ref name outright.
+- **The upstream repo, even for a fork PR.** `apache/pulsar/blob/<head sha>/…`
+  resolves for a contributor's commit, and unlike their fork it cannot be deleted
+  out from under the comment.
+- **To render, the URL must own its paragraph**: blank line above, blank line
+  below, nothing else on the line — no bullet, no `>`, no trailing full stop, and
+  not wrapped in `[…](…)`. With any of those GitHub leaves a bare link.
+- The line numbers are the ones *at that commit*. A `LEFT`-side anchor counts
+  lines in the base, not the head: link the base commit, or do not link it.
+
+### Which form, and when
+
+| form | use it when |
+|---|---|
+| **Rendered** — the bare URL alone in its own paragraph | the code *is* the point and it is short (roughly ≤ 20 lines): the lines a finding is about, the invariant a caller breaks, the version the author replaced |
+| **Inline** — ``[`ScalableConsumerClient.java:192-206`](…)`` | the reference supports the sentence rather than being it, the range is long, or it sits in a list, a table or a blockquote, where nothing expands anyway |
+
+Judgement, not decoration:
+
+- **An inline comment is already anchored.** GitHub shows its lines directly
+  above it, so opening one with a permalink to those same lines is noise. Link
+  the *other* place — the caller, the definition, the test, the line the
+  invariant is established on.
+- **One rendered snippet per point.** A comment that opens with three embedded
+  files is harder to read than the `file:line` it replaced.
+- A long range, a whole file, generated code: link it, do not embed it.
+- **Never link lines you have not read at that commit.** A permalink is a
+  quotation and one click checks it, so a wrong range quotes the author code
+  they did not write.
+- A link sits *on top of* the evidence, never instead of it: the `file:line`,
+  the test name, the failure scenario and the SHA all stay in the prose.
+
+### In `review.md` itself
+
+The same rule for the reader who is you and the human. `prt draft` already links
+what it renders — each thread's anchor, each finding's location, each file
+changed since the last review — at the head it drafted against, and falls back to
+plain `path:line` exactly where a link would be wrong (a `LEFT` anchor, a thread
+GitHub marked outdated).
+
+Your own prose in the file works the same way: when a point needs more code than
+a line or two — the whole method, the caller and the callee, the version before
+and after — link it rather than pasting it in. A draft nobody can skim is a draft
+the human re-reads three times before arming. Evidence lists and tables cannot
+expand a snippet, so those take the inline form.
 
 ## Notes to the assistant
 
@@ -590,6 +669,10 @@ its `token`, and this contract:
 > Do the work for this kind of job. Write `review.md` **only** through
 > `prt draft <N> --job-token <token>` or
 > `prt job commit <N> --token <token> --from <file>` — never by editing it.
+> Refer to code with permalinks built by `prt permalink <N> <path>:<lines>`,
+> per the skill's *Linking to code*: short and central, the bare URL alone in
+> its own paragraph so GitHub renders it; otherwise the inline `--markdown`
+> form. Never a branch URL, never a range you have not read at that commit.
 > Finish with `prt job done <N> --token <token> --outcome "<one line>"`, or
 > `prt job fail <N> --token <token> --error "<why>"` if you could not.
 > Return at most five lines: number, what happened, the recommended resolution,

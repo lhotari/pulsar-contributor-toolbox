@@ -361,6 +361,33 @@ Re-review drafts also use this block to answer questions the PR author asked in
 the ordinary PR conversation. Such replies are posted in every verdict mode
 except `REPLY`, which is intentionally limited to file review threads.
 
+### Linking to code from any body
+
+Every body in this file — the four that post and the two that do not — refers to
+code, and GitHub renders a **blob permalink that owns its own paragraph** as the
+code itself:
+
+```
+Both callers already hold the lock, so the second acquire is unreachable:
+
+https://github.com/apache/pulsar/blob/39784e085ef491ffe319433dc465ba9575cadc95/pulsar-broker/src/main/java/org/apache/pulsar/broker/service/Consumer.java#L1015-L1022
+
+which makes the branch below dead rather than merely redundant.
+```
+
+- Blank line above, blank line below, nothing else on the line. In a bullet, a
+  table, a blockquote, or wrapped in `[…](…)`, it stays a bare link — use
+  ``[`Consumer.java:1015`](…)`` there instead.
+- The commit is exact, and for anything in the PR it is `head:` from `prt:doc`.
+  A `blob/master/…` link renders whatever master says on the day it is read.
+- The upstream repo, even when the PR comes from a fork.
+- `prt permalink <N> <path>:1015-1022` builds it; `--markdown` gives the inline
+  form.
+
+A `prt:inline` body is already anchored at its own lines, so link the *other*
+place — the caller, the test, the definition. When and why is in the skill's
+[Linking to code](../SKILL.md#linking-to-code).
+
 ### `prt:ask` — a note to the assistant. Never posted.
 
 Your questions, objections and instructions, addressed to the model rather than
@@ -753,6 +780,15 @@ Never posted. `context` holds the generated evidence, `notes` holds dropped
 findings, `log` is the append-only activity record the submitter writes. Its own
 `## Activity log` heading lives *inside* that block — the section above is a
 different log, and the footer says which is which.
+
+Nothing here reaches GitHub, so nothing here renders a snippet — but it is the
+part of the file a human actually reads, so the generator links what it prints:
+each thread's anchor, each finding's location and each file changed since the
+last review carry an inline permalink at the head this draft was written
+against. Where a link would be wrong the plain `path:line` is kept instead — a
+`LEFT`-side anchor counts lines in the base, and GitHub nulls an outdated
+thread's `line`, so the number recorded is the original one and means nothing at
+the head.
 
 ## What happens when you set `Status: ready`
 
