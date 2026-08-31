@@ -847,3 +847,60 @@ test('a staged review comes back into the next draft as context, not as blocks',
   assert.match(byId.get('i1').body, /already staged at this anchor/);
   assert.equal(byId.get('i2').post, true);
 });
+
+test('the draft links the code references the reviewer only named', () => {
+  const dir = setupEmptyPr();
+  const findings = path.join(ROOT, 'linkify-findings.json');
+  fs.writeFileSync(findings, JSON.stringify({
+    summary: 'One thing, at A.java:11.',
+    recommendedEvent: 'COMMENT',
+    findings: [{
+      id: 'i1',
+      severity: 'BUG',
+      claim: 'permits are lost',
+      path: 'A.java',
+      line: 11,
+      side: 'RIGHT',
+      // Three shapes: the file this comment is already about, a file the PR
+      // does not touch (only the repo tree knows it), and one nothing can
+      // resolve.
+      body: 'The range :10-12 is the problem, and the caller in Caller.java:42 assumes otherwise. Unlike Absent.java:7.',
+    }],
+  }));
+  const tree = JSON.stringify({
+    sha: HEAD,
+    tree: [
+      { path: 'A.java', type: 'blob' },
+      { path: 'src/main/java/Caller.java', type: 'blob' },
+      { path: 'docs/README.md', type: 'blob' },
+    ],
+  });
+  const log = path.join(ROOT, 'linkify.jsonl');
+  const scenario = writeScenario('linkify', baseRules([
+    { when: { args: ['--method', 'GET'], arg: 'git/trees/' }, stdout: tree },
+  ]), log);
+
+  const r = runPrt(['draft', '1', '--repo', REPO, '--findings', findings], scenario);
+  assert.equal(r.status, 0, r.stderr);
+  const text = fs.readFileSync(path.join(dir, 'review.md'), 'utf8');
+  const blob = (p, frag) => `https://github.com/${REPO}/blob/${HEAD}/${p}#${frag}`;
+
+  assert.match(text, new RegExp(`\\[\`:10-12\`\\]\\(${blob('A.java', 'L10-L12').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)`),
+    'a path-less range means the file the comment is anchored to');
+  assert.match(text, new RegExp(`\\[\`Caller\\.java:42\`\\]\\(${blob('src/main/java/Caller.java', 'L42').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)`),
+    'a file outside the diff resolves through the repo tree');
+  assert.match(text, /Unlike Absent\.java:7\./, 'a name nothing matches keeps the words it had');
+  assert.match(text, new RegExp(`\\[\`A\\.java:11\`\\]\\(${blob('A.java', 'L11').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)`),
+    'the summary is linked too — it posts as the review body');
+
+  const out = `${r.stdout}${r.stderr}`;
+  assert.match(out, /linked 3 code reference\(s\)/);
+  assert.match(out, /repo tree consulted/);
+  assert.match(out, /Absent\.java/, 'what stayed plain text is named, not silently dropped');
+
+  // The tree is fetched once per head and cached beside the PR.
+  const treeCalls = calls(log).filter((c) => c.args.join(' ').includes('git/trees/'));
+  assert.equal(treeCalls.length, 1);
+  runPrt(['draft', '1', '--repo', REPO, '--findings', findings, '--force'], scenario);
+  assert.equal(calls(log).filter((c) => c.args.join(' ').includes('git/trees/')).length, 1, 'the second draft reads the cache');
+});

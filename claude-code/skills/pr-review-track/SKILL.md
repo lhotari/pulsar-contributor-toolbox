@@ -356,7 +356,9 @@ Revision is about wording and emphasis. It must not quietly change the review.
   inside a bullet, where GitHub shows a bare link instead of the code. If a
   revision pulls one in, switch it to the inline
   ``[`File.java:192-206`](…)`` form on purpose — see
-  [Linking to code](#linking-to-code).
+  [Linking to code](#linking-to-code). A reference you *add* while revising is
+  not linked for you either: the generator links what it generates, and this is
+  an edit. Build it with `prt permalink`.
 - Do not add a finding no reviewer verified, and do not drop one to make the
   review shorter. If a point should go, move it to `prt:notes` with the reason
   rather than deleting it.
@@ -424,6 +426,36 @@ assemble one by hand:
 node "$PRT" permalink <N> <path>:192-206              # the bare URL, paste-ready
 node "$PRT" permalink <N> <path>:192-206 --markdown   # [`File.java:192-206`](…)
 ```
+
+### What `prt draft` links for you
+
+**A reference you merely *name* in `findings.json` prose is linked on the way
+into the file.** `prt draft` rewrites every one it can resolve into the inline
+form, at the head it drafted against, before you or the human sees the draft:
+
+| you write | it becomes |
+|---|---|
+| `Consumer.java:1015` | ``[`Consumer.java:1015`](…/Consumer.java#L1015)`` |
+| `service/Consumer.java:1015-1022` | the same, from the unique path ending in that tail |
+| `:749-755` | ``[`:749-755`](…#L749-L755)`` **in the file that comment is anchored to** |
+| `` `Consumer.java:1015` `` | the same link, keeping the code span as the label |
+
+The name is resolved against the PR's own files first, then the repo tree at
+that commit — so the caller, the test or the definition your comment points at
+links even when the PR does not touch it. What is **never** touched: anything in
+a fenced block or a stack frame (`at …(Consumer.java:1015)` — those line numbers
+are from the build that threw), a code span with more than a reference in it, a
+reference already inside a link, a port or a version (`localhost:8080`), and a
+bare URL, so a rendered snippet you placed on purpose stays rendered. A name
+that matches no single file — two `Consumer.java`, or one that is not in the
+repo — is left as the words you wrote and named in `prt draft`'s output; write
+the repo-relative path when it matters.
+
+So: **name the location naturally in prose and let the draft link it**; reach
+for `prt permalink` when you want the *rendered* form, which is a judgement only
+you can make (see the table below), or when you are revising a file that already
+exists — a revision edits bytes rather than generating them, and nothing links
+them for you.
 
 ### The mechanics
 

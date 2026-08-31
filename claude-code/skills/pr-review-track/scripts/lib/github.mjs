@@ -440,6 +440,23 @@ export async function resolveThread(threadId, resolve = true) {
   }
 }
 
+/**
+ * Every file in the repository at one commit, in one request.
+ *
+ * Used to turn a bare `ClassName.java:123` in a review into a permalink when the
+ * PR's own diff does not contain that file — the caller, the test, the
+ * definition a comment points at. `truncated` is GitHub's answer for a tree too
+ * large to return whole; the paths that did arrive are still usable, and a
+ * reference that misses simply stays unlinked.
+ */
+export async function repoTree(repo, sha) {
+  const data = await rest('GET', `repos/${repo}/git/trees/${sha}?recursive=1`);
+  return {
+    paths: (data?.tree ?? []).filter((e) => e.type === 'blob').map((e) => e.path),
+    truncated: !!data?.truncated,
+  };
+}
+
 /** Any PENDING (unsubmitted) review the viewer left behind on this PR. */
 export async function pendingReviews(repo, number) {
   const login = await viewerLogin();

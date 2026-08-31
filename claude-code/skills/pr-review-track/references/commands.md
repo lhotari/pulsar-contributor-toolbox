@@ -162,6 +162,17 @@ unless `--force`; `--to review.next.md` writes a proposal alongside instead.
 Anchors are validated at generation time too, so a finding that could never post
 arrives as `post: false` with the reason attached rather than wasting your edit.
 
+**It links the code references the review only named.** Every `Consumer.java:1015`,
+`service/Consumer.java:1015-1022` and bare `:749-755` in the prose it writes out
+of `findings.json` becomes an inline permalink at the head it drafted against —
+see [Linking to code](../SKILL.md#linking-to-code) for what is and is not
+rewritten. A path-less range means the file its own comment is anchored to. A
+name is resolved against the PR's files first and then, only if something is
+left over, against the repo tree at that commit — one request, cached in
+`cache/tree.json` per commit, so a reference to a caller or a test the PR does
+not touch links too. A name that matches no single file stays exactly as it was
+written and is named in the output.
+
 **It carries the human's notes forward.** `@ai` shorthand in the old file is
 promoted — including a note typed *inside* a block, which is lifted out; open
 `prt:ask` blocks are kept beside what they are about, and answered ones move to

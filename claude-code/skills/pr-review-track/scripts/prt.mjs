@@ -17,7 +17,7 @@ import { spawn } from 'node:child_process';
 import { viewerLogin, resolveRepo, rateLimit, GhError } from './lib/gh.mjs';
 import {
   fetchPr, fetchPrsBatch, searchEngagedPrs, recentOpenPrs, approvedPrs, prDiff, compareDiff,
-  pendingReviews, reviewComments,
+  pendingReviews, reviewComments, repoTree,
 } from './lib/github.mjs';
 import { analyzePr, fetchDelta, summarizeCounts, THREAD_STATES } from './lib/analyze.mjs';
 import { rankCandidates, scoreTracked } from './lib/rank.mjs';
@@ -26,7 +26,7 @@ import {
   disarmStagedDuplicates,
 } from './lib/render.mjs';
 import { parseDiff, commentableAnchors, validateAnchor } from './lib/diff.mjs';
-import { blobUrl, codeLink, parseLocation, isSha } from './lib/links.mjs';
+import { blobUrl, codeLink, parseLocation, isSha, linkifyCode, pathIndex } from './lib/links.mjs';
 import {
   parseActionFile, parseStatus, setStatus, contentHash, appendLog, planActions,
   PROTECTED_STATUSES, IN_FLIGHT_STATUSES, STATUSES,
@@ -481,6 +481,105 @@ async function readStagedReview(base, n, prev) {
 }
 
 /**
+ * Every prose field of a findings document that can carry a code reference,
+ * paired with the file a path-less `:749-755` inside it means.
+ *
+ * That pairing is the whole reason this is a list rather than a walk: `:749-755`
+ * in a finding's body means the file the finding is anchored to, the same words
+ * in a thread reply mean the file that thread is on, and in the review summary
+ * they mean nothing at all. A `LEFT`-side anchor counts lines in the base, so it
+ * contributes no self path either: a head permalink there would quote lines the
+ * comment is not about.
+ */
+function proseFields(findings, analysis) {
+  const threads = new Map((analysis?.threads ?? []).map((t) => [t.id, t]));
+  const selfOf = (anchor) => {
+    if (!anchor?.path) return null;
+    return (anchor.side ?? 'RIGHT') === 'LEFT' || anchor.isOutdated ? null : anchor.path;
+  };
+  const out = [];
+  const add = (obj, key, selfPath = null) => {
+    if (obj && typeof obj[key] === 'string' && obj[key]) out.push({ obj, key, selfPath });
+  };
+  add(findings, 'summary');
+  for (const f of findings?.findings ?? []) {
+    add(f, 'claim', selfOf(f));
+    add(f, 'body', selfOf(f));
+  }
+  for (const d of findings?.dropped ?? []) add(d, 'reason');
+  for (const t of findings?.threadAssessments ?? []) {
+    const self = selfOf(threads.get(t.threadId));
+    add(t, 'why', self);
+    add(t, 'reply', self);
+    (t.evidence ?? []).forEach((_, i) => add(t.evidence, i, self));
+  }
+  for (const c of findings?.issueCommentAssessments ?? []) {
+    add(c, 'why');
+    add(c, 'reply');
+  }
+  return out;
+}
+
+/** The repo's file list at `sha`, cached per commit so a round costs one request at most. */
+async function repoPaths(base, n, sha) {
+  const file = store.cacheFile(base.root, base.repo, n, 'tree.json');
+  try {
+    const cached = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (cached.sha === sha && Array.isArray(cached.paths)) return cached.paths;
+  } catch { /* no usable cache */ }
+  try {
+    const tree = await repoTree(base.repo, sha);
+    store.ensurePrDir(base.root, base.repo, n);
+    store.writeAtomic(file, `${JSON.stringify({ sha, ...tree })}\n`);
+    return tree.paths;
+  } catch {
+    // A tree we cannot read leaves references unlinked, which is the state they
+    // were already in. It is not a reason to fail a draft.
+    return [];
+  }
+}
+
+/**
+ * Turn the code references the reviewer wrote in prose into permalinks, in
+ * place, before any of it reaches the file.
+ *
+ * The PR's own files answer nearly every reference and cost nothing — they are
+ * already parsed out of the diff. Only when something is left over is the repo
+ * tree fetched, which is what makes a reference to a caller or a test the PR
+ * does not touch linkable without paying a request per round for it. The second
+ * pass rewrites the ORIGINAL text rather than the once-linked text, so a name
+ * the tree resolves cannot land inside a link the first pass already made.
+ */
+async function linkifyFindings(base, n, { findings, analysis, sha, diffPaths }) {
+  const fields = proseFields(findings, analysis);
+  if (!fields.length || !isSha(sha)) return { links: 0, unresolved: [], fetchedTree: false };
+  const originals = fields.map((f) => f.obj[f.key]);
+  const index = pathIndex(diffPaths);
+  const pass = () => {
+    let links = 0;
+    const unresolved = new Set();
+    fields.forEach((f, i) => {
+      const r = linkifyCode(originals[i], { repo: base.repo, sha, resolve: index.resolve, selfPath: f.selfPath });
+      links += r.links;
+      for (const u of r.unresolved) unresolved.add(u);
+      f.obj[f.key] = r.text;
+    });
+    return { links, unresolved: [...unresolved] };
+  };
+  let res = pass();
+  let fetchedTree = false;
+  if (res.unresolved.length) {
+    const paths = await repoPaths(base, n, sha);
+    if (paths.length) {
+      fetchedTree = true;
+      index.add(paths);
+      res = pass();
+    }
+  }
+  return { ...res, fetchedTree };
+}
+
+/**
  * Everything the model needs to judge one PR, as JSON: the analysis, the
  * incremental diff since my last review, my open threads with their full text,
  * and the legal comment anchors.
@@ -664,6 +763,15 @@ COMMANDS.draft = async () => {
 
   const reStaged = disarmStagedDuplicates(findings, staged);
 
+  // A review that says `Consumer.java:1015` sends the reader off to find it; the
+  // rule is in SKILL.md and a model follows it about as often as it writes the
+  // reference. So the generator links them itself, on the way into the file,
+  // where the human sees every link before arming anything — never at submit
+  // time, where a body is posted byte for byte.
+  const linked = await linkifyFindings(base, n, {
+    findings, analysis, sha: pr.headRefOid, diffPaths: [...parseDiff(fullDiff).keys()],
+  });
+
   // Anchors are validated at generation time as well as at submit time, so the
   // human never spends effort editing a comment that could never be posted.
   if (findings?.findings?.length) {
@@ -818,8 +926,15 @@ COMMANDS.draft = async () => {
     },
     doc: hatches,
     staged: staged ? { url: staged.url, comments: staged.comments.length, disarmed: reStaged } : null,
+    links: linked,
   });
   say(`drafted ${target}`);
+  if (linked.links) {
+    say(`  linked ${linked.links} code reference(s) at ${pr.headRefOid.slice(0, 8)}${linked.fetchedTree ? ' (repo tree consulted for names outside the diff)' : ''}`);
+  }
+  if (linked.unresolved.length) {
+    say(`  left as plain text, no single file matches: ${linked.unresolved.slice(0, 8).join(', ')}${linked.unresolved.length > 8 ? `, +${linked.unresolved.length - 8} more` : ''}`);
+  }
   if (staged) {
     say(`  ${staged.comments.length} comment(s) are staged in an unsubmitted review on GitHub — shown as context, not redrafted`);
     for (const id of reStaged) {

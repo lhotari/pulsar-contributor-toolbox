@@ -15,7 +15,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-import { blobUrl, codeLink, parseLocation, locationLabel, isSha } from '../lib/links.mjs';
+import { blobUrl, codeLink, parseLocation, locationLabel, isSha, linkifyCode, pathIndex } from '../lib/links.mjs';
 import { renderActionFile, renderNudgeFile } from '../lib/render.mjs';
 import { THREAD_STATES } from '../lib/analyze.mjs';
 
@@ -253,4 +253,101 @@ test('`prt permalink` refuses what would produce a wrong link', () => {
   } finally {
     fs.rmSync(empty, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Linkifying what the reviewer wrote.
+//
+// The rule "link the code, do not name it" was an instruction to a model, and a
+// model names it. These pin the two halves of doing it for them: every shape a
+// reference is actually written in becomes a link, and everything that is not a
+// reference — a stack frame, a port number, code in a fence, a permalink
+// already in its own paragraph — is left exactly as it was. The second half is
+// the one that matters: a rewrite that fires where it should not either quotes
+// the wrong lines or breaks the paragraph GitHub was going to expand.
+
+const OTHER = 'pulsar-broker/src/main/java/org/apache/pulsar/broker/service/Consumer.java';
+const INDEX = pathIndex([JAVA, OTHER, 'a/Dup.java', 'b/Dup.java']);
+const LINKIFY = { repo: 'apache/pulsar', sha: SHA, resolve: INDEX.resolve, selfPath: JAVA };
+const linkify = (text, over = {}) => linkifyCode(text, { ...LINKIFY, ...over });
+
+test('a path index resolves by suffix, and refuses to guess', () => {
+  assert.equal(INDEX.resolve(JAVA), JAVA, 'the full path is its own answer');
+  assert.equal(INDEX.resolve('ScalableConsumerClient.java'), JAVA, 'one file has that name');
+  assert.equal(INDEX.resolve('service/Consumer.java'), OTHER, 'a tail that is unique resolves');
+  assert.equal(INDEX.resolve('Dup.java'), null, 'two files share the name, so there is no answer');
+  assert.equal(INDEX.resolve('Absent.java'), null);
+});
+
+test('every shape a reviewer writes a reference in becomes a link', () => {
+  const cases = {
+    'a bare range in the file the comment is about': [':749-755', `${JAVA}#L749-L755`],
+    'a bare single line': [':749', `${JAVA}#L749`],
+    'a file name and a line': ['ScalableConsumerClient.java:192', `${JAVA}#L192`],
+    'a file name and a range': ['Consumer.java:1015-1022', `${OTHER}#L1015-L1022`],
+    'a partial path': ['service/Consumer.java:1015', `${OTHER}#L1015`],
+    'the full repo-relative path': [`${JAVA}:192`, `${JAVA}#L192`],
+    'the #L form': ['Consumer.java#L1015-L1022', `${OTHER}#L1015-L1022`],
+    'a reference set in a code span': ['`:749-755`', `${JAVA}#L749-L755`],
+  };
+  for (const [what, [written, expected]] of Object.entries(cases)) {
+    const { text, links } = linkify(`Look at ${written} for the invariant.`);
+    assert.equal(links, 1, what);
+    assert.match(text, new RegExp(`\\]\\(https://github\\.com/apache/pulsar/blob/${SHA}/${expected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)`), what);
+    assert.match(text, /^Look at \[`/, `${what}: the words the reviewer wrote stay the label`);
+  }
+});
+
+test('a sentence keeps its punctuation, and a backwards range is normalised', () => {
+  assert.match(linkify('It breaks at Consumer.java:1015.').text, /#L1015\)\.$/);
+  assert.match(linkify('See Consumer.java:1022-1015 above.').text, /#L1015-L1022\)/);
+});
+
+test('what is not a code reference is left byte-for-byte alone', () => {
+  const untouched = [
+    'The broker listens on localhost:8080 in the test.',
+    'Version 1.2.3:4 of the wire format.',
+    'Two files share the name, so Dup.java:5 stays as it is.',
+    'Nothing to resolve: Absent.java:5 is not in this repo.',
+    '    at org.apache.pulsar.broker.service.Consumer.checkPermits(Consumer.java:1015)',
+    'Caused by: java.lang.NullPointerException at Consumer.java:1015',
+    'A span of code `if (permits < 0) { return; }` is code.',
+    '```\nstack: Consumer.java:1015\n```',
+    '~~~java\nConsumer.java:1015\n~~~',
+    `https://github.com/apache/pulsar/blob/${SHA}/${OTHER}#L1015-L1022`,
+    `[\`Consumer.java:1015\`](https://github.com/apache/pulsar/blob/${SHA}/${OTHER}#L1015)`,
+  ];
+  for (const text of untouched) {
+    const r = linkify(text);
+    assert.equal(r.text, text, text.slice(0, 48));
+    assert.equal(r.links, 0);
+  }
+});
+
+test('a rendered permalink survives, which is the form that shows the code', () => {
+  // The bare URL alone in its paragraph is what GitHub expands. Wrapping it in
+  // an inline link would silently turn the snippet back into a reference.
+  const body = `Both callers hold the lock:\n\nhttps://github.com/apache/pulsar/blob/${SHA}/${OTHER}#L1015-L1022\n\nwhich makes the branch below dead.`;
+  assert.equal(linkify(body).text, body);
+});
+
+test('linkifying twice changes nothing the first pass did', () => {
+  const once = linkify('At :749-755 and Consumer.java:1015, plus `ScalableConsumerClient.java:192`.').text;
+  assert.equal(linkify(once).text, once);
+  assert.equal(linkify(once).links, 0);
+});
+
+test('a reference nothing can resolve is reported, not linked', () => {
+  const r = linkify('Compare Absent.java:5 with Dup.java:9.');
+  assert.equal(r.links, 0);
+  assert.deepEqual(r.unresolved.sort(), ['Absent.java', 'Dup.java']);
+});
+
+test('without an exact commit, or a file the lines belong to, nothing is linked', () => {
+  // Same rule as `codeLink`: no SHA, no link. A branch link renders whatever
+  // that branch says later, which is not the code the review read.
+  assert.equal(linkify('At Consumer.java:1015.', { sha: 'master' }).text, 'At Consumer.java:1015.');
+  // A LEFT-side anchor counts lines in the base, so its comment has no self
+  // path: `:749` there would point at unrelated lines of the head.
+  assert.equal(linkify('At :749.', { selfPath: null }).text, 'At :749.');
 });

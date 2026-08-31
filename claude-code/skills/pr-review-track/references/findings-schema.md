@@ -93,7 +93,16 @@ do not repeat it.
 
 **Refer to code with permalinks, not with names.** `head` is the commit every
 link in this file is built against; `prt permalink <N> <path>:<start>-<end>`
-builds them. A short, central reference goes in as the **bare URL alone in its
+builds them — though naming a location in prose is enough for the inline form:
+`prt draft` links every `Consumer.java:1015`, `service/Consumer.java:1015-1022`
+and bare `:749-755` it can resolve, in `summary`, `findings[].claim` and
+`body`, `dropped[].reason`, `threadAssessments[]`'s `why`, `evidence[]` and
+`reply`, and `issueCommentAssessments[]`'s `why` and `reply`. A path-less
+`:749-755` means the file that finding or thread is anchored to. It leaves
+fenced code, stack frames and bare URLs alone, and a name matching no single
+file stays as written — so give the repo-relative path when the basename is
+ambiguous. The **rendered** form is still yours to place: it is a bare URL alone
+in its paragraph, and nothing rewrites text into one. A short, central reference goes in as the **bare URL alone in its
 own paragraph** — `\n\nhttps://…#L192-L206\n\n` inside the body string — which is
 what makes GitHub render the code in the comment; anything longer, or anything
 inside a bullet or a table, takes the inline ``[`File.java:192-206`](…)`` form,
