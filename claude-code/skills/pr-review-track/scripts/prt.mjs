@@ -17,10 +17,14 @@ import { spawn } from 'node:child_process';
 import { viewerLogin, resolveRepo, rateLimit, GhError } from './lib/gh.mjs';
 import {
   fetchPr, fetchPrsBatch, searchEngagedPrs, recentOpenPrs, approvedPrs, prDiff, compareDiff,
+  pendingReviews, reviewComments,
 } from './lib/github.mjs';
 import { analyzePr, fetchDelta, summarizeCounts, THREAD_STATES } from './lib/analyze.mjs';
 import { rankCandidates, scoreTracked } from './lib/rank.mjs';
-import { renderActionFile, renderNudgeFile, renderBoard, bucketOf, inlineIdFor, expectedBlockIds } from './lib/render.mjs';
+import {
+  renderActionFile, renderNudgeFile, renderBoard, bucketOf, inlineIdFor, expectedBlockIds,
+  disarmStagedDuplicates,
+} from './lib/render.mjs';
 import { parseDiff, commentableAnchors, validateAnchor } from './lib/diff.mjs';
 import { blobUrl, codeLink, parseLocation, isSha } from './lib/links.mjs';
 import {
@@ -438,6 +442,45 @@ COMMANDS.refresh = async () => {
 };
 
 /**
+ * The unsubmitted review an `event: REPLY` pass left on GitHub, with its
+ * comments as they stand NOW — which is not what this store last wrote. Staging
+ * hands the text over: the human edits those comments in GitHub's UI, so the
+ * copy on GitHub is the authoritative one and the round that follows has to
+ * read it rather than draft over it.
+ *
+ * Returns null, and forgets the record, when the review is no longer pending —
+ * submitted or discarded by hand. That is a normal end to a staged review, not
+ * an error, and leaving the record behind would make every later round quote a
+ * review that no longer exists.
+ */
+async function readStagedReview(base, n, prev) {
+  const rec = prev?.staged;
+  if (!rec?.reviewDatabaseId) return null;
+  const live = (await pendingReviews(base.repo, n)).find((p) => String(p.id) === String(rec.reviewDatabaseId));
+  if (!live) {
+    if (prev) store.writeState(base.root, base.repo, n, { ...prev, staged: null });
+    return null;
+  }
+  const comments = await reviewComments(base.repo, n, rec.reviewDatabaseId);
+  return {
+    reviewDatabaseId: String(live.id),
+    url: live.html_url ?? rec.url ?? null,
+    at: rec.at ?? null,
+    comments: comments.map((c) => ({
+      id: String(c.id),
+      path: c.path,
+      // `line` is null on a file-level comment and on one GitHub has outdated;
+      // `original_line` is the number the comment was written against.
+      line: c.line ?? c.original_line ?? null,
+      side: c.side ?? 'RIGHT',
+      inReplyToId: c.in_reply_to_id ? String(c.in_reply_to_id) : null,
+      body: c.body ?? '',
+      url: c.html_url ?? null,
+    })),
+  };
+}
+
+/**
  * Everything the model needs to judge one PR, as JSON: the analysis, the
  * incremental diff since my last review, my open threads with their full text,
  * and the legal comment anchors.
@@ -480,6 +523,11 @@ COMMANDS.context = async () => {
       deltaDiff: delta.diff ? store.cacheFile(base.root, base.repo, n, 'delta.patch') : null,
     },
     urgency: scoreTracked(analysis, { priorityAuthors: base.cfg.priorityAuthors }),
+    // Comments already staged in an unsubmitted review. They are on GitHub, the
+    // human may have rewritten them there, and raising any of them again would
+    // put a second copy in the same review — so they are context to read, never
+    // findings to repeat.
+    staged: await readStagedReview(base, n, store.readState(base.root, base.repo, n)),
   };
 
   // Notes the human left on the existing draft. Surfaced here as well as in
@@ -609,6 +657,13 @@ COMMANDS.draft = async () => {
   const analysis = analyzePr(pr, base.login, { ...nudgeOpts(base), deltaDiff: delta.diff, newCommits: delta.commits });
   const fullDiff = await prDiff(base.repo, n);
 
+  // What an earlier `event: REPLY` pass already put on GitHub. Read before the
+  // state below, because a review that is no longer pending is forgotten here
+  // and `prev` must see the document that leaves.
+  const staged = await readStagedReview(base, n, store.readState(base.root, base.repo, n));
+
+  const reStaged = disarmStagedDuplicates(findings, staged);
+
   // Anchors are validated at generation time as well as at submit time, so the
   // human never spends effort editing a comment that could never be posted.
   if (findings?.findings?.length) {
@@ -677,6 +732,8 @@ COMMANDS.draft = async () => {
     carriedAsks: carried.asks,
     carriedAnswers: carried.answers,
     askChanges: carried.changes,
+    // Read, not regenerated: see `readStagedReview`.
+    staged,
   };
 
   // The human's `*-reviewed:` acknowledgements, carried the same way their notes
@@ -760,8 +817,15 @@ COMMANDS.draft = async () => {
       promoted: carried.promoted, changes: carried.changes,
     },
     doc: hatches,
+    staged: staged ? { url: staged.url, comments: staged.comments.length, disarmed: reStaged } : null,
   });
   say(`drafted ${target}`);
+  if (staged) {
+    say(`  ${staged.comments.length} comment(s) are staged in an unsubmitted review on GitHub — shown as context, not redrafted`);
+    for (const id of reStaged) {
+      say(`  finding ${id} lands on a staged comment's anchor, so it was written \`post: false\` — enable it only if it says something different`);
+    }
+  }
   for (const p of carried.promoted ?? []) {
     const from = p.lifted ? `, lifted out of <!-- prt:${p.lifted} -->` : '';
     say(`  promoted @ai note → ask ${p.id} (re: ${p.re}${p.follows ? `, follows: ${p.follows}` : ''}${p.inferred ? ', inferred from position' : ''}) at line ${p.line}${from}`);

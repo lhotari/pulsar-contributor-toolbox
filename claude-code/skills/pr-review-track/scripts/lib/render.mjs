@@ -119,6 +119,36 @@ export function expectedBlockIds({ analysis, findings }) {
   return { ids, anchors };
 }
 
+/**
+ * Disarm any finding that lands on the anchor of a comment already staged in an
+ * unsubmitted review, and say so in its body.
+ *
+ * A finding at the same `path:line` as a staged comment is almost always the
+ * same point raised twice, and arming it would put a second copy in the same
+ * review — where the copy this round writes is the OLDER text, because the
+ * staged one may have been edited on GitHub since. It is not dropped, because it
+ * may be a genuinely different point on the same line and only the human can
+ * say. It arrives `post: false` with the reason attached, exactly as a finding
+ * whose anchor no longer validates does.
+ *
+ * Mutates the findings it is given, like the anchor check beside it, and returns
+ * the ids it disarmed so the caller can report them.
+ */
+export function disarmStagedDuplicates(findings, staged) {
+  const comments = staged?.comments ?? [];
+  const disarmed = [];
+  if (!comments.length) return disarmed;
+  for (const [i, f] of (findings?.findings ?? []).entries()) {
+    if (f.post === false) continue;
+    const hit = comments.find((c) => c.path === f.path && c.line != null && c.line === f.line);
+    if (!hit) continue;
+    f.post = false;
+    f.body = `${f.body}\n\n<!-- prt: a comment is already staged at this anchor in your unsubmitted review, so post is false. Enable it only if this says something the staged one does not. -->`;
+    disarmed.push(inlineIdFor(f, i));
+  }
+  return disarmed;
+}
+
 export function renderActionFile({
   repo,
   analysis,
@@ -134,6 +164,7 @@ export function renderActionFile({
   carriedAnswers = [],
   askChanges = [],
   carriedDoc = {},
+  staged = null,
 }) {
   // An OPEN ask is rendered beside whatever it is about: a note on inline i7 is
   // unjudgeable away from i7's text. Orphans get their own section, since they
@@ -274,6 +305,37 @@ export function renderActionFile({
   out.push('<!-- /prt -->');
   out.push('');
 
+  // ---------- what is already staged on GitHub (never posted) ----------
+  // A staged review is the one part of a round this file does not own. The
+  // comments in it were put on GitHub by an `event: REPLY` pass and may have
+  // been rewritten there since, so they are shown as they stand NOW and are not
+  // regenerated as blocks: a `prt:inline` copy of one would be an older version
+  // of a comment that already exists, and arming it would post it twice.
+  if (staged?.comments?.length) {
+    out.push('## Already staged on GitHub');
+    out.push('');
+    out.push('<!-- prt:context -->');
+    out.push('');
+    out.push(`**${staged.comments.length} comment(s) sit in an unsubmitted review** — nobody but you can see them: ${staged.url ? `<${staged.url}>` : 'in your pending review on this PR'}`);
+    out.push('');
+    out.push('That review is the authoritative copy: edit those comments on GitHub, not here.');
+    out.push('This file cannot change them, and it does not redraft them. The next real verdict');
+    out.push('(`COMMENT`, `APPROVE`, `REQUEST_CHANGES`) submits the review as it stands there, with');
+    out.push('the summary below as its body and any new comments in this file added to it.');
+    out.push('');
+    for (const c of staged.comments) {
+      const where = c.inReplyToId
+        ? `reply in the thread at ${codeLink(repo, a.headOid, c.path, { line: c.line, full: true })}`
+        : `new thread at ${codeLink(repo, a.headOid, c.path, { line: c.line, full: true })}`;
+      out.push(`- ${where}`);
+      out.push(quote(c.body, 8).split('\n').map((l) => `  ${l}`).join('\n'));
+    }
+    out.push('');
+    out.push('<!-- /prt -->');
+    out.push('');
+    emitAsks(out, 'staged');
+  }
+
   // ---------- verdict ----------
   out.push('## Verdict');
   out.push('');
@@ -288,7 +350,13 @@ export function renderActionFile({
     out.push('> in the block above, review the whole file, and set line 1 to `Status: ready`.');
   }
   out.push('');
-  out.push('Valid values: `APPROVE`, `REQUEST_CHANGES`, `COMMENT`, `REPLY` (file-thread replies only; no resolution or completed review), `NONE` (no review).');
+  out.push('Valid values: `APPROVE`, `REQUEST_CHANGES`, `COMMENT`, `REPLY` (stage the comments below into an unsubmitted review; nothing becomes visible), `NONE` (no review).');
+  if (staged?.comments?.length) {
+    out.push('');
+    out.push(`> A staged review is already open on this PR with ${staged.comments.length} comment(s) in it. Any verdict but`);
+    out.push('> `REPLY` submits **that** review — its comments as they now stand on GitHub, the summary');
+    out.push('> below as its body — and `REPLY` adds to it.');
+  }
   out.push('');
   out.push('*Not happy with this call, or want something answered before you arm it? Type* `@ai verdict …` *below — it is never posted.*');
   out.push('');
@@ -390,7 +458,7 @@ export function renderActionFile({
   if (discussionReplies.length) {
     out.push('## PR conversation replies');
     out.push('');
-    out.push('*Ordinary PR comments. Posted with `APPROVE`, `REQUEST_CHANGES`, `COMMENT`, or `NONE`; deferred by `REPLY`.*');
+    out.push('*Ordinary PR comments. Posted with `APPROVE`, `REQUEST_CHANGES`, `COMMENT`, or `NONE`; deferred by `REPLY`, which has nowhere to stage them.*');
     out.push('');
     let n = 0;
     for (const { comment, assessment } of discussionReplies) {
@@ -418,6 +486,7 @@ export function renderActionFile({
   out.push('');
   if (items.length) {
     out.push('*One block per comment. `post: false` keeps it as a note without posting it.*');
+    out.push('*Under `event: REPLY` these are staged into an unsubmitted review instead of posted.*');
     out.push('');
   } else {
     out.push('*No inline comments drafted. To add one, copy the template below and remove the*');

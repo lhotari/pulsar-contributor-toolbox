@@ -22,7 +22,10 @@ import {
   NOTE_LINE, questionHash, resealEditedAsks, renderAsk,
 } from '../lib/actionfile.mjs';
 import { parseDiff, commentableAnchors, validateAnchor, touchesAnchor } from '../lib/diff.mjs';
-import { renderActionFile, renderBoard, bucketOf, isReviewInProgress, REVIEW_IN_PROGRESS_STATUSES } from '../lib/render.mjs';
+import {
+  renderActionFile, renderBoard, bucketOf, isReviewInProgress, REVIEW_IN_PROGRESS_STATUSES,
+  disarmStagedDuplicates,
+} from '../lib/render.mjs';
 import { scorePr, rankCandidates } from '../lib/rank.mjs';
 import { securityLint, askQuoteLint, diffFingerprint } from '../lib/submit.mjs';
 import { analyzePr, recommendEvent, assessNudge, THREAD_STATES } from '../lib/analyze.mjs';
@@ -225,7 +228,7 @@ a reply
   assert.deepEqual(planActions(p).map((a) => a.kind), ['thread-reply']);
 });
 
-test('event REPLY posts only file-thread replies and defers every other action', () => {
+test('event REPLY stages comments and replies, and defers what has no draft state', () => {
   const f = `Status: draft
 <!-- prt:verdict
 event: REPLY
@@ -257,8 +260,53 @@ about a security vulnerability
 `;
   const p = parseActionFile(f);
   assert.deepEqual(p.errors, []);
-  assert.deepEqual(planActions(p).map((a) => a.kind), ['thread-reply']);
-  assert.deepEqual(securityLint(p), [], 'security lint examines only the reply-only action set');
+  // The new thread and the reply are both staged into one pending review; the
+  // summary, the resolution and the PR comment have no draft state to sit in.
+  assert.deepEqual(planActions(p).map((a) => a.kind), ['stage-open', 'stage-comment', 'stage-reply']);
+  assert.deepEqual(securityLint(p), [], 'the deferred PR comment is outside the staged action set');
+  assert.match(
+    p.warnings.join(' '),
+    /the review summary, thread resolutions, PR conversation comments/,
+    'a file whose armed blocks are staying behind says so',
+  );
+});
+
+test('staged text is still linted — it is on GitHub, one click from being visible', () => {
+  const f = `Status: draft
+<!-- prt:verdict
+event: REPLY
+-->
+<!-- prt:inline
+id: i1
+path: a
+line: 1
+-->
+this is a remote code execution hole and it is exploitable without auth
+<!-- /prt -->
+`;
+  const p = parseActionFile(f);
+  assert.deepEqual(p.errors, []);
+  assert.equal(securityLint(p).length > 0, true, 'a disclosure staged is a disclosure caught');
+});
+
+test('a staged reply needs no reply-to: the thread node id addresses it', () => {
+  const withoutReplyTo = (event) => `Status: draft
+<!-- prt:verdict
+event: ${event}
+-->
+<!-- prt:thread
+id: t1
+thread: PRRT_x
+-->
+a reply
+<!-- /prt -->
+`;
+  assert.deepEqual(parseActionFile(withoutReplyTo('REPLY')).errors, []);
+  assert.match(
+    parseActionFile(withoutReplyTo('NONE')).errors.join(' '),
+    /reply-to/,
+    'the immediate path still needs the REST id of the thread\'s first comment',
+  );
 });
 
 test('an empty COMMENT review is rejected rather than posted as an empty review', () => {
@@ -748,6 +796,53 @@ test('ordinary author questions can be drafted as gated conversation replies', (
   const p = parseActionFile(text);
   assert.equal(p.issueComments.length, 1);
   assert.equal(p.issueComments[0].body, 'Yes, because it covers the compatibility path.');
+});
+
+test('a staged review is shown as GitHub\'s copy, and is not redrafted as blocks', () => {
+  const text = renderActionFile({
+    repo: 'apache/pulsar',
+    analysis: fixtureAnalysis({ headMoved: false, myLastReview: null }),
+    delta: { commits: [], diff: null },
+    findings: { summary: 'Looks fine.', recommendedEvent: 'COMMENT', findings: [] },
+    kind: 're-review',
+    reviewerLogin: 'me',
+    staged: {
+      url: 'https://github.com/apache/pulsar/pull/42#pullrequestreview-77',
+      comments: [
+        { id: '501', path: 'src/Modified.java', line: 11, side: 'RIGHT', inReplyToId: null, body: 'A staged new thread.' },
+        { id: '502', path: 'src/Modified.java', line: 11, side: 'RIGHT', inReplyToId: '5', body: 'A staged reply.' },
+      ],
+    },
+  });
+  const p = parseActionFile(text);
+  assert.deepEqual(p.errors, [], p.errors.join('; '));
+  assert.match(text, /## Already staged on GitHub/);
+  assert.match(text, /pullrequestreview-77/);
+  assert.match(text, /> A staged new thread\./, 'the text is quoted as it stands on GitHub');
+  assert.match(text, /> A staged reply\./);
+  assert.match(text, /authoritative copy/);
+  // The one thing that must never happen: a staged comment coming back as a
+  // block, which would arm a second copy of a comment that already exists.
+  assert.deepEqual(p.inline, []);
+  assert.equal(p.threads.length, 0);
+});
+
+test('a finding on a staged comment\'s anchor is disarmed, not dropped and not armed', () => {
+  const staged = { comments: [{ path: 'A.java', line: 11, side: 'RIGHT', body: 'Already staged.', inReplyToId: null }] };
+  const findings = {
+    findings: [
+      { id: 'i1', path: 'A.java', line: 11, side: 'RIGHT', body: 'The same point again.' },
+      { id: 'i2', path: 'A.java', line: 12, side: 'RIGHT', body: 'A different line.' },
+      { id: 'i3', path: 'B.java', line: 11, side: 'RIGHT', body: 'A different file.' },
+    ],
+  };
+  assert.deepEqual(disarmStagedDuplicates(findings, staged), ['i1']);
+  assert.equal(findings.findings[0].post, false, 'a second copy in the same review is the one thing it must not do');
+  assert.match(findings.findings[0].body, /already staged at this anchor/);
+  assert.match(findings.findings[0].body, /The same point again\./, 'the words are kept — only the human can say it is a duplicate');
+  assert.equal(findings.findings[1].post, undefined, 'a different line is left alone');
+  assert.equal(findings.findings[2].post, undefined);
+  assert.deepEqual(disarmStagedDuplicates(findings, null), [], 'no staged review, nothing to compare against');
 });
 
 test('board buckets put an author waiting on me above everything else', () => {

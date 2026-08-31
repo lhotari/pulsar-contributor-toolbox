@@ -187,8 +187,13 @@ export function readStateFrom(dir) {
  * one, which was harmless while every field was theirs. The job queue is not:
  * losing it on `prt sync` — step 1 of every re-review — would be
  * indistinguishable from work that was never queued at all.
+ *
+ * `staged` is the pending review an `event: REPLY` pass left on GitHub. Losing
+ * it would be worse than losing a job: the next round would not know that the
+ * comments in that review are the authoritative copy, and would draft over
+ * them.
  */
-const CARRIED_KEYS = ['job', 'lastJob'];
+const CARRIED_KEYS = ['job', 'lastJob', 'staged'];
 
 export function writeState(root, repo, number, state) {
   ensurePrDir(root, repo, number);

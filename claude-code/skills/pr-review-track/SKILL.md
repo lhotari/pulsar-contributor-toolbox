@@ -362,6 +362,13 @@ Revision is about wording and emphasis. It must not quietly change the review.
   rather than deleting it.
 - Do not change `event:` in `prt:verdict` unless the human asked. Never write
   `APPROVE` (invariant 3).
+- **Never redraft what is already staged.** If the file has an *Already staged on
+  GitHub* section, those comments live in an unsubmitted review and the human may
+  have rewritten them there — that copy is the authoritative one. Do not turn one
+  into a `prt:inline` block, do not "improve" the quoted text, and do not raise
+  the same point again: the file cannot change them, and a duplicate would sit in
+  the same review beside the original. See
+  [action-file.md](references/action-file.md#prtverdict--the-review-resolution).
 - Keep the pipeline's internal mechanics out of anything that posts: the tier,
   the effort, round numbers, internal roles (adjudicator, validator, refutation
   pass), the shape ("two-model", "single-reviewer"), and which pass raised a

@@ -74,6 +74,13 @@ Write it to `$PRT_ROOT/<owner>/<repo>/pr-<N>/cache/findings.json`.
 `requireExplicitApprove` on (the default), a recommendation of `APPROVE` is shown
 to the human but the file is written with `event: COMMENT`.
 
+**`context.staged`** — when `prt context <N>` reports a staged review, those
+comments are already on GitHub in an unsubmitted review, and the human may have
+rewritten them there. Do not raise any of them again. A finding that repeats one
+becomes a second copy of the same comment inside the same review, and the copy
+this run writes is the older of the two. Read them as prior work, exactly as you
+read your own earlier review.
+
 **`findings[].path` / `line` / `side`** must land on a line the PR's diff allows a
 comment on. `prt anchors <N>` prints those; `prt context <N>` includes them per
 file as `commentableRight` / `commentableLeft`. A finding whose anchor does not
@@ -135,5 +142,6 @@ everything else lands as `post: false` context so the human can arm it manually.
 `analysis.newIssueComments`. Include an entry whenever the PR author asks a
 question or otherwise needs a reviewer response. Match the source comment by
 its `url`; a non-empty `reply` becomes a gated `prt:issue-comment`. These replies
-post with `APPROVE`, `REQUEST_CHANGES`, `COMMENT`, or `NONE`, but are deferred by
-the file-thread-only `REPLY` event.
+post with `APPROVE`, `REQUEST_CHANGES`, `COMMENT`, or `NONE`. `REPLY` defers
+them: it stages comments into an unsubmitted review, and a PR conversation
+comment has no such draft state.

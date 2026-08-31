@@ -45,7 +45,7 @@ const DIFF = `diff --git a/A.java b/A.java
 `;
 
 /** The GraphQL PR payload preflight fetches. */
-function prJson({ state = 'OPEN', head = HEAD, author = 'someone' } = {}) {
+function prJson({ state = 'OPEN', head = HEAD, author = 'someone', threads = [] } = {}) {
   return JSON.stringify({
     data: {
       repository: {
@@ -64,7 +64,7 @@ function prJson({ state = 'OPEN', head = HEAD, author = 'someone' } = {}) {
           labels: { nodes: [] },
           commits: { nodes: [] },
           reviews: { nodes: [] },
-          reviewThreads: { nodes: [] },
+          reviewThreads: { nodes: threads },
           comments: { nodes: [] },
         },
       },
@@ -73,11 +73,11 @@ function prJson({ state = 'OPEN', head = HEAD, author = 'someone' } = {}) {
 }
 
 /** Rules every scenario needs: identity, PR fetch, diff, pending-review check. */
-function baseRules(extra = [], { prState = 'OPEN', head = HEAD, author = 'someone' } = {}) {
+function baseRules(extra = [], { prState = 'OPEN', head = HEAD, author = 'someone', threads = [] } = {}) {
   return [
     ...extra,
     { when: { args: ['graphql'], body: 'viewer' }, stdout: '{"data":{"viewer":{"login":"me"}}}' },
-    { when: { args: ['graphql'], body: 'pullRequest' }, stdout: prJson({ state: prState, head, author }) },
+    { when: { args: ['graphql'], body: 'pullRequest' }, stdout: prJson({ state: prState, head, author, threads }) },
     { when: { args: ['pr', 'diff'] }, stdout: DIFF },
     { when: { arg: 'pulls/1/reviews', args: ['--paginate'] }, stdout: '[[]]' },
     { when: { arg: 'pulls/1/comments', args: ['--paginate'] }, stdout: '[[]]' },
@@ -651,4 +651,199 @@ test('nothing but a human decision is eligible to travel between generations', (
   const read = [...source.matchAll(/doc\??\.?\[\s*'([a-z][a-z-]*-reviewed)'\s*\]/g)].map((m) => m[1]);
   assert.equal(read.length >= 3, true, 'the scan still finds the hatch reads it is guarding');
   for (const key of new Set(read)) assert.equal(HUMAN_DOC_KEYS.includes(key), true, key);
+});
+
+// ---------------------------------------------------------------------------
+// Staging: `event: REPLY` writes into a PENDING review and never submits it.
+//
+// The mode exists so a round of comments can be prepared where the author
+// cannot see them and the human can rewrite them in GitHub's UI before anyone
+// else reads a word. Two things have to hold for that to mean anything: nothing
+// in the pass may submit, and a later pass must complete THAT review rather
+// than post a second one beside it.
+
+const THREAD = {
+  id: 'PRRT_1',
+  isResolved: false,
+  isOutdated: false,
+  path: 'A.java',
+  line: 11,
+  diffSide: 'RIGHT',
+  comments: { nodes: [{ databaseId: 5, fullDatabaseId: 5, author: { login: 'someone' }, createdAt: '2026-01-01T00:00:00Z', url: 'u', body: 'q' }] },
+};
+
+const STAGE_RULES = [
+  {
+    when: { args: ['graphql'], body: 'addPullRequestReviewThreadReply(' },
+    stdout: '{"data":{"addPullRequestReviewThreadReply":{"comment":{"id":"PRRC_2","databaseId":502,"url":"https://x/c502"}}}}',
+  },
+  {
+    when: { args: ['graphql'], body: 'addPullRequestReviewThread(' },
+    stdout: '{"data":{"addPullRequestReviewThread":{"thread":{"id":"PRRT_new","path":"A.java","subjectType":"LINE","comments":{"nodes":[{"databaseId":501,"url":"https://x/c501"}]}}}}}',
+  },
+  {
+    when: { args: ['graphql'], body: 'addPullRequestReview(' },
+    stdout: '{"data":{"addPullRequestReview":{"pullRequestReview":{"id":"PRR_77","databaseId":77,"url":"https://x/1#pullrequestreview-77","state":"PENDING"}}}}',
+  },
+];
+
+/** A file that stages one new thread and one reply into a thread I own. */
+function replyFile({ event = 'REPLY', inline = true, thread = true, body = '' } = {}) {
+  const parts = [
+    'Status: ready', '',
+    '<!-- prt:doc', 'schema: 1', `repo: ${REPO}`, `pr: ${PR}`, `head: ${HEAD}`, 'base-ref: master', '-->', '',
+    '<!-- prt:verdict', `event: ${event}`, '-->', '',
+  ];
+  if (body) parts.push('<!-- prt:body -->', body, '<!-- /prt -->', '');
+  if (inline) parts.push('<!-- prt:inline', 'id: i1', 'path: A.java', 'line: 11', 'side: RIGHT', '-->', 'New thread text.', '<!-- /prt -->', '');
+  if (thread) parts.push('<!-- prt:thread', 'id: t1', 'thread: PRRT_1', 'reply-to: 5', '-->', 'Reply text.', '<!-- /prt -->', '');
+  return `${parts.join('\n')}\n`;
+}
+
+const stateOf = (dir) => JSON.parse(fs.readFileSync(path.join(dir, 'pr.json'), 'utf8'));
+const graphqlCalls = (log) => calls(log).filter((c) => c.args.includes('graphql')).map((c) => c.args.join(' '));
+
+test('event REPLY stages comments into an unsubmitted review and submits nothing', () => {
+  const dir = setupPr(replyFile());
+  const log = path.join(ROOT, 'stage.jsonl');
+  const scenario = writeScenario('stage', baseRules(STAGE_RULES, { threads: [THREAD] }), log);
+
+  const r = runPrt(['submit', '1', '--repo', REPO], scenario);
+  assert.equal(r.status, 0, r.stderr);
+
+  assert.deepEqual(calls(log).filter(isWrite), [], 'staging writes nothing over REST — no review is created or submitted');
+  const mutations = graphqlCalls(log).filter((q) => q.includes('mutation'));
+  assert.equal(mutations.length, 3, 'start the review, stage the thread, stage the reply');
+  assert.equal(mutations.filter((q) => q.includes('addPullRequestReview(input:')).length, 1);
+  assert.equal(mutations.filter((q) => q.includes('addPullRequestReviewThread(input:')).length, 1);
+  assert.equal(mutations.filter((q) => q.includes('addPullRequestReviewThreadReply(input:')).length, 1);
+  assert.equal(
+    graphqlCalls(log).some((q) => q.includes('submitPullRequestReview') || q.includes('/events')),
+    false,
+    'nothing submits the review it just started',
+  );
+
+  const file = fs.readFileSync(path.join(dir, 'review.md'), 'utf8');
+  assert.equal(file.split('\n')[0], 'Status: submitted');
+  assert.match(file, /actions staged/);
+  assert.match(file, /UNSUBMITTED review/);
+
+  // The record the next round turns on.
+  assert.equal(stateOf(dir).staged.reviewDatabaseId, '77');
+  assert.equal(stateOf(dir).staged.reviewNodeId, 'PRR_77');
+});
+
+test('a second REPLY pass adds to the review the first one staged', () => {
+  const dir = setupPr(replyFile({ inline: false }));
+  fs.writeFileSync(path.join(dir, 'pr.json'), JSON.stringify({
+    schema: 1, repo: REPO, number: PR, title: 't', state: 'OPEN',
+    staged: { reviewDatabaseId: '77', reviewNodeId: 'PRR_77', url: 'https://x/1#pullrequestreview-77' },
+  }));
+  const log = path.join(ROOT, 'stage-again.jsonl');
+  const scenario = writeScenario('stage-again', baseRules([
+    ...STAGE_RULES,
+    {
+      when: { arg: 'pulls/1/reviews', args: ['--paginate'] },
+      stdout: '[[{"id":77,"node_id":"PRR_77","state":"PENDING","user":{"login":"me"},"html_url":"https://x/1#pullrequestreview-77"}]]',
+    },
+  ], { threads: [THREAD] }), log);
+
+  const r = runPrt(['submit', '1', '--repo', REPO], scenario);
+  assert.equal(r.status, 0, r.stderr);
+  const mutations = graphqlCalls(log).filter((q) => q.includes('mutation'));
+  assert.equal(
+    mutations.filter((q) => q.includes('addPullRequestReview(input:')).length, 0,
+    'GitHub allows one pending review per person, so the second pass reuses it rather than asking for a second',
+  );
+  assert.equal(mutations.filter((q) => q.includes('addPullRequestReviewThreadReply(input:')).length, 1);
+});
+
+test('a pending review prt did not stage still blocks, as it always did', () => {
+  const dir = setupPr(actionFile());
+  const log = path.join(ROOT, 'stranger.jsonl');
+  const scenario = writeScenario('stranger', baseRules([
+    {
+      when: { arg: 'pulls/1/reviews', args: ['--paginate'] },
+      stdout: '[[{"id":88,"node_id":"PRR_88","state":"PENDING","user":{"login":"me"},"html_url":"https://x/1#pullrequestreview-88"}]]',
+    },
+  ]), log);
+
+  const r = runPrt(['submit', '1', '--repo', REPO], scenario);
+  assert.notEqual(r.status, 0);
+  assert.deepEqual(calls(log).filter(isWrite), [], 'nothing was posted');
+  const file = fs.readFileSync(path.join(dir, 'review.md'), 'utf8');
+  assert.equal(file.split('\n')[0], 'Status: blocked');
+  assert.match(file, /prt did not stage/);
+});
+
+test('a later verdict submits the staged review, with the summary from the file', () => {
+  const dir = setupPr(actionFile({ inline: false }));
+  fs.writeFileSync(path.join(dir, 'pr.json'), JSON.stringify({
+    schema: 1, repo: REPO, number: PR, title: 't', state: 'OPEN',
+    staged: { reviewDatabaseId: '77', reviewNodeId: 'PRR_77', url: 'https://x/1#pullrequestreview-77' },
+  }));
+  const log = path.join(ROOT, 'complete.jsonl');
+  const scenario = writeScenario('complete', baseRules([
+    {
+      when: { arg: 'pulls/1/reviews', args: ['--paginate'] },
+      stdout: '[[{"id":77,"node_id":"PRR_77","state":"PENDING","user":{"login":"me"},"html_url":"https://x/1#pullrequestreview-77"}]]',
+    },
+    {
+      when: { args: ['--method', 'POST'], arg: 'pulls/1/reviews/77/events' },
+      stdout: '{"id":77,"state":"COMMENTED","html_url":"https://x/1#pullrequestreview-77"}',
+    },
+  ]), log);
+
+  const r = runPrt(['submit', '1', '--repo', REPO], scenario);
+  assert.equal(r.status, 0, r.stderr);
+  const posts = calls(log).filter(isWrite);
+  assert.equal(posts.length, 1, 'the staged review is submitted, not duplicated by a new one');
+  assert.match(posts[0].args.join(' '), /pulls\/1\/reviews\/77\/events/);
+  assert.deepEqual(JSON.parse(posts[0].stdin), { event: 'COMMENT', body: 'Summary.' });
+
+  assert.equal(fs.readFileSync(path.join(dir, 'review.md'), 'utf8').split('\n')[0], 'Status: submitted');
+  assert.equal(stateOf(dir).staged ?? null, null, 'a submitted review is no longer a draft anyone can edit');
+});
+
+test('a staged review comes back into the next draft as context, not as blocks', () => {
+  const dir = setupEmptyPr();
+  fs.writeFileSync(path.join(dir, 'pr.json'), JSON.stringify({
+    schema: 1, repo: REPO, number: PR, title: 't', state: 'OPEN',
+    staged: { reviewDatabaseId: '77', reviewNodeId: 'PRR_77', url: 'https://x/1#pullrequestreview-77' },
+  }));
+  const findings = path.join(ROOT, 'staged-findings.json');
+  fs.writeFileSync(findings, JSON.stringify({
+    summary: 'Two things.',
+    recommendedEvent: 'COMMENT',
+    findings: [
+      { id: 'i1', severity: 'BUG', claim: 'same anchor', path: 'A.java', line: 11, side: 'RIGHT', body: 'The same point again.' },
+      { id: 'i2', severity: 'BUG', claim: 'different anchor', path: 'A.java', line: 12, side: 'RIGHT', body: 'A different line.' },
+    ],
+  }));
+  const scenario = writeScenario('staged-draft', baseRules([
+    {
+      when: { arg: 'pulls/1/reviews/77/comments', args: ['--paginate'] },
+      stdout: '[[{"id":501,"path":"A.java","line":11,"side":"RIGHT","body":"The staged wording, as I edited it on GitHub.","html_url":"https://x/c501"}]]',
+    },
+    {
+      when: { arg: 'pulls/1/reviews', args: ['--paginate'] },
+      stdout: '[[{"id":77,"node_id":"PRR_77","state":"PENDING","user":{"login":"me"},"html_url":"https://x/1#pullrequestreview-77"}]]',
+    },
+  ]), path.join(ROOT, 'staged-draft.jsonl'));
+
+  const r = runPrt(['draft', '1', '--repo', REPO, '--findings', findings], scenario);
+  assert.equal(r.status, 0, r.stderr);
+  const text = fs.readFileSync(path.join(dir, 'review.md'), 'utf8');
+
+  assert.match(text, /## Already staged on GitHub/);
+  assert.match(text, /The staged wording, as I edited it on GitHub\./, 'GitHub\'s text, not the store\'s');
+  assert.match(`${r.stdout}${r.stderr}`, /staged in an unsubmitted review/);
+
+  // The staged comment is context. The finding that lands on its anchor is
+  // disarmed rather than dropped; the one on a different line is untouched.
+  const p = parseActionFile(text);
+  const byId = new Map(p.inline.map((c) => [c.id, c]));
+  assert.equal(byId.get('i1').post, false);
+  assert.match(byId.get('i1').body, /already staged at this anchor/);
+  assert.equal(byId.get('i2').post, true);
 });

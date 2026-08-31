@@ -20,10 +20,11 @@ import { parseActionFile, planActions, contentHash, payloadHash, setStatus, setP
 import { parseDiff, commentableAnchors, validateAnchor } from './diff.mjs';
 import {
   prDiff, fetchPr, submitReview, replyToComment, resolveThread, pendingReviews, describeApiError, httpStatusOf,
-  createPendingReview, addFileThread, submitPendingReview,
+  createPendingReview, submitPendingReview,
+  startPendingReview, addReviewThread, addThreadReply, reviewComments,
 } from './github.mjs';
 import { rest, restAll, restRaw, parseBody, viewerLogin } from './gh.mjs';
-import { writeAtomic, acquireLock, archiveActionFile } from './store.mjs';
+import { writeAtomic, acquireLock, archiveActionFile, readState, writeState } from './store.mjs';
 
 const MUTATION_SPACING_MS = 1200; // GitHub asks for >=1s between mutating requests
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -111,7 +112,11 @@ export async function capture(ctx) {
   if (parsed.errors.length) throw new Blocked(parsed.errors);
 
   const actions = planActions(parsed);
-  if (actions.length === 0) throw new Blocked('nothing to post: every block is `post: false` and `event:` is NONE');
+  if (actions.length === 0) {
+    throw new Blocked(parsed.event === 'REPLY'
+      ? 'nothing to stage: `event: REPLY` stages comments and replies, and every one of them is `post: false` or empty'
+      : 'nothing to post: every block is `post: false` and `event:` is NONE');
+  }
 
   const txId = `${new Date().toISOString().replace(/[:.]/g, '-')}-${payloadHash(parsed).slice(-8)}`;
   const dir = txDir(prPath, txId);
@@ -150,6 +155,21 @@ export async function capture(ctx) {
 }
 
 /**
+ * What this store recorded an `event: REPLY` pass staging, if anything.
+ *
+ * Reading it must never be what stops a submit: a corrupt `pr.json` means the
+ * record cannot be trusted, which is the same answer as not having one — every
+ * pending review is then a stranger and blocks, which is the safe direction.
+ */
+function stagedRecord(ctx) {
+  try {
+    return readState(ctx.root, ctx.repo, ctx.number)?.staged ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Step 2 — preflight. Every precondition is re-checked against live GitHub.
  * Returns a list of blocking reasons (empty means "safe to post").
  */
@@ -181,22 +201,43 @@ export async function preflight(ctx, parsed, tx) {
     reasons.push('the effective diff changed since this draft was generated (base advanced or the PR was rebased)');
   }
 
-  // A pending review we did not create may hold comments this file knows nothing about.
+  // A pending review is either the one an earlier `event: REPLY` pass staged —
+  // in which case this pass is meant to add to it or to submit it — or one this
+  // tool has never seen, holding comments the file knows nothing about.
+  //
+  // The difference is recorded, not guessed: `state.json` names the review a
+  // staged pass left behind. An unrecorded one still blocks exactly as it
+  // always did, because submitting it would publish text nobody here has read,
+  // and a `REPLY` pass would bury its comments inside a review someone else's
+  // hand started.
   const pending = await pendingReviews(repo, number);
-  if (pending.length) {
+  const stagedId = String(stagedRecord(ctx)?.reviewDatabaseId ?? '');
+  const ours = pending.filter((p) => stagedId && String(p.id) === stagedId);
+  const strangers = pending.filter((p) => !ours.includes(p));
+  if (strangers.length) {
     reasons.push(
-      `you have ${pending.length} unsubmitted (PENDING) review(s) on this PR — submit or discard them on GitHub first: ${pending
+      `you have ${strangers.length} unsubmitted (PENDING) review(s) on this PR that prt did not stage — submit or discard them on GitHub first: ${strangers
         .map((p) => p.html_url || `review ${p.id}`)
         .join(', ')}`,
     );
   }
+  // The one it did stage is carried forward to the executor, which reuses it
+  // rather than starting a second review GitHub would refuse to create anyway.
+  ctx.stagedReview = ours[0]
+    ? { reviewDatabaseId: String(ours[0].id), reviewNodeId: ours[0].node_id, url: ours[0].html_url }
+    : null;
 
   // Anchors. Never relocate or demote silently: refuse, and say where it moved to.
   const anchors = commentableAnchors(parseDiff(currentDiff));
   const anchorProblems = [];
-  const plannedInline = planned
-    .filter((a) => a.kind === 'review')
-    .flatMap((a) => a.comments);
+  // A staged comment anchors exactly like a posted one — GitHub rejects a
+  // pending thread on a line the diff does not offer — so both sets are checked
+  // here rather than only the one that publishes.
+  const plannedInline = planned.flatMap((a) => {
+    if (a.kind === 'review') return a.comments;
+    if (a.kind === 'stage-comment') return [a.comment];
+    return [];
+  });
   for (const c of plannedInline) {
     if (c.subject === 'file') {
       if (!anchors.has(c.path)) anchorProblems.push({ c, reason: `file "${c.path}" is not part of this diff`, nearest: null });
@@ -223,7 +264,7 @@ export async function preflight(ctx, parsed, tx) {
   const threadsById = new Map((pr.reviewThreads?.nodes ?? []).map((t) => [t.id, t]));
   const plannedThreads = new Map(
     planned
-      .filter((a) => a.kind.startsWith('thread-'))
+      .filter((a) => a.kind.startsWith('thread-') || a.kind === 'stage-reply')
       .map((a) => [a.thread.id, a.thread]),
   );
   for (const t of plannedThreads.values()) {
@@ -369,7 +410,12 @@ function wordsOf(s, { code = 'strip' } = {}) {
  * `prt:context`, `prt:notes`, `prt:log`, `prt:ask` and `prt:answer` are not
  * reachable from here, and a block kind added later is out of scope until it is
  * wired up to post. It also means the scope narrows with `event:` — under
- * `REPLY` only thread bodies are planned, so only thread bodies are linted.
+ * `REPLY` the review body is not planned, so the body is not linted.
+ *
+ * STAGED text is outgoing text. A comment in a pending review is already on
+ * GitHub's servers and one click from being visible to everyone, so "not
+ * published yet" is not a reason to skip the lints — it is the last moment they
+ * can still catch a disclosure before someone submits the review by hand.
  */
 function outgoingTexts(parsed) {
   const out = [];
@@ -377,7 +423,9 @@ function outgoingTexts(parsed) {
     if (action.kind === 'review') {
       if (action.body) out.push(['body', action.body]);
       for (const c of action.comments) out.push([c.id, c.body]);
-    } else if (action.kind === 'thread-reply') out.push([action.thread.id, action.thread.body]);
+    } else if (action.kind === 'thread-reply' || action.kind === 'stage-reply') {
+      out.push([action.thread.id, action.thread.body]);
+    } else if (action.kind === 'stage-comment') out.push([action.comment.id, action.comment.body]);
     else if (action.kind === 'issue-comment') out.push([action.id, action.body]);
   }
   return out;
@@ -771,6 +819,13 @@ export async function execute(ctx, parsed, txState) {
   const actions = planActions(parsed);
   const byId = new Map(actions.map((a) => [a.id, a]));
 
+  // `preflight` normally decides which pending review this run may touch, but a
+  // resume of a transaction that got past preflight does not run it again — and
+  // an executor that thought there was no staged review would start a second
+  // one GitHub refuses to create. `undefined` is "nobody has looked"; `null` is
+  // "looked, there is none".
+  if (ctx.stagedReview === undefined) ctx.stagedReview = await recordedStagedReview(ctx);
+
   tx.state = 'executing';
   writeTx(file, tx);
 
@@ -851,6 +906,37 @@ export async function execute(ctx, parsed, txState) {
   return tx;
 }
 
+/**
+ * The pending review this store recorded a staged pass leaving behind, if it is
+ * still pending. Never one prt did not stage: that is the case `preflight`
+ * blocks on, and a resumed run must not quietly adopt it.
+ */
+async function recordedStagedReview(ctx) {
+  const rec = stagedRecord(ctx);
+  if (!rec?.reviewDatabaseId) return null;
+  const live = (await pendingReviews(ctx.repo, ctx.number)).find((p) => String(p.id) === String(rec.reviewDatabaseId));
+  return live ? { reviewDatabaseId: String(live.id), reviewNodeId: live.node_id, url: live.html_url } : null;
+}
+
+/**
+ * The pending review this run is staging into: the one `stage-open` made or
+ * reused, read back from the journal when a resumed run has it recorded there
+ * and nowhere else.
+ */
+function stagedReviewOf(ctx, tx) {
+  if (ctx.stagedReview?.reviewNodeId) return ctx.stagedReview;
+  const open = tx.actions.find((a) => a.kind === 'stage-open');
+  const node = open?.result?.reviewNodeId ?? open?.pendingReviewNodeId ?? null;
+  if (!node) return null;
+  const review = {
+    reviewNodeId: node,
+    reviewDatabaseId: String(open?.result?.reviewDatabaseId ?? open?.pendingReviewId ?? ''),
+    url: open?.result?.url ?? null,
+  };
+  ctx.stagedReview = review;
+  return review;
+}
+
 async function performAction(ctx, action, tx, journal = () => {}) {
   const { repo, number } = ctx;
   switch (action.kind) {
@@ -877,8 +963,16 @@ async function performAction(ctx, action, tx, journal = () => {}) {
         return { ok: false, error: 'refusing to post a review with no event — that would create an invisible pending review' };
       }
 
-      // Fast path: no file-level comments, so one request does everything.
-      if (fileComments.length === 0) {
+      // A review an earlier `event: REPLY` pass staged is what this verdict
+      // completes. Its comments are GitHub's copy — edited there, in the UI,
+      // which is the whole point of staging — so this pass adds only what the
+      // file has that the review does not, and submits. It never re-sends the
+      // staged text, because the file's copy is the older of the two.
+      const staged = ctx.stagedReview;
+
+      // Fast path: nothing staged and no file-level comments, so one request
+      // creates and submits the whole review.
+      if (!staged && fileComments.length === 0) {
         payload.event = action.event;
         const r = await submitReview(repo, number, payload);
         if (r.ok) {
@@ -887,26 +981,49 @@ async function performAction(ctx, action, tx, journal = () => {}) {
         return { ok: false, error: r.error, ambiguous: isAmbiguous(r.status) };
       }
 
-      // Three-step path: PENDING review -> GraphQL file threads -> submit.
-      // Journal the pending review id the moment it exists, so an interrupted
-      // run leaves something recoverable rather than an orphan.
-      const created = await createPendingReview(repo, number, payload);
-      if (!created.ok) return { ok: false, error: created.error, ambiguous: isAmbiguous(created.status) };
-      const reviewId = String(created.review.id);
-      const reviewNodeId = created.review.node_id;
-      journal({ pendingReviewId: reviewId, pendingReviewNodeId: reviewNodeId });
+      // Otherwise: PENDING review -> GraphQL threads -> submit. Journal the
+      // pending review id the moment it exists, so an interrupted run leaves
+      // something recoverable rather than an orphan.
+      let reviewId;
+      let reviewNodeId;
+      let reviewUrl;
+      let toAdd;
+      if (staged) {
+        ({ reviewDatabaseId: reviewId, reviewNodeId, url: reviewUrl } = staged);
+        // Everything in the file, line comments included: they cannot ride the
+        // batch `comments[]` array, which only exists at create time.
+        toAdd = action.comments;
+      } else {
+        const created = await createPendingReview(repo, number, payload);
+        if (!created.ok) return { ok: false, error: created.error, ambiguous: isAmbiguous(created.status) };
+        reviewId = String(created.review.id);
+        reviewNodeId = created.review.node_id;
+        reviewUrl = created.review.html_url;
+        journal({ pendingReviewId: reviewId, pendingReviewNodeId: reviewNodeId });
+        toAdd = fileComments; // the line comments went in with the create
+      }
 
       const prNodeId = ctx.pullRequestNodeId ?? (await fetchPr(repo, number))?.id;
       if (!prNodeId) {
-        return { ok: false, error: `created pending review ${reviewId} but could not resolve the PR node id; discard or submit it on GitHub`, pendingReviewId: reviewId };
+        return { ok: false, error: `pending review ${reviewId} holds the comments but the PR node id could not be resolved; discard or submit it on GitHub`, pendingReviewId: reviewId };
       }
-      for (const c of fileComments) {
+      for (const c of toAdd) {
         await sleep(MUTATION_SPACING_MS);
-        const t = await addFileThread({ reviewNodeId, pullRequestNodeId: prNodeId, path: c.path, body: c.body });
+        const t = await addReviewThread({
+          reviewNodeId,
+          pullRequestNodeId: prNodeId,
+          path: c.path,
+          body: c.body,
+          subject: c.subject,
+          line: c.line,
+          side: c.side,
+          startLine: c.subject === 'range' ? c.startLine : null,
+          startSide: c.startSide,
+        });
         if (!t.ok) {
           return {
             ok: false,
-            error: `file-level comment on ${c.path} failed: ${t.error}. Pending review ${created.review.html_url} was left unsubmitted — submit or discard it on GitHub.`,
+            error: `comment on ${c.path} failed: ${t.error}. Pending review ${reviewUrl} was left unsubmitted — submit or discard it on GitHub.`,
             pendingReviewId: reviewId,
           };
         }
@@ -914,13 +1031,90 @@ async function performAction(ctx, action, tx, journal = () => {}) {
       await sleep(MUTATION_SPACING_MS);
       const submitted = await submitPendingReview(repo, number, reviewId, { event: action.event, body: action.body });
       if (submitted.ok) {
-        return { ok: true, result: { reviewDatabaseId: reviewId, url: submitted.review.html_url, state: submitted.review.state } };
+        return { ok: true, result: { reviewDatabaseId: reviewId, url: submitted.review.html_url, state: submitted.review.state, completedStaged: !!staged } };
       }
       return {
         ok: false,
-        error: `${submitted.error} (pending review ${created.review.html_url} still holds the comments)`,
+        error: `${submitted.error} (pending review ${reviewUrl} still holds the comments)`,
         pendingReviewId: reviewId,
         ambiguous: isAmbiguous(submitted.status),
+      };
+    }
+    // ---- staging: write into a PENDING review, and never submit it ----------
+    //
+    // The pending review is the unit of work, not each comment: GitHub allows
+    // one per person per pull request, so "find or create" is unambiguous and a
+    // resumed run cannot end up with two. `preflight` has already decided which
+    // pending review this pass is allowed to touch — one prt staged itself, or
+    // none — so this either reuses that or starts a new one.
+    case 'stage-open': {
+      if (ctx.stagedReview?.reviewNodeId) {
+        return { ok: true, result: { ...ctx.stagedReview, reused: true } };
+      }
+      const prNodeId = ctx.pullRequestNodeId ?? (await fetchPr(repo, number))?.id;
+      if (!prNodeId) return { ok: false, error: 'the PR node id could not be resolved', ambiguous: false };
+      const r = await startPendingReview({ pullRequestNodeId: prNodeId, commitOid: tx.preconditions.head || null });
+      if (!r.ok) return { ok: false, error: r.error, ambiguous: true };
+      const staged = {
+        reviewDatabaseId: String(r.review.databaseId ?? ''),
+        reviewNodeId: r.review.id,
+        url: r.review.url ?? null,
+      };
+      // Journalled before anything is put in it: an interrupted run must be
+      // able to find the review it started rather than start a second one.
+      journal({ pendingReviewId: staged.reviewDatabaseId, pendingReviewNodeId: staged.reviewNodeId });
+      ctx.stagedReview = staged;
+      return { ok: true, result: staged };
+    }
+    case 'stage-comment': {
+      const review = stagedReviewOf(ctx, tx);
+      if (!review) return { ok: false, error: 'the pending review to stage into is not known', ambiguous: false };
+      const prNodeId = ctx.pullRequestNodeId ?? (await fetchPr(repo, number))?.id;
+      if (!prNodeId) return { ok: false, error: 'the PR node id could not be resolved', ambiguous: false };
+      const c = action.comment;
+      const r = await addReviewThread({
+        reviewNodeId: review.reviewNodeId,
+        pullRequestNodeId: prNodeId,
+        path: c.path,
+        body: c.body,
+        subject: c.subject,
+        line: c.line,
+        side: c.side,
+        startLine: c.subject === 'range' ? c.startLine : null,
+        startSide: c.startSide,
+      });
+      if (!r.ok) return { ok: false, error: `staging "${c.id}" on ${c.path} failed: ${r.error}`, ambiguous: true };
+      const first = r.thread?.comments?.nodes?.[0] ?? null;
+      return {
+        ok: true,
+        result: {
+          threadNodeId: r.thread?.id ?? null,
+          // Recorded so a resumed run can tell this comment apart from another
+          // action's identical text — see `findExisting`.
+          commentDatabaseId: String(first?.databaseId ?? ''),
+          url: first?.url ?? null,
+          path: c.path,
+          staged: true,
+        },
+      };
+    }
+    case 'stage-reply': {
+      const review = stagedReviewOf(ctx, tx);
+      if (!review) return { ok: false, error: 'the pending review to stage into is not known', ambiguous: false };
+      const r = await addThreadReply({
+        reviewNodeId: review.reviewNodeId,
+        threadNodeId: action.thread.threadNodeId,
+        body: action.thread.body,
+      });
+      if (!r.ok) return { ok: false, error: `staging a reply in ${action.thread.threadNodeId} failed: ${r.error}`, ambiguous: true };
+      return {
+        ok: true,
+        result: {
+          commentDatabaseId: String(r.comment?.databaseId ?? ''),
+          url: r.comment?.url ?? null,
+          threadNodeId: action.thread.threadNodeId,
+          staged: true,
+        },
       };
     }
     case 'thread-reply': {
@@ -1061,6 +1255,51 @@ async function findExisting(ctx, action, tx) {
           normalizeBody(c.body) === want,
       );
       return hit ? { commentDatabaseId: String(hit.id), url: hit.html_url } : null;
+    }
+
+    // Staging recovers the same way posting does: ask GitHub what is already
+    // there. One pending review per person per pull request is what makes it
+    // answerable at all — "the" staged review is never ambiguous, so a resumed
+    // run adds the comments that are missing from it instead of a second copy
+    // of the ones that are not.
+    if (action.kind === 'stage-open') {
+      const pending = await pendingReviews(repo, number);
+      const journalled = String(tx.actions.find((a) => a.kind === 'stage-open')?.pendingReviewId ?? '');
+      const hit = (journalled && pending.find((p) => String(p.id) === journalled)) || pending[0];
+      return hit
+        ? { reviewDatabaseId: String(hit.id), reviewNodeId: hit.node_id, url: hit.html_url, reused: true }
+        : null;
+    }
+
+    if (action.kind === 'stage-comment' || action.kind === 'stage-reply') {
+      const review = stagedReviewOf(ctx, tx);
+      if (!review?.reviewDatabaseId) return null;
+      const isComment = action.kind === 'stage-comment';
+      const want = normalizeBody(isComment ? action.comment.body : action.thread.body);
+      if (!want) return null;
+      // A comment another action in this transaction already owns cannot also
+      // be this one. Two replies that say "Thanks, fixed." are the case that
+      // needs it: without the claim check the second would match the first's
+      // comment, be recorded as already staged, and never be written.
+      const claimed = new Set(
+        tx.actions
+          .filter((a) => a.state === 'done')
+          .map((a) => String(a.result?.commentDatabaseId ?? ''))
+          .filter(Boolean),
+      );
+      const hit = (await reviewComments(repo, number, review.reviewDatabaseId)).find((c) => {
+        if (normalizeBody(c.body) !== want || claimed.has(String(c.id))) return false;
+        if (isComment) return c.path === action.comment.path;
+        // `in_reply_to_id` pins a reply to its thread when GitHub reports it;
+        // matching on the body alone inside our own pending review is the
+        // fallback, and the claim check above keeps it from collapsing two.
+        const replyTo = action.thread.replyToCommentId;
+        return !replyTo || !c.in_reply_to_id || String(c.in_reply_to_id) === String(replyTo);
+      });
+      if (!hit) return null;
+      return isComment
+        ? { commentDatabaseId: String(hit.id), path: hit.path, staged: true }
+        : { commentDatabaseId: String(hit.id), threadNodeId: action.thread.threadNodeId, staged: true };
     }
 
     if (action.kind === 'issue-comment') {
@@ -1257,6 +1496,12 @@ export async function submitReady(ctx) {
           return `review ${a.event ?? 'NONE'} · body ${a.body ? `${a.body.length} chars` : '(none)'} · ${a.comments.length} inline comment(s)`;
         }
         if (a.kind === 'thread-reply') return `reply in thread ${a.thread.threadNodeId} (${a.thread.body.length} chars)`;
+        if (a.kind === 'stage-open') return 'start (or reuse) an unsubmitted review to stage into';
+        if (a.kind === 'stage-comment') {
+          const at = a.comment.subject === 'file' ? a.comment.path : `${a.comment.path}:${a.comment.line}`;
+          return `stage a new thread on ${at} (${a.comment.body.length} chars) — invisible until the review is submitted`;
+        }
+        if (a.kind === 'stage-reply') return `stage a reply in thread ${a.thread.threadNodeId} (${a.thread.body.length} chars) — invisible until the review is submitted`;
         if (a.kind === 'thread-resolve') return `resolve thread ${a.thread.threadNodeId}`;
         if (a.kind === 'thread-unresolve') return `unresolve thread ${a.thread.threadNodeId}`;
         if (a.kind === 'update-branch') return 'update this PR branch from its base (GitHub\'s "Update branch")';
@@ -1271,7 +1516,7 @@ export async function submitReady(ctx) {
         reasons: pre.reasons,
         message: pre.reasons.length
           ? `would BLOCK:\n${pre.reasons.map((x) => `  - ${x}`).join('\n')}`
-          : `would post ${plan.length} action(s):\n${plan.map((x) => `  - ${x}`).join('\n')}`,
+          : `would ${captured.parsed.event === 'REPLY' ? 'stage' : 'post'} ${plan.length} action(s):\n${plan.map((x) => `  - ${x}`).join('\n')}`,
       };
     }
 
@@ -1309,13 +1554,48 @@ function prActionDetail(a) {
   return null;
 }
 
+/**
+ * Remember, or forget, the pending review a staged pass left on GitHub.
+ *
+ * This is the fact the next round turns on: while it is recorded, the comments
+ * in that review are the authoritative copy — the human may have rewritten them
+ * in GitHub's UI — so `prt draft` reads them instead of drafting over them, and
+ * `preflight` lets a later pass add to the review rather than blocking on it.
+ * The verdict that submits the review clears the record in the same breath,
+ * because a submitted review is no longer a draft anyone can edit.
+ */
+function recordStaged(ctx, staged) {
+  const prev = readState(ctx.root, ctx.repo, ctx.number);
+  if (!prev) return;
+  writeState(ctx.root, ctx.repo, ctx.number, { ...prev, staged: staged ?? null });
+}
+
 function finish(ctx, tx, label) {
   const { actionPath, prPath, repo, number } = ctx;
   const done = tx.actions.filter((a) => a.state === 'done');
   const failed = tx.actions.filter((a) => a.state !== 'done');
   const status = failed.length === 0 ? 'submitted' : done.length > 0 ? 'partial' : 'error';
 
-  const lines = [`${label}: ${done.length}/${tx.actions.length} actions posted`];
+  // "posted" is not what a staged pass did, and the difference is the whole
+  // point of the mode: nothing here is visible to the author yet.
+  const staging = tx.event === 'REPLY';
+  const opened = done.find((a) => a.kind === 'stage-open');
+  if (opened?.result?.reviewNodeId) {
+    recordStaged(ctx, {
+      ...opened.result,
+      at: new Date().toISOString(),
+      generation: tx.generation ?? null,
+      comments: done.filter((a) => a.result?.staged).length,
+    });
+  }
+  // The verdict that submits the staged review ends its life as a draft.
+  if (done.some((a) => a.kind === 'review' && a.result?.completedStaged)) recordStaged(ctx, null);
+
+  const lines = [`${label}: ${done.length}/${tx.actions.length} actions ${staging ? 'staged' : 'posted'}`];
+  if (staging && opened?.result?.reviewNodeId) {
+    lines.push(`  staged into an UNSUBMITTED review — nobody but you can see it until it is submitted: ${opened.result.url ?? `review ${opened.result.reviewDatabaseId}`}`);
+    lines.push('  those comments are now GitHub\'s copy: edit them there, and submit the review with a later verdict.');
+  }
   for (const a of done) {
     lines.push(`  ✓ ${a.id} (${a.kind}) ${prActionDetail(a) ?? a.result?.url ?? ''}`.trimEnd());
   }

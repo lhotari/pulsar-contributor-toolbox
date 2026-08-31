@@ -177,13 +177,42 @@ is a successful no-op. Both mutations are journalled under the same transaction;
 if workflow approval fails after the review lands, the file becomes `partial`
 and `prt recover` safely re-queries and resumes the remaining runs.
 
-`REPLY` is a deliberately incomplete pass. It posts reply bodies from
-`prt:thread` blocks only. It does not create or submit a review, does not post
-the review body or new inline findings, does not resolve or unresolve threads,
-and does not post `prt:issue-comment` blocks. This lets you send file-thread
-replies, edit them in GitHub's UI if needed, and complete the review later with
-`APPROVE`, `REQUEST_CHANGES`, or `COMMENT`. Before arming that later pass,
-disable or remove thread replies already posted so they are not posted twice.
+`REPLY` **stages**. It writes into a PENDING review — GitHub's *Start a review*,
+where every comment is visible to nobody but you — and never submits it. So the
+pass publishes nothing: the author sees a staged comment only when a later
+verdict submits the review.
+
+What it stages is comments: replies into threads you already own (`prt:thread`)
+and new threads from `prt:inline`, line, range or whole-file alike. What it
+cannot stage is anything GitHub has no draft state for — resolving a thread, a
+`prt:issue-comment`, and the review body, which belongs to the submit that
+completes the review. Those wait for a later verdict, with the approved file as
+the record; `prt validate` names them rather than letting you find out from the
+activity log.
+
+**A staged reply is addressed by the thread's node id**, so `reply-to:` is not
+required under `REPLY` — it is the immediate path's argument, the REST id of the
+thread's first comment.
+
+Then the review is yours to edit **on GitHub**. That is the point of the mode:
+open the pending review, rewrite a comment, delete one, add one, and what is
+there is what the round says. From that moment the file no longer holds the
+authoritative text, and prt treats it that way:
+
+- `prt draft` reads the pending review and shows its comments under
+  **Already staged on GitHub** — a `prt:context` block, never posted, never
+  regenerated as `prt:inline`. A drafted copy would be an older version of a
+  comment that already exists, and arming it would put it in the review twice.
+- The next `event: REPLY` pass adds to the same review. GitHub allows one
+  pending review per person per pull request, so there is never a second.
+- Any other verdict **submits that review**: its comments as they now stand on
+  GitHub, the `prt:body` in this file as the review body, plus any new inline
+  comments the file has picked up since. Nothing already staged is re-sent.
+- A pending review prt did not stage still blocks a submit, exactly as before.
+  Submitting one would publish text nobody here has read.
+
+If you submit or discard the review in GitHub's UI instead, nothing is left
+behind: the next command notices it is no longer pending and forgets it.
 
 `NONE` means "post no review at all" — use it when the file only replies to or
 resolves threads, or posts ordinary conversation comments. With `NONE`, set
@@ -356,7 +385,8 @@ Reply markdown.
 - `thread` — the GraphQL node id (`PRRT_…`). Never edit it.
 - `reply-to` — the REST integer id of the thread's **first** comment. Required
   when there is a reply body; GitHub's reply endpoint takes the top-level
-  comment of the thread, not a reply.
+  comment of the thread, not a reply. Not required under `event: REPLY`, which
+  stages the reply against `thread:` instead.
 - `resolve: yes` resolves the thread after the reply lands. `unresolve: yes` is
   the inverse.
 - `expect-resolved` / `expect-last-comment` are preconditions the generator

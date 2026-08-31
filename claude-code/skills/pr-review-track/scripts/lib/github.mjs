@@ -284,21 +284,113 @@ export async function createPendingReview(repo, number, payload) {
   return { ok: false, error: describeApiError(res), status: httpStatusOf(res), raw: res.stdout };
 }
 
-export async function addFileThread({ reviewNodeId, pullRequestNodeId, path, body }) {
+/**
+ * Add a NEW thread — line, range or whole-file — to a pending review.
+ *
+ * The same mutation `addFileThread` has always used for file comments, with the
+ * line arguments filled in. It is the only way to put a thread in a review that
+ * already exists: REST's `comments[]` array is a create-time argument, so a
+ * pending review started earlier (by `event: REPLY`, or by a hand in the UI)
+ * cannot be added to that way.
+ *
+ * `line`/`side` are omitted entirely for a file-level thread — sending them with
+ * `subjectType: FILE` is a 422 — and `startLine` only appears for a range.
+ */
+export async function addReviewThread({
+  reviewNodeId, pullRequestNodeId, path, body,
+  subject = 'line', line = null, side = 'RIGHT', startLine = null, startSide = null,
+}) {
+  const file = subject === 'file';
+  const range = subject === 'range' && startLine !== null;
+  const input = [
+    'pullRequestReviewId:$rid', 'pullRequestId:$pid', 'path:$path', 'body:$body',
+    `subjectType:${file ? 'FILE' : 'LINE'}`,
+    ...(file ? [] : ['line:$line', 'side:$side']),
+    ...(range ? ['startLine:$startLine', 'startSide:$startSide'] : []),
+  ];
+  const params = [
+    '$rid:ID!', '$pid:ID!', '$path:String!', '$body:String!',
+    ...(file ? [] : ['$line:Int!', '$side:DiffSide!']),
+    ...(range ? ['$startLine:Int!', '$startSide:DiffSide!'] : []),
+  ];
+  const vars = { rid: reviewNodeId, pid: pullRequestNodeId, path, body };
+  if (!file) {
+    vars.line = line;
+    vars.side = side;
+  }
+  if (range) {
+    vars.startLine = startLine;
+    vars.startSide = startSide || side;
+  }
   try {
     const data = await graphql(
-      `mutation($rid:ID!,$pid:ID!,$path:String!,$body:String!){
-         addPullRequestReviewThread(input:{
-           pullRequestReviewId:$rid, pullRequestId:$pid,
-           path:$path, subjectType:FILE, body:$body
-         }){ thread { id path subjectType } }
+      `mutation(${params.join(',')}){
+         addPullRequestReviewThread(input:{${input.join(', ')}}){
+           thread { id path subjectType comments(first:1){ nodes { databaseId url } } }
+         }
        }`,
-      { rid: reviewNodeId, pid: pullRequestNodeId, path, body },
+      vars,
     );
     return { ok: true, thread: data?.addPullRequestReviewThread?.thread ?? null };
   } catch (e) {
     return { ok: false, error: e.message };
   }
+}
+
+/**
+ * Start a review and leave it PENDING — GitHub's "Start a review", the state in
+ * which comments are visible to nobody but their author.
+ *
+ * GraphQL rather than the REST create: it takes no comments, and it hands back
+ * the node id every later staging mutation needs, so nothing has to translate a
+ * REST id into one. Omitting `event` is what makes it pending, exactly as it is
+ * over REST.
+ */
+export async function startPendingReview({ pullRequestNodeId, commitOid }) {
+  try {
+    const data = await graphql(
+      `mutation($pid:ID!,$oid:GitObjectID){
+         addPullRequestReview(input:{ pullRequestId:$pid, commitOID:$oid }){
+           pullRequestReview { id databaseId url state }
+         }
+       }`,
+      { pid: pullRequestNodeId, oid: commitOid || null },
+    );
+    const review = data?.addPullRequestReview?.pullRequestReview ?? null;
+    if (!review) return { ok: false, error: 'the review was not returned by addPullRequestReview' };
+    return { ok: true, review };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+/**
+ * Reply inside an existing thread, as part of a PENDING review.
+ *
+ * The staged counterpart of `replyToComment`. It keys off the thread's node id —
+ * the `thread:` field a `prt:thread` block already carries — rather than the
+ * REST id of the thread's first comment, and the reply stays invisible until the
+ * review is submitted.
+ */
+export async function addThreadReply({ reviewNodeId, threadNodeId, body }) {
+  try {
+    const data = await graphql(
+      `mutation($rid:ID!,$tid:ID!,$body:String!){
+         addPullRequestReviewThreadReply(input:{
+           pullRequestReviewId:$rid, pullRequestReviewThreadId:$tid, body:$body
+         }){ comment { id databaseId url } }
+       }`,
+      { rid: reviewNodeId, tid: threadNodeId, body },
+    );
+    return { ok: true, comment: data?.addPullRequestReviewThreadReply?.comment ?? null };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+/** The comments held by one review — the only way to read a PENDING one's. */
+export async function reviewComments(repo, number, reviewId) {
+  return (await restAll(`repos/${repo}/pulls/${number}/reviews/${reviewId}/comments`)) ?? [];
 }
 
 /** Submit a PENDING review with its final event. */

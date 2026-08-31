@@ -378,11 +378,15 @@ interrupted run must be finishable). See `action-file.md` for the protocol.
 exactly what would be posted, without writing anything — to GitHub or to the
 file. It refuses to resume an open transaction, since resuming posts.
 
-The verdict controls the action set. `REPLY` posts only replies to existing file
-review threads and leaves their resolved state and the review verdict untouched;
-ordinary PR-conversation replies are deferred. `APPROVE`, `REQUEST_CHANGES`,
-and `COMMENT` perform the normal complete pass. `Status: ready` is the single
-human authorisation for either workflow. An `APPROVE` verdict also performs
+The verdict controls the action set. `REPLY` **stages**: it puts thread replies
+and new inline threads into a PENDING review — visible to nobody but you — and
+never submits it, leaving the comments to be edited on GitHub and the review to
+be completed by a later verdict. Thread resolutions, ordinary PR-conversation
+replies and the review body have no draft state to sit in and are deferred with
+it. `APPROVE`, `REQUEST_CHANGES`, and `COMMENT` perform the normal complete
+pass, and submit a staged review if one is open rather than posting a second one
+beside it. `Status: ready` is the single human authorisation for either
+workflow. An `APPROVE` verdict also performs
 GitHub's **Approve workflows to run** action for every eligible
 `action_required` workflow run associated with the PR's approved head SHA.
 

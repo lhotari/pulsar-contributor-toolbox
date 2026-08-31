@@ -736,6 +736,7 @@ export function parseActionFile(text) {
   if (r.status && !STATUSES.includes(r.status)) r.errors.push(`unknown status "${r.status}"`);
 
   const bad = (msg) => r.errors.push(msg);
+  const needsReplyTo = [];
   let sawBody = false;
   let sawVerdict = false;
   let sawPrActions = false;
@@ -887,7 +888,13 @@ export function parseActionFile(text) {
         };
         if (t.post) {
           if (!t.threadNodeId) r.errors.push(`${where}: missing \`thread:\` node id`);
-          if (t.body && !t.replyToCommentId) r.errors.push(`${where}: has a reply body but no \`reply-to:\` comment id`);
+          // Deferred to the end of the parse, where `event:` is known however
+          // far down the file the verdict block sits: a STAGED reply is
+          // addressed by the thread's node id, so `reply-to:` — the REST id of
+          // the thread's first comment — is a requirement of the immediate path
+          // only. Demanding it under `REPLY` would refuse a file that is
+          // complete for what it is about to do.
+          if (t.body && !t.replyToCommentId) needsReplyTo.push(where);
           if (t.resolve && t.unresolve) r.errors.push(`${where}: both \`resolve:\` and \`unresolve:\` are set`);
           if (!t.body && !t.resolve && !t.unresolve) t.post = false; // nothing to do
           const w = t.body && fenceWarning(t.body, where);
@@ -1116,6 +1123,11 @@ export function parseActionFile(text) {
     }
   }
 
+  // `reply-to:` is the immediate path's requirement. See where it is collected.
+  if (r.event !== 'REPLY') {
+    for (const w of needsReplyTo) r.errors.push(`${w}: has a reply body but no \`reply-to:\` comment id`);
+  }
+
   // A review is only created when there is something to say.
   const liveInline = r.inline.filter((c) => c.post);
   // Posting a review payload with no `event` creates an UNSUBMITTED (pending)
@@ -1138,6 +1150,20 @@ export function parseActionFile(text) {
   }
   if (r.event === 'NONE' && (r.body || liveInline.length > 0)) {
     r.errors.push('event is NONE but the file still has a review body or inline comments — set `post: false` on them, or pick a real event');
+  }
+  // Not an error: REPLY deferring these is what REPLY is. But a summary or a
+  // resolution sitting armed in a file whose verdict will not carry it looks
+  // exactly like one that will, so say which parts of this file are staying
+  // behind rather than letting the human find out from the activity log.
+  if (r.event === 'REPLY') {
+    const deferred = [
+      r.body && 'the review summary',
+      r.threads.some((t) => t.post && (t.resolve || t.unresolve)) && 'thread resolutions',
+      r.issueComments.length > 0 && 'PR conversation comments',
+    ].filter(Boolean);
+    if (deferred.length) {
+      r.warnings.push(`event is REPLY, which stages comments into an unsubmitted review — ${deferred.join(', ')} cannot be staged and wait for the verdict that completes it`);
+    }
   }
   return r;
 }
@@ -2390,13 +2416,30 @@ function prLevelActions(parsed, actions) {
 
 export function planActions(parsed) {
   const actions = [];
-  // REPLY is an intentionally incomplete pass: publish only replies inside
-  // file review threads. It neither submits a review verdict nor resolves a
-  // thread, and it defers ordinary PR-conversation comments to a later normal
-  // verdict. The approved file remains the record of everything deferred.
+  // REPLY STAGES. It writes into a PENDING review — GitHub's "Start a review",
+  // where every comment is visible to nobody but its author — and never submits
+  // it. So the pass publishes nothing: the author sees a staged reply only once
+  // a later verdict submits the review, which is what makes REPLY the mode for
+  // work you intend to finish by hand on GitHub.
+  //
+  // What it stages is comments: replies into threads you already own, and new
+  // threads from `prt:inline` — a new thread is as stageable as a reply, and
+  // deferring it was a limit of the old immediate-post path rather than a
+  // decision. What it cannot stage is anything GitHub has no draft state for:
+  // resolving a thread, an ordinary PR comment, and the review body, which
+  // belongs to the submit that completes the review. Those stay deferred to a
+  // later verdict, with the approved file as the record.
+  //
+  // One action per comment, not one for the batch: each is journalled on its
+  // own, so an interrupted run resumes at the comment it died on instead of
+  // re-staging the ones already in the review.
   if (parsed.event === 'REPLY') {
-    for (const t of parsed.threads.filter((x) => x.post && x.body)) {
-      actions.push({ kind: 'thread-reply', id: `${t.id}:reply`, thread: t });
+    const comments = parsed.inline.filter((c) => c.post);
+    const replies = parsed.threads.filter((t) => t.post && t.body);
+    if (comments.length || replies.length) {
+      actions.push({ kind: 'stage-open', id: 'stage' });
+      for (const c of comments) actions.push({ kind: 'stage-comment', id: `${c.id}:stage`, comment: c });
+      for (const t of replies) actions.push({ kind: 'stage-reply', id: `${t.id}:stage`, thread: t });
     }
     // The PR-level flags are orthogonal to the verdict, and silently dropping
     // an armed one here would be indistinguishable from having run it.
