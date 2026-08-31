@@ -77,7 +77,9 @@ Rules:
 - `prt:doc`, `prt:verdict` and `prt:pr-actions` are attribute-only: the opening
   sentinel is the whole block, no `<!-- /prt -->`.
 - Every block that produces a post needs a unique `id:`.
-- A one-line form works when there are no fields: `<!-- prt:body -->`.
+- A one-line form works when there are no fields: `<!-- prt:context -->`. A
+  `prt:body` written that way still parses — its one field, `post:`, defaults to
+  `true` — but a generated one spells the field out.
 
 ### Block kinds
 
@@ -184,9 +186,10 @@ replies, edit them in GitHub's UI if needed, and complete the review later with
 disable or remove thread replies already posted so they are not posted twice.
 
 `NONE` means "post no review at all" — use it when the file only replies to or
-resolves threads, or posts ordinary conversation comments. With `NONE`, delete the review-body text and set
-`post: false` on every inline comment; anything left over is a parse error
-rather than a silent omission.
+resolves threads, or posts ordinary conversation comments. With `NONE`, set
+`post: false` on the review body and on every inline comment; anything left over
+is a parse error rather than a silent omission. Deleting the summary text works
+too, but `post: false` keeps the draft you just read.
 
 **The verdict block is mandatory whenever there is anything to review.** Deleting
 it does not mean "no event" — a review POST without an event creates an
@@ -257,13 +260,33 @@ in the file, it never presses them.
 ### `prt:body` — the review's summary comment
 
 ```
-<!-- prt:body -->
+<!-- prt:body
+post: true
+-->
 Markdown posted as the top comment of the review.
 <!-- /prt -->
 ```
 
-Empty body + no inline comments + `event: COMMENT` is an error — GitHub would
-create an empty review. Use `event: NONE` instead.
+| field | values | notes |
+|---|---|---|
+| `post` | `true` / `false` | defaults to `true`; `false` keeps the summary in this file without posting it |
+
+`post: false` is how you hold a summary back without losing it — under
+`event: NONE`, or while the review says everything it needs to say in its inline
+comments. The text stays where you can read it and reaches nothing that posts:
+not the review payload, not the payload hash, not the security or
+pipeline-mechanics lints, which each read only what will actually be sent.
+Deleting the text does the same thing and costs you the draft, so it is the
+weaker of the two.
+
+The flag is a strict boolean like every other one here — `post: fasle` is a
+parse error, not a silent `true`. A `prt:body` with no `post:` field at all
+still posts, so a file written before the flag existed behaves exactly as it did.
+
+No summary + no inline comments + `event: COMMENT` is an error — GitHub would
+create an empty review. Use `event: NONE` instead. That error names `post:
+false` when the summary is only being held back, because "there is no review
+body" is not what you are looking at.
 
 ### `prt:inline` — a line comment
 

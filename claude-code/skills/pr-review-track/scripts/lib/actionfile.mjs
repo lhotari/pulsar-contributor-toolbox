@@ -712,7 +712,14 @@ export function parseActionFile(text) {
     // PR-level actions the human arms alongside the verdict. Both default off:
     // a file with no `prt:pr-actions` block behaves exactly as it always did.
     prActions: { updateBranch: false, triggerCi: false },
+    // `body` is the summary that POSTS, and it is null whenever nothing will.
+    // `bodyText` is what the block says either way, and `bodyPost` is the
+    // `post:` flag that decides between them — the two exist so an error
+    // message can tell "you wrote no summary" apart from "you held one back",
+    // which is the only place downstream that needs the difference.
     body: null,
+    bodyText: null,
+    bodyPost: true,
     inline: [],
     threads: [],
     issueComments: [],
@@ -798,7 +805,15 @@ export function parseActionFile(text) {
           break;
         }
         sawBody = true;
-        r.body = b.body.trim() || null;
+        // `post: false` holds the summary back without deleting it — the same
+        // switch every other postable block has. Held back, the text is NOT
+        // `r.body`: `planActions`, `payloadHash` and the outgoing-text lints all
+        // ask that field what leaves the machine, so a body that answered yes
+        // while claiming `post: false` would be exactly the leak the flag is
+        // there to prevent. It stays in `bodyText`, which nothing posts from.
+        r.bodyPost = truthy(b.fields.post, true, bad, `${where} post`);
+        r.bodyText = b.body.trim() || null;
+        r.body = r.bodyPost ? r.bodyText : null;
         const w = r.body && fenceWarning(r.body, where);
         if (w) r.warnings.push(w);
         break;
@@ -1110,11 +1125,16 @@ export function parseActionFile(text) {
   if (!r.event && (r.body || liveInline.length > 0)) {
     r.errors.push('there is a review body or inline comments but no `<!-- prt:verdict --> event:` block — restore it, or set `event: NONE` and `post: false`');
   }
+  // A held-back summary is text the human can SEE in the file, so "there is no
+  // review body" reads as a lie about it. Name the flag that is holding it.
+  const heldBack = r.bodyText && !r.bodyPost
+    ? ' (the review summary is still there, with `post: false` — set it to `true` to post it)'
+    : '';
   if (r.event && r.event !== 'NONE' && !r.body && liveInline.length === 0 && r.event === 'COMMENT') {
-    r.errors.push('event is COMMENT but there is no review body and no inline comments — use `event: NONE` to post only replies');
+    r.errors.push(`event is COMMENT but there is no review body and no inline comments${heldBack} — use \`event: NONE\` to post only replies`);
   }
   if (r.event === 'REQUEST_CHANGES' && !r.body && liveInline.length === 0) {
-    r.errors.push('REQUEST_CHANGES needs a review body or at least one inline comment');
+    r.errors.push(`REQUEST_CHANGES needs a review body or at least one inline comment${heldBack}`);
   }
   if (r.event === 'NONE' && (r.body || liveInline.length > 0)) {
     r.errors.push('event is NONE but the file still has a review body or inline comments — set `post: false` on them, or pick a real event');

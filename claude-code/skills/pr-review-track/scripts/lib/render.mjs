@@ -308,9 +308,12 @@ export function renderActionFile({
   // ---------- review body ----------
   out.push('## Review summary');
   out.push('');
-  out.push('*Posted as the top comment of the review. Edit freely; delete the text to post no summary.*');
+  out.push('*Posted as the top comment of the review. Edit freely; `post: false` keeps the summary*');
+  out.push('*in this file without posting it, as does deleting the text.*');
   out.push('');
-  out.push('<!-- prt:body -->');
+  out.push('<!-- prt:body');
+  out.push('post: true');
+  out.push('-->');
   out.push('');
   out.push(findings?.summary?.trim() || defaultSummary(a, delta));
   out.push('');

@@ -266,6 +266,79 @@ test('an empty COMMENT review is rejected rather than posted as an empty review'
   assert.match(parseActionFile(empty).errors.join(' '), /no review body and no inline comments/);
 });
 
+// ---- `post:` on the review summary ---------------------------------------
+// The summary used to be the one postable block with no switch: holding it back
+// meant deleting the text, so `event: NONE` cost the human the draft they had
+// just read. `post: false` keeps the words in the file and out of the review.
+
+const HELD_BACK = (text = 'A summary I drafted and decided not to post.') => `Status: draft
+<!-- prt:verdict
+event: NONE
+-->
+<!-- prt:body
+post: false
+-->
+${text}
+<!-- /prt -->
+<!-- prt:thread
+id: t1
+thread: PRRT_x
+reply-to: 123
+-->
+a reply
+<!-- /prt -->
+`;
+
+test('`post: false` holds the review summary back without deleting it', () => {
+  const p = parseActionFile(HELD_BACK());
+  assert.deepEqual(p.errors, [], p.errors.join('; '));
+  assert.equal(p.bodyPost, false);
+  assert.equal(p.bodyText, 'A summary I drafted and decided not to post.', 'the words stay in the file');
+  assert.equal(p.body, null, 'and out of everything that reads what posts');
+  assert.deepEqual(planActions(p).map((a) => a.kind), ['thread-reply']);
+});
+
+test('a held-back summary is byte-for-byte the same payload as no summary at all', () => {
+  const deleted = HELD_BACK().replace(/\npost: false\n-->\n.*\n/, '\n-->\n');
+  const p = parseActionFile(deleted);
+  assert.deepEqual(p.errors, [], p.errors.join('; '));
+  assert.equal(
+    payloadHash(parseActionFile(HELD_BACK())), payloadHash(p),
+    'the approved payload cannot tell them apart, which is what "never posted" means here',
+  );
+});
+
+test('a held-back summary is not linted, because it is not going anywhere', () => {
+  const p = parseActionFile(HELD_BACK('This is a remote code execution hole, exploitable without auth.'));
+  assert.deepEqual(p.errors, []);
+  assert.deepEqual(securityLint(p), [], 'the lint reads what planActions posts, and this posts nothing');
+});
+
+test('a typo in the summary `post:` flag stops the run rather than deciding for you', () => {
+  const f = MINIMAL.replace('<!-- prt:body -->', '<!-- prt:body\npost: ture\n-->');
+  assert.match(parseActionFile(f).errors.join(' '), /"ture" is not yes or no/);
+});
+
+test('COMMENT over a held-back summary names the flag instead of claiming there is none', () => {
+  const f = `Status: draft\n<!-- prt:verdict\nevent: COMMENT\n-->\n<!-- prt:body\npost: false\n-->\nA summary.\n<!-- /prt -->\n`;
+  const errs = parseActionFile(f).errors.join(' ');
+  assert.match(errs, /event is COMMENT/);
+  assert.match(errs, /post: false/, 'the human can see the summary right there — say what is holding it');
+});
+
+test('a generated draft arms its summary explicitly', () => {
+  const text = renderActionFile({
+    repo: 'r/r',
+    analysis: fixtureAnalysis({ headMoved: false, myLastReview: null }),
+    delta: { commits: [], diff: null },
+    findings: { summary: 'Looks fine.', recommendedEvent: 'COMMENT', findings: [] },
+    kind: 'initial',
+    reviewerLogin: 'me',
+  });
+  assert.match(text, /^<!-- prt:body\npost: true\n-->$/m, 'the flag is in the file, so flipping it is an edit not a lookup');
+  assert.equal(parseActionFile(text).bodyPost, true);
+});
+
 test('a reply with a body needs the REST comment id to reply to', () => {
   const f = `Status: draft
 <!-- prt:verdict
