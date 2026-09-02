@@ -515,7 +515,7 @@ function setupEmptyPr() {
 
 function writeFindings(name, summary) {
   const p = path.join(ROOT, `${name}.json`);
-  fs.writeFileSync(p, JSON.stringify({ summary, recommendedEvent: 'COMMENT' }));
+  fs.writeFileSync(p, JSON.stringify({ head: HEAD, summary, recommendedEvent: 'COMMENT' }));
   return p;
 }
 
@@ -813,6 +813,7 @@ test('a staged review comes back into the next draft as context, not as blocks',
   }));
   const findings = path.join(ROOT, 'staged-findings.json');
   fs.writeFileSync(findings, JSON.stringify({
+    head: HEAD,
     summary: 'Two things.',
     recommendedEvent: 'COMMENT',
     findings: [
@@ -848,10 +849,78 @@ test('a staged review comes back into the next draft as context, not as blocks',
   assert.equal(byId.get('i2').post, true);
 });
 
+test('the draft refuses to build links against a commit the review did not read', () => {
+  const write = (name, findings) => {
+    const p = path.join(ROOT, `${name}.json`);
+    fs.writeFileSync(p, JSON.stringify({ recommendedEvent: 'COMMENT', ...findings }));
+    return p;
+  };
+  const draft = (file) => {
+    setupEmptyPr();
+    return runPrt(['draft', '1', '--repo', REPO, '--findings', file], writeScenario(`head-${path.basename(file)}`, baseRules([])));
+  };
+
+  // No `head` at all: the line numbers in the file have no tree behind them, so
+  // there is no commit a link could honestly name.
+  const none = draft(write('head-missing', { summary: 'x' }));
+  assert.equal(none.status, 1);
+  assert.match(none.stderr, /do not say which commit they were read at/);
+
+  // A ref name is not a commit, however much it looks like an answer.
+  const ref = draft(write('head-ref', { head: 'master', summary: 'x' }));
+  assert.equal(ref.status, 1);
+  assert.match(ref.stderr, /which is not a commit/);
+
+  // The author pushed while the review ran. Drafting now would stamp the new
+  // head on the old head's line numbers, which is the failure with no symptom.
+  const moved = draft(write('head-moved', { head: 'b'.repeat(40), summary: 'x' }));
+  assert.equal(moved.status, 1);
+  assert.match(moved.stderr, /the branch moved while the review was running/);
+  assert.match(moved.stderr, /--since bbbbbbbb/, 'it says how to recover the round, not just what went wrong');
+
+  // An abbreviation is how a human writes one, and names the same commit.
+  const short = draft(write('head-short', { head: HEAD.slice(0, 8), summary: 'x' }));
+  assert.equal(short.status, 0, short.stderr);
+});
+
+test('the draft refuses a branch permalink the review wrote, and reports an older-commit one', () => {
+  const OTHER = 'b'.repeat(40);
+  const findings = (name, body) => {
+    const p = path.join(ROOT, `${name}.json`);
+    fs.writeFileSync(p, JSON.stringify({
+      head: HEAD,
+      summary: 'One thing.',
+      recommendedEvent: 'COMMENT',
+      findings: [{ id: 'i1', severity: 'BUG', claim: 'c', path: 'A.java', line: 11, side: 'RIGHT', body }],
+    }));
+    return p;
+  };
+
+  setupEmptyPr();
+  const branch = runPrt(['draft', '1', '--repo', REPO, '--findings',
+    findings('written-branch-findings', `See https://github.com/${REPO}/blob/master/A.java#L11`)],
+  writeScenario('written-branch', baseRules([])));
+  assert.equal(branch.status, 1);
+  assert.match(branch.stderr, /name a branch or a tag/);
+  assert.match(branch.stderr, /blob\/master\/A\.java#L11/, 'the offending link is named, not counted');
+
+  const dir = setupEmptyPr();
+  const older = runPrt(['draft', '1', '--repo', REPO, '--findings',
+    findings('written-older-findings', `As it stood: https://github.com/${REPO}/blob/${OTHER}/A.java#L11`)],
+  writeScenario('written-older', baseRules([])));
+  assert.equal(older.status, 0, older.stderr);
+  assert.match(`${older.stdout}${older.stderr}`, /permalink at bbbbbbbb, not aaaaaaaa/);
+  assert.match(fs.readFileSync(path.join(dir, 'review.md'), 'utf8'), new RegExp(`blob/${OTHER}/A\\.java`),
+    'a deliberate link to an older round is reported, never rewritten');
+});
+
 test('the draft links the code references the reviewer only named', () => {
   const dir = setupEmptyPr();
   const findings = path.join(ROOT, 'linkify-findings.json');
   fs.writeFileSync(findings, JSON.stringify({
+    // The commit the review read. Every line number below is a line of it, and
+    // every link the draft makes is built against it.
+    head: HEAD,
     summary: 'One thing, at A.java:11.',
     recommendedEvent: 'COMMENT',
     findings: [{

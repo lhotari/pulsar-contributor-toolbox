@@ -204,6 +204,13 @@ and whether the author actually did what was asked.
    node "$PRT" draft <N> --findings cache/findings.json --kind re-review
    ```
 
+   Set `head` to the commit you actually read — the checkout the review ran
+   against, not a fresh `gh pr view`. Every line number you wrote is a line of
+   that tree, and it is the commit every permalink is built against. If the
+   author pushed while you worked, `prt draft` refuses rather than stamping the
+   new head on your old numbers: re-review the delta
+   (`/pr-review <N> --since <the head you read>`) and draft from that.
+
    …then records its own outcome with `job done`, per the worker contract.
 
 4. **Report each PR as its agent lands**, one line: number, what the author did,
@@ -431,7 +438,8 @@ node "$PRT" permalink <N> <path>:192-206 --markdown   # [`File.java:192-206`](�
 
 **A reference you merely *name* in `findings.json` prose is linked on the way
 into the file.** `prt draft` rewrites every one it can resolve into the inline
-form, at the head it drafted against, before you or the human sees the draft:
+form, at `findings.head` — the commit the review read, which it checks is still
+the PR's head before writing anything — before you or the human sees the draft:
 
 | you write | it becomes |
 |---|---|
@@ -460,11 +468,17 @@ them for you.
 ### The mechanics
 
 - The URL is `https://github.com/<owner>/<repo>/blob/<commit>/<repo-relative path>#L<start>-L<end>`, or `#L<n>` for one line.
-- **Always an exact commit.** Never `blob/master/…`, never a branch or a tag: the
-  lines behind a moving ref drift, and the link starts quoting code the review
-  never read. For anything in the PR that commit is the head — `head:` in
-  `prt:doc`, `findings.head`, `ctx.analysis.headOid`. `prt permalink` refuses a
-  ref name outright.
+- **Always an exact commit, and always the one the review read.** Never
+  `blob/master/…`, never a branch or a tag: the lines behind a moving ref drift,
+  and the link starts quoting code the review never read. For anything in the PR
+  that commit is `findings.head` — the tree the reviewers had open — which
+  `prt draft` requires to still be the PR's head, so `head:` in `prt:doc` and
+  `ctx.analysis.headOid` name the same commit or there is no draft. `prt
+  permalink` refuses a ref name outright, and a link the review wrote at some
+  other commit is refused (a ref) or reported (a commit) rather than published
+  quietly. A permalink to the wrong commit is invisible: it resolves, it renders,
+  and it shows the reader fifteen lines of code the review is not talking
+  about.
 - **The upstream repo, even for a fork PR.** `apache/pulsar/blob/<head sha>/…`
   resolves for a contributor's commit, and unlike their fork it cannot be deleted
   out from under the comment.

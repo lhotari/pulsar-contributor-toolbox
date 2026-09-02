@@ -91,8 +91,19 @@ finding and can re-aim it rather than losing it.
 first line — the generator does that automatically from `severity` + `claim`, so
 do not repeat it.
 
-**Refer to code with permalinks, not with names.** `head` is the commit every
-link in this file is built against; `prt permalink <N> <path>:<start>-<end>`
+**`head` — the commit the review READ**, and the one every link in this file is
+built against. Not a formality: every line number here is a line of that tree, so
+stamping any other commit on them produces links that resolve, render, and quote
+the wrong code — the failure with no symptom, because a permalink to the wrong
+commit looks exactly like a permalink to the right one. Take it from the tree the
+reviewers actually had open (`git rev-parse HEAD` in the review worktree), not
+from a second `gh pr view` afterwards. `prt draft` **refuses** a findings file
+without it, refuses a ref name in it, and refuses to draft at all once it is no
+longer the PR's head — an author who pushed mid-review costs a re-review, not a
+draft full of comments about code that is gone. An abbreviation is accepted.
+
+**Refer to code with permalinks, not with names.** Every link is built against
+`head`; `prt permalink <N> <path>:<start>-<end>`
 builds them — though naming a location in prose is enough for the inline form:
 `prt draft` links every `Consumer.java:1015`, `service/Consumer.java:1015-1022`
 and bare `:749-755` it can resolve, in `summary`, `findings[].claim` and
@@ -106,8 +117,10 @@ in its paragraph, and nothing rewrites text into one. A short, central reference
 own paragraph** — `\n\nhttps://…#L192-L206\n\n` inside the body string — which is
 what makes GitHub render the code in the comment; anything longer, or anything
 inside a bullet or a table, takes the inline ``[`File.java:192-206`](…)`` form,
-which never expands. Not the lines the comment is already anchored to: GitHub
-shows those above it. The rules and the judgement behind them are in the skill's
+which never expands. A permalink you write yourself is audited against `head`:
+one naming a branch or a tag is refused, one naming another commit is reported to
+the human — so link a past round deliberately, never by accident. Not the lines
+the comment is already anchored to: GitHub shows those above it. The rules and the judgement behind them are in the skill's
 [Linking to code](../SKILL.md#linking-to-code).
 
 **`summary` and `findings[].body` are the only two fields that reach the pull

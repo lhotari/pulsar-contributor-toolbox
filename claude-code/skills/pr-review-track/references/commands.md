@@ -152,6 +152,14 @@ against), or any commit SHA. A branch name is refused: the line numbers behind
 it move, and the link silently starts quoting different code. The command is
 offline — it reads the tracked `pr.json` and makes no request.
 
+The default is the head **as the store last recorded it**, so a link is only as
+current as the last `prt refresh`/`prt context`. When a draft has already
+fetched the repo tree for that commit, the path is checked against it: a file
+that does not exist at that commit is refused rather than linked, which is what
+a path read out of a different tree looks like from here. The commit itself is
+still yours to get right — pass `--sha` when you are linking anything other than
+the head of the round you are reviewing.
+
 When and how to use these in a review is in the skill's
 [Linking to code](../SKILL.md#linking-to-code).
 
@@ -161,6 +169,19 @@ Writes `review.md` at `Status: draft`. Refuses to overwrite a protected file
 unless `--force`; `--to review.next.md` writes a proposal alongside instead.
 Anchors are validated at generation time too, so a finding that could never post
 arrives as `post: false` with the reason attached rather than wasting your edit.
+
+**It refuses to draft against a commit the review did not read.** `findings.head`
+is the commit the reviewers had checked out, and every line number in the file is
+a line of it. `prt draft` requires it, requires it to be a commit rather than a
+ref name, and requires it to still be the PR's head — an abbreviation is fine.
+If the author pushed while the review was running, the draft stops and says so:
+its comments would anchor, and its permalinks would point, at code nobody
+reviewed. Re-review the new head (`--since <old head>` covers only what was
+pushed) and draft from those findings. A permalink the review wrote *itself* is
+audited the same way: one naming a branch or a tag is refused outright, and one
+naming another commit is reported for you to confirm — a reply may legitimately
+link how the code stood two rounds ago, and only you can tell that from a stale
+`prt permalink`.
 
 **It links the code references the review only named.** Every `Consumer.java:1015`,
 `service/Consumer.java:1015-1022` and bare `:749-755` in the prose it writes out

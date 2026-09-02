@@ -171,7 +171,13 @@ git fetch <remote> --force \
   "pull/<PR_NUMBER>/head:refs/pr-review/<PR_NUMBER>/head" \
   "<baseRefName>:refs/pr-review/<PR_NUMBER>/base"
 git worktree add --detach "$WORK/tree" "refs/pr-review/<PR_NUMBER>/head"
+REVIEWED_SHA="$(git rev-parse refs/pr-review/<PR_NUMBER>/head)"   # the commit every finding is about
 ```
+
+Record `REVIEWED_SHA` in the brief and carry it to the end: it is what every line
+number a reviewer writes refers to, and it is `findings.head` in step 8. Read it
+once, here, from the tree that was actually created — a PR branch can move while
+a review runs, and re-asking GitHub later answers about a different commit.
 
 `pull/<N>/head` resolves on the base repository, so this works for fork PRs too.
 The refs live under `refs/pr-review/` rather than `refs/heads/`, so they never collide
@@ -400,6 +406,14 @@ The full schema lives in `../pr-review-track/references/findings-schema.md`. In 
 
 Rules that matter:
 
+- `head` is the commit you **read**, and the only commit `pr-review-track` will build
+  permalinks against. Take it from the worktree —
+  `git rev-parse refs/pr-review/<PR_NUMBER>/head` — not from a fresh `gh pr view`: if
+  the author pushed while the review ran, those two disagree and every line number in
+  this file belongs to the first one. `prt draft` refuses the file when `head` is
+  missing, is a ref name, or is no longer the PR's head, so a mid-review push costs an
+  incremental re-review (`--since <the head you read>`) rather than a draft full of
+  comments pointing at code nobody looked at.
 - `path` / `line` / `side` must land on a line **this PR's diff** allows a comment on.
   `node <skills>/pr-review-track/scripts/prt.mjs anchors <N>` lists them. A finding you
   cannot anchor still belongs in the file — give it `"subject": "file"` or set

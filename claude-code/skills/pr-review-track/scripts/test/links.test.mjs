@@ -15,7 +15,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-import { blobUrl, codeLink, parseLocation, locationLabel, isSha, linkifyCode, pathIndex } from '../lib/links.mjs';
+import { blobUrl, codeLink, parseLocation, locationLabel, isSha, linkifyCode, pathIndex, auditPermalinks, permalinksIn } from '../lib/links.mjs';
 import { renderActionFile, renderNudgeFile } from '../lib/render.mjs';
 import { THREAD_STATES } from '../lib/analyze.mjs';
 
@@ -178,6 +178,31 @@ test('a nudge links the points it is reminding the author about', () => {
   assert.match(text, new RegExp(`blob/${SHA}/${JAVA.replace(/[/.]/g, '\\$&')}#L192`));
 });
 
+// ------------------------------------------------- links the review wrote
+
+test('auditing separates a moving ref from a deliberate older commit', () => {
+  const OTHER_SHA = 'f102ddfabb4f741eba60181d1b91f6ee91cbd5e4';
+  const text = [
+    `https://github.com/apache/pulsar/blob/${SHA}/${JAVA}#L192-L206`,
+    `and [\`${JAVA}:1\`](https://github.com/apache/pulsar/blob/${SHA.slice(0, 8)}/${JAVA}#L1)`,
+    `master: https://github.com/apache/pulsar/blob/master/${JAVA}#L5`,
+    `a round ago: https://github.com/apache/pulsar/blob/${OTHER_SHA}/${JAVA}#L7`,
+    'elsewhere: https://github.com/netty/netty/blob/4.1/handler/X.java#L9',
+  ].join('\n');
+  const r = auditPermalinks(text, { repo: 'apache/pulsar', sha: SHA });
+
+  // The head, abbreviated or not, is what the draft is entitled to link.
+  assert.deepEqual(r.refs.map((l) => l.ref), ['master']);
+  assert.deepEqual(r.commits.map((l) => l.ref), [OTHER_SHA]);
+  // Another repository answers for its own refs; this one is not it.
+  assert.equal(permalinksIn(text, 'apache/pulsar').length, 4);
+});
+
+test('auditing sees nothing to complain about in prose with no links', () => {
+  const r = auditPermalinks('It breaks at Consumer.java:1015, in the loop.', { repo: 'apache/pulsar', sha: SHA });
+  assert.deepEqual(r, { refs: [], commits: [] });
+});
+
 // ------------------------------------------------------------------- the CLI
 
 const PRT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../prt.mjs');
@@ -252,6 +277,28 @@ test('`prt permalink` refuses what would produce a wrong link', () => {
     assert.match(r.stderr, /no head SHA/);
   } finally {
     fs.rmSync(empty, { recursive: true, force: true });
+  }
+});
+
+test('`prt permalink` refuses a path that does not exist at that commit', () => {
+  const root = storeWithHead(26289, { headOid: SHA, analysis: { headOid: SHA } });
+  const cache = path.join(root, 'apache', 'pulsar', 'pr-26289', 'cache');
+  fs.mkdirSync(cache, { recursive: true });
+  const tree = (extra) => fs.writeFileSync(path.join(cache, 'tree.json'), JSON.stringify({ sha: SHA, paths: [JAVA], truncated: false, ...extra }));
+  try {
+    tree();
+    const gone = permalink(root, ['26289', 'pulsar-broker/src/main/java/Nope.java:5']);
+    assert.equal(gone.status, 1);
+    assert.match(gone.stderr, /has no pulsar-broker\/src\/main\/java\/Nope\.java at/);
+    assert.equal(permalink(root, ['26289', `${JAVA}:192`]).status, 0, 'a path that is there still links');
+
+    // Absence is only evidence when the tree is complete and is this commit's.
+    tree({ truncated: true });
+    assert.equal(permalink(root, ['26289', 'x/Nope.java:5']).status, 0, 'a truncated tree proves nothing');
+    tree({ sha: 'f102ddfabb4f741eba60181d1b91f6ee91cbd5e4' });
+    assert.equal(permalink(root, ['26289', 'x/Nope.java:5']).status, 0, 'another commit\'s tree proves nothing');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 

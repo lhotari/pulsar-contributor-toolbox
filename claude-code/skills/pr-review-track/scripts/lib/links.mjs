@@ -274,3 +274,52 @@ export function linkifyCode(text, { repo, sha, resolve = () => null, selfPath = 
 
   return { text: out.join('\n'), links: count, unresolved: [...new Set(unresolved)] };
 }
+
+// ------------------------------------------------------------------- auditing
+//
+// Everything above BUILDS a link, and a built link is right by construction. The
+// links a review *wrote* are the other half: `prt permalink` stamps whatever
+// commit the store last recorded, a model can assemble a URL by hand out of
+// something it saw in the diff, and a revision edits bytes nothing regenerates.
+// Any of those can carry a commit that is not the one the review read.
+//
+// Nothing about the result looks wrong. A permalink to the wrong commit renders
+// exactly like a permalink to the right one — the same box, the same file name,
+// fifteen lines of real code — and the reader has no way to tell that the lines
+// quoted at them are not the lines the review is talking about. So the commit in
+// a written link is checked rather than trusted.
+
+/** Every `blob` link in `text` that points into `repo`, with the ref it names. */
+export function permalinksIn(text, repo) {
+  const want = String(repo ?? '').toLowerCase();
+  const out = [];
+  const re = /https:\/\/github\.com\/([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+)\/blob\/([^/\s)<>\]]+)\/([^\s)<>\]]*)/g;
+  for (const m of String(text ?? '').matchAll(re)) {
+    if (m[1].toLowerCase() !== want) continue;
+    out.push({ url: m[0], ref: m[2], path: m[3].split('#')[0] });
+  }
+  return out;
+}
+
+/**
+ * The links into `repo` that do not point at `sha`.
+ *
+ * `refs` name a branch or a tag — always wrong, whatever the review meant,
+ * because the lines behind a moving ref drift away from the ones it was written
+ * about. `commits` name some other commit, which is *sometimes* deliberate — a
+ * reply comparing the code to how it stood two rounds ago is entitled to link
+ * two rounds ago — and is therefore reported rather than refused.
+ *
+ * An abbreviated ref matches: `blob/7ac6b40b/…` is the same commit as
+ * `blob/7ac6b40b153d…/…` and GitHub resolves both.
+ */
+export function auditPermalinks(text, { repo, sha }) {
+  const at = String(sha ?? '').toLowerCase();
+  const refs = [];
+  const commits = [];
+  for (const link of permalinksIn(text, repo)) {
+    if (!isSha(link.ref)) refs.push(link);
+    else if (!isSha(at) || !at.startsWith(link.ref.toLowerCase())) commits.push(link);
+  }
+  return { refs, commits };
+}

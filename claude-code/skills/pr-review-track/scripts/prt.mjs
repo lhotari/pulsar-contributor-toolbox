@@ -26,7 +26,7 @@ import {
   disarmStagedDuplicates,
 } from './lib/render.mjs';
 import { parseDiff, commentableAnchors, validateAnchor } from './lib/diff.mjs';
-import { blobUrl, codeLink, parseLocation, isSha, linkifyCode, pathIndex } from './lib/links.mjs';
+import { blobUrl, codeLink, parseLocation, isSha, linkifyCode, pathIndex, auditPermalinks } from './lib/links.mjs';
 import {
   parseActionFile, parseStatus, setStatus, contentHash, appendLog, planActions,
   PROTECTED_STATUSES, IN_FLIGHT_STATUSES, STATUSES,
@@ -539,9 +539,93 @@ async function repoPaths(base, n, sha) {
   }
 }
 
+/** `7ac6b40b` — a commit as it reads in a sentence. */
+function shortSha(sha) {
+  return String(sha ?? '').slice(0, 8);
+}
+
+/**
+ * The commit every permalink in this draft is built against.
+ *
+ * Not the head fetched a moment ago — the head the review **read**. Those are
+ * the same commit almost always and a different one exactly when it matters: a
+ * review takes minutes, an author can push inside them, and `fetchPr` a minute
+ * later happily returns the commit nobody reviewed. Every line number in a
+ * findings document is a line of the tree the reviewers had open. Stamping a
+ * newer commit on those numbers produces links that resolve, render, and quote
+ * the wrong code — the failure with no symptom, because a permalink to the
+ * wrong commit looks exactly like a permalink to the right one.
+ *
+ * So `findings.head` is not decoration: it is the reviewer stating which tree
+ * those numbers came from, and this refuses to draft rather than guess when it
+ * is missing or when the branch has moved out from under it. An abbreviation is
+ * accepted and widened to the full oid — `prt context` prints the whole thing,
+ * but a human writing the file by hand types eight characters.
+ *
+ * With no findings there is nothing to link and nothing to check: the draft is
+ * about the PR as GitHub has it now, which is the head.
+ */
+function reviewedHead(findings, pr, number) {
+  const head = String(pr.headRefOid ?? '').toLowerCase();
+  if (!findings) return head;
+  const declared = String(findings.head ?? '').trim().toLowerCase();
+  if (!declared) {
+    die(`the findings for #${number} do not say which commit they were read at.\n`
+      + 'Add `"head": "<sha>"` — the commit the review had checked out (`prt context '
+      + `${number}\` reports it as \`analysis.headOid\`). Without it every line number in the file `
+      + 'is a number with no tree behind it, and the permalinks built from them would be a guess.');
+  }
+  if (!isSha(declared)) {
+    die(`the findings for #${number} give \`head: "${findings.head}"\`, which is not a commit.\n`
+      + 'A branch or tag name cannot anchor a review: the lines behind it drift, and the links start '
+      + 'quoting code the review never read.');
+  }
+  if (!head.startsWith(declared)) {
+    die(`#${number} is at ${shortSha(head)}, but these findings were read at ${shortSha(declared)} — `
+      + 'the branch moved while the review was running.\n'
+      + `Every line number in the file is a line of ${shortSha(declared)}, so drafting now would anchor `
+      + 'the comments and point the permalinks at code nobody looked at.\n'
+      + `Re-review against the new head — \`pr-review ${number} --since ${shortSha(declared)}\` covers only `
+      + 'what the author pushed — and draft from those findings instead.');
+  }
+  return head;
+}
+
+/**
+ * The permalinks the review wrote itself, checked against the commit it read.
+ *
+ * `linkifyFindings` below cannot get this wrong; a URL that arrived in the
+ * findings already written can. A branch link is refused outright — it is wrong
+ * for everyone who ever reads the comment, including the author reading it
+ * today. Another commit is only reported: a reply that deliberately links how
+ * the code stood two rounds ago is doing something legitimate, and only the
+ * human can tell that apart from a stale `prt permalink`.
+ */
+function auditWrittenLinks(findings, analysis, repo, sha) {
+  const seen = new Set();
+  const out = { refs: [], commits: [] };
+  for (const f of proseFields(findings, analysis)) {
+    const audit = auditPermalinks(f.obj[f.key], { repo, sha });
+    for (const kind of ['refs', 'commits']) {
+      for (const link of audit[kind]) {
+        // The same URL twice — a finding and the summary both citing it — is one
+        // thing to check, not two.
+        if (seen.has(link.url)) continue;
+        seen.add(link.url);
+        out[kind].push(link);
+      }
+    }
+  }
+  return out;
+}
+
 /**
  * Turn the code references the reviewer wrote in prose into permalinks, in
  * place, before any of it reaches the file.
+ *
+ * `sha` is `reviewedHead`'s answer — the commit the review read, which is the
+ * only commit these line numbers mean anything at. It is also what the repo tree
+ * is fetched at, so a name is resolved against the files that existed then.
  *
  * The PR's own files answer nearly every reference and cost nothing — they are
  * already parsed out of the diff. Only when something is left over is the repo
@@ -714,12 +798,27 @@ COMMANDS.permalink = async () => {
   if (!sha) die(`no head SHA for ${repo}#${n} — run \`prt track ${n}\` first, or pass --sha <commit>`);
   if (!isSha(sha)) die(`--sha needs a commit, not "${sha}" — a branch link renders whatever that branch says later`);
 
+  // The repo's own file list at that commit, when a draft has already fetched it
+  // for this head. It turns the one mistake this command cannot otherwise catch
+  // — a path read out of some other tree, a rename, a file that only exists on
+  // master — into a refusal here rather than a link that 404s in a posted
+  // comment. Only when the cache is for this exact commit and GitHub did not
+  // truncate it: absence has to mean absence before it can mean anything.
+  let treePaths = null;
+  try {
+    const cached = JSON.parse(fs.readFileSync(store.cacheFile(root, repo, n, 'tree.json'), 'utf8'));
+    if (cached.sha === sha && !cached.truncated && Array.isArray(cached.paths)) treePaths = new Set(cached.paths);
+  } catch { /* no usable tree for this commit; the check simply does not run */ }
+
   const links = [];
   for (const spec of specs) {
     let loc;
     try { loc = parseLocation(spec); } catch (e) { die(e.message); }
     if (!loc.path.includes('/')) {
       die(`give the repo-relative path, not just "${loc.path}" — \`prt anchors ${n}\` lists every path in this PR`);
+    }
+    if (treePaths && !treePaths.has(loc.path)) {
+      die(`${repo} has no ${loc.path} at ${sha.slice(0, 8)}.\nEither the path is wrong (\`prt anchors ${n}\` lists every file in this PR) or the commit is — a line number read from one tree does not belong to another.`);
     }
     let url;
     try { url = blobUrl(repo, sha, loc.path, loc); } catch (e) { die(e.message); }
@@ -763,13 +862,30 @@ COMMANDS.draft = async () => {
 
   const reStaged = disarmStagedDuplicates(findings, staged);
 
+  // Which commit this draft is entitled to link. Everything below — the links
+  // the generator makes, the links the review made for itself, and the `head:`
+  // the submitter re-checks — is that one commit or the draft does not happen.
+  const reviewedAt = reviewedHead(findings, pr, n);
+
+  // Links that arrived already written. Checked before anything is generated:
+  // a branch link is wrong for every reader of the comment, and a draft is
+  // cheaper to refuse than a posted comment is to take back.
+  const written = auditWrittenLinks(findings, analysis, base.repo, reviewedAt);
+  if (written.refs.length) {
+    die(`refusing to draft #${n}: ${written.refs.length} permalink(s) in the findings name a branch or a tag `
+      + 'rather than a commit, so they will quote whatever that ref says on the day somebody reads the comment:\n  '
+      + written.refs.map((l) => l.url).join('\n  ')
+      + `\nRebuild them at ${shortSha(reviewedAt)} — \`prt permalink ${n} <path>:<line>\` does it — or just name `
+      + 'the location in prose and let the draft link it.');
+  }
+
   // A review that says `Consumer.java:1015` sends the reader off to find it; the
   // rule is in SKILL.md and a model follows it about as often as it writes the
   // reference. So the generator links them itself, on the way into the file,
   // where the human sees every link before arming anything — never at submit
   // time, where a body is posted byte for byte.
   const linked = await linkifyFindings(base, n, {
-    findings, analysis, sha: pr.headRefOid, diffPaths: [...parseDiff(fullDiff).keys()],
+    findings, analysis, sha: reviewedAt, diffPaths: [...parseDiff(fullDiff).keys()],
   });
 
   // Anchors are validated at generation time as well as at submit time, so the
@@ -926,11 +1042,16 @@ COMMANDS.draft = async () => {
     },
     doc: hatches,
     staged: staged ? { url: staged.url, comments: staged.comments.length, disarmed: reStaged } : null,
-    links: linked,
+    links: { ...linked, at: reviewedAt, writtenAtOtherCommits: written.commits.map((l) => l.url) },
   });
   say(`drafted ${target}`);
   if (linked.links) {
-    say(`  linked ${linked.links} code reference(s) at ${pr.headRefOid.slice(0, 8)}${linked.fetchedTree ? ' (repo tree consulted for names outside the diff)' : ''}`);
+    say(`  linked ${linked.links} code reference(s) at ${shortSha(reviewedAt)}${linked.fetchedTree ? ' (repo tree consulted for names outside the diff)' : ''}`);
+  }
+  // Not an error — a reply may mean to link an older round — but never silent:
+  // this is what a stale `prt permalink` looks like from the outside.
+  for (const l of written.commits) {
+    say(`  permalink at ${shortSha(l.ref)}, not ${shortSha(reviewedAt)} — check it means that commit: ${l.url}`);
   }
   if (linked.unresolved.length) {
     say(`  left as plain text, no single file matches: ${linked.unresolved.slice(0, 8).join(', ')}${linked.unresolved.length > 8 ? `, +${linked.unresolved.length - 8} more` : ''}`);
