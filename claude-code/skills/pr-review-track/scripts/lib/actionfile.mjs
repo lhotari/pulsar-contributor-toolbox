@@ -2426,9 +2426,12 @@ export function planActions(parsed) {
   // threads from `prt:inline` — a new thread is as stageable as a reply, and
   // deferring it was a limit of the old immediate-post path rather than a
   // decision. What it cannot stage is anything GitHub has no draft state for:
-  // resolving a thread, an ordinary PR comment, and the review body, which
-  // belongs to the submit that completes the review. Those stay deferred to a
-  // later verdict, with the approved file as the record.
+  // resolving or unresolving a thread, an ordinary PR comment, and the review
+  // body, which belongs to the submit that completes the review. Those stay
+  // deferred to a later verdict, with the approved file as the record. In
+  // particular, never add thread-resolve/thread-unresolve actions in this
+  // branch: REPLY is allowed to stage text but must not change visible thread
+  // state, even when the corresponding fields are armed in the action file.
   //
   // One action per comment, not one for the batch: each is journalled on its
   // own, so an interrupted run resumes at the comment it died on instead of

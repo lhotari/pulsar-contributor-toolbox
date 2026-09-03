@@ -190,6 +190,11 @@ completes the review. Those wait for a later verdict, with the approved file as
 the record; `prt validate` names them rather than letting you find out from the
 activity log.
 
+This is a hard thread-state invariant: an `event: REPLY` pass never resolves or
+unresolves a thread, even when its `prt:thread` block says `resolve: yes` or
+`unresolve: yes`. Those fields remain in the action file for a later non-`REPLY`
+verdict; only the reply body is staged.
+
 **A staged reply is addressed by the thread's node id**, so `reply-to:` is not
 required under `REPLY` — it is the immediate path's argument, the REST id of the
 thread's first comment.
@@ -388,7 +393,8 @@ Reply markdown.
   comment of the thread, not a reply. Not required under `event: REPLY`, which
   stages the reply against `thread:` instead.
 - `resolve: yes` resolves the thread after the reply lands. `unresolve: yes` is
-  the inverse.
+  the inverse. Under `event: REPLY`, both are deferred: staging a reply never
+  changes the thread's resolution status.
 - `expect-resolved` / `expect-last-comment` are preconditions the generator
   fills in from the thread as it stood: if someone posted in it after this draft
   was written, the submitter blocks so you re-read before replying into changed

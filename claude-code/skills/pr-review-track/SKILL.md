@@ -111,6 +111,10 @@ backstop for a slip, never the reason it is safe to write one.
    in the background changes who is watching, not what is allowed.
 9. The ASF requires a **human is accountable** for every review posted. This
    whole design exists to make that true, not to route around it.
+10. **`event: REPLY` never changes thread resolution.** It may stage a new
+    comment or a reply in a pending review, but it must ignore every `resolve:`
+    or `unresolve:` request until a later non-`REPLY` verdict. This keeps a
+    staging pass from changing any visible thread state.
 
 ## Routing
 

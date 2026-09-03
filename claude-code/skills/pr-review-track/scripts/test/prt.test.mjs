@@ -251,6 +251,14 @@ resolve: yes
 -->
 file-thread reply
 <!-- /prt -->
+<!-- prt:thread
+id: t2
+thread: PRRT_y
+reply-to: 124
+unresolve: yes
+-->
+another file-thread reply
+<!-- /prt -->
 <!-- prt:issue-comment
 id: c1
 -->
@@ -262,7 +270,15 @@ about a security vulnerability
   assert.deepEqual(p.errors, []);
   // The new thread and the reply are both staged into one pending review; the
   // summary, the resolution and the PR comment have no draft state to sit in.
-  assert.deepEqual(planActions(p).map((a) => a.kind), ['stage-open', 'stage-comment', 'stage-reply']);
+  assert.deepEqual(
+    planActions(p).map((a) => a.kind),
+    ['stage-open', 'stage-comment', 'stage-reply', 'stage-reply'],
+  );
+  assert.equal(
+    planActions(p).some((a) => a.kind === 'thread-resolve' || a.kind === 'thread-unresolve'),
+    false,
+    'REPLY stages reply text without changing either thread resolution state',
+  );
   assert.deepEqual(securityLint(p), [], 'the deferred PR comment is outside the staged action set');
   assert.match(
     p.warnings.join(' '),

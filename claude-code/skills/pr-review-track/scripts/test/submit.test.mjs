@@ -688,7 +688,7 @@ const STAGE_RULES = [
 ];
 
 /** A file that stages one new thread and one reply into a thread I own. */
-function replyFile({ event = 'REPLY', inline = true, thread = true, body = '' } = {}) {
+function replyFile({ event = 'REPLY', inline = true, thread = true, body = '', threadAction = '' } = {}) {
   const parts = [
     'Status: ready', '',
     '<!-- prt:doc', 'schema: 1', `repo: ${REPO}`, `pr: ${PR}`, `head: ${HEAD}`, 'base-ref: master', '-->', '',
@@ -696,7 +696,11 @@ function replyFile({ event = 'REPLY', inline = true, thread = true, body = '' } 
   ];
   if (body) parts.push('<!-- prt:body -->', body, '<!-- /prt -->', '');
   if (inline) parts.push('<!-- prt:inline', 'id: i1', 'path: A.java', 'line: 11', 'side: RIGHT', '-->', 'New thread text.', '<!-- /prt -->', '');
-  if (thread) parts.push('<!-- prt:thread', 'id: t1', 'thread: PRRT_1', 'reply-to: 5', '-->', 'Reply text.', '<!-- /prt -->', '');
+  if (thread) parts.push(
+    '<!-- prt:thread', 'id: t1', 'thread: PRRT_1', 'reply-to: 5',
+    ...(threadAction ? [threadAction] : []),
+    '-->', 'Reply text.', '<!-- /prt -->', '',
+  );
   return `${parts.join('\n')}\n`;
 }
 
@@ -704,7 +708,7 @@ const stateOf = (dir) => JSON.parse(fs.readFileSync(path.join(dir, 'pr.json'), '
 const graphqlCalls = (log) => calls(log).filter((c) => c.args.includes('graphql')).map((c) => c.args.join(' '));
 
 test('event REPLY stages comments into an unsubmitted review and submits nothing', () => {
-  const dir = setupPr(replyFile());
+  const dir = setupPr(replyFile({ threadAction: 'resolve: yes' }));
   const log = path.join(ROOT, 'stage.jsonl');
   const scenario = writeScenario('stage', baseRules(STAGE_RULES, { threads: [THREAD] }), log);
 
@@ -721,6 +725,11 @@ test('event REPLY stages comments into an unsubmitted review and submits nothing
     graphqlCalls(log).some((q) => q.includes('submitPullRequestReview') || q.includes('/events')),
     false,
     'nothing submits the review it just started',
+  );
+  assert.equal(
+    graphqlCalls(log).some((q) => q.includes('resolveReviewThread') || q.includes('unresolveReviewThread')),
+    false,
+    'staging a reply never changes the thread resolution status',
   );
 
   const file = fs.readFileSync(path.join(dir, 'review.md'), 'utf8');
