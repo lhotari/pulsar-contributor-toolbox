@@ -1077,6 +1077,46 @@ function thread(over = {}) {
   };
 }
 
+test('Context links every open thread, including other reviewers and outdated anchors', () => {
+  const nodes = Array.from({ length: 45 }, (_, i) => thread({
+    id: `T_${i}`,
+    path: i === 1 ? 'src/File[old].java' : `src/File${i}.java`,
+    line: i === 1 || i === 2 ? null : 11,
+    originalLine: i === 1 ? 7 : null,
+    isOutdated: i === 1,
+    diffSide: i === 1 ? 'LEFT' : 'RIGHT',
+    isResolved: i === 44,
+    comments: { nodes: [{
+      databaseId: i + 1, author: { login: i === 0 ? 'me' : 'other' },
+      body: 'point', createdAt: '2026-01-01T00:00:00Z',
+      url: `https://github.com/o/r/pull/1#discussion_r${i + 1}`,
+    }] },
+  }));
+  const analysis = analyzePr(prFixture({ reviewThreads: { nodes } }), 'me');
+  assert.equal(analysis.threads.length, 1, 'other reviewers do not enter my assessments');
+  assert.equal(analysis.openThreads.length, 44);
+  const text = renderActionFile({ repo: 'o/r', analysis, reviewerLogin: 'me' });
+  const context = text.split('<!-- prt:context -->')[1].split('<!-- /prt -->')[0];
+  const urls = [...context.matchAll(/\]\((https:\/\/github\.com\/o\/r\/pull\/1#discussion_r\d+)\)/g)].map((m) => m[1]);
+  assert.deepEqual(urls, nodes.slice(0, 44).map((t) => t.comments.nodes[0].url));
+  assert.ok(context.includes('[src/File\\[old\\].java:7]('));
+  assert.ok(context.includes('[src/File2.java]('), 'file-level threads have no invented line');
+  const parsed = parseActionFile(text);
+  assert.deepEqual(parsed.errors, []);
+  assert.ok(!parsed.body.includes('discussion_r'), 'navigation stays out of the posted summary');
+});
+
+test('Context renders empty and older cached thread lists', () => {
+  for (const over of [{ openThreads: [] }, { threads: [] }]) {
+    const text = renderActionFile({ repo: 'o/r', analysis: fixtureAnalysis(over), reviewerLogin: 'me' });
+    assert.ok(text.includes('**Open comment threads (0):**\n\nNone.'));
+  }
+  const text = renderActionFile({ repo: 'o/r', reviewerLogin: 'me', analysis: fixtureAnalysis({
+    threads: [{ ...thread(), state: THREAD_STATES.UNTOUCHED, url: 'https://github.com/o/r/pull/1#discussion_r1' }],
+  }) });
+  assert.ok(text.split('<!-- /prt -->')[0].includes('[src/Modified.java:11](https://github.com/o/r/pull/1#discussion_r1)'));
+});
+
 test('a thread the author replied to is the top attention state', () => {
   const pr = prFixture({
     reviewThreads: { nodes: [thread({

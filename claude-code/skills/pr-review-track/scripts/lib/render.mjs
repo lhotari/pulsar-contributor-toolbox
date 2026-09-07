@@ -259,6 +259,18 @@ export function renderActionFile({
   if (a.labels.length) out.push(`| Labels | ${a.labels.join(', ')} |`);
   out.push('');
 
+  // Older cached analyses only contain threads the reviewer participates in.
+  const openThreads = a.openThreads ?? a.threads.filter((t) => !t.isResolved);
+  out.push(`**Open comment threads (${openThreads.length}):**`);
+  out.push('');
+  for (const t of openThreads) {
+    const label = `${t.path ?? t.id}${t.line != null ? `:${t.line}` : ''}`
+      .replace(/[\\`*_[\]<>]/g, '\\$&');
+    out.push(`- ${t.url ? `[${label}](${t.url})` : `${label} (thread URL unavailable)`}${t.isOutdated ? ' — outdated' : ''}`);
+  }
+  if (!openThreads.length) out.push('None.');
+  out.push('');
+
   if (delta?.error) {
     out.push(`> **No usable incremental diff.** ${delta.error}`);
     out.push('>');

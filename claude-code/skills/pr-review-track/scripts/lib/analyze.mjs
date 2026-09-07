@@ -166,6 +166,14 @@ export function analyzePr(pr, login, options = {}) {
     headMoved,
     newCommits,
     threads,
+    // Navigation includes other reviewers' threads too; assessments remain mine.
+    openThreads: (pr.reviewThreads?.nodes ?? []).filter((t) => !t.isResolved).map((t) => ({
+      id: t.id,
+      path: t.path,
+      line: t.line ?? t.originalLine ?? null,
+      isOutdated: !!t.isOutdated,
+      url: t.comments?.nodes?.[0]?.url ?? null,
+    })),
     threadCounts: counts,
     nudge,
     newIssueComments: newIssueComments.map((c) => ({ author: c.author?.login, createdAt: c.createdAt, url: c.url, body: c.body })),

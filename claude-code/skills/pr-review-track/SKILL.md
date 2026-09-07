@@ -522,6 +522,13 @@ changed since the last review — at the head it drafted against, and falls back
 plain `path:line` exactly where a link would be wrong (a `LEFT` anchor, a thread
 GitHub marked outdated).
 
+The Context section also lists every unresolved comment thread, including other
+reviewers' threads, with inline Markdown links to the GitHub conversations.
+Keep this list when revising a draft, and refresh it from GitHub when regenerating.
+Use GitHub's `isResolved` flag to select threads; outdated threads still belong
+in the list until resolved. These links navigate to comments, not source lines,
+and work in both the VS Code Markdown editor and preview.
+
 Your own prose in the file works the same way: when a point needs more code than
 a line or two — the whole method, the caller and the callee, the version before
 and after — link it rather than pasting it in. A draft nobody can skim is a draft
