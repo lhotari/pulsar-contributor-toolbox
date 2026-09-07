@@ -1,3 +1,8 @@
+#!/usr/bin/env -S uv run
+# /// script
+# requires-python = ">=3.9"
+# dependencies = []
+# ///
 """Offline credential-boundary and complete-download regression checks."""
 import os
 import io

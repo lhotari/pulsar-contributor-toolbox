@@ -5,9 +5,11 @@ description: Retrieve an Apache Software Foundation mailing-list thread by subje
 
 # ASF List Fetch Thread
 
-Use `scripts/fetch_thread.py` from this skill's installed directory. It is
-self-contained and needs Python 3.9+ with no third-party packages. Its archive
-and classic ASF OAuth flow are adapted from `pulsar-sec`.
+Run `scripts/fetch_thread.py` directly from this skill's installed directory.
+Both scripts are executable and use `uv run` via their shebangs; `uv` must be
+on PATH. Their inline metadata declares Python 3.9+ and no third-party
+dependencies. Run `scripts/test_fetch_thread.py` directly for the offline tests.
+The retrieval script's archive and classic ASF OAuth flow are adapted from `pulsar-sec`.
 
 ## Resolve and retrieve
 
@@ -16,7 +18,7 @@ supplied archive URL; ask if it is missing. Public archive permalink URLs need
 no list address. Do not guess a list from an opaque permalink. For a subject, search:
 
 ```bash
-python3 <skill-dir>/scripts/fetch_thread.py --list dev@pulsar.apache.org --subject '[DISCUSS] Example proposal'
+<skill-dir>/scripts/fetch_thread.py --list dev@pulsar.apache.org --subject '[DISCUSS] Example proposal'
 ```
 
 The search covers archive history by default. Use `--dates '2026-08'` or
@@ -29,14 +31,14 @@ search to downloading the chosen thread**; search results alone are not the
 requested thread.
 
 ```bash
-python3 <skill-dir>/scripts/fetch_thread.py --list dev@pulsar.apache.org --message-id '<message@example.org>'
-python3 <skill-dir>/scripts/fetch_thread.py --list private@pulsar.apache.org --message-id 'archive-permalink-id'
+<skill-dir>/scripts/fetch_thread.py --list dev@pulsar.apache.org --message-id '<message@example.org>'
+<skill-dir>/scripts/fetch_thread.py --list private@pulsar.apache.org --message-id 'archive-permalink-id'
 ```
 
 Pass archive links directly with `--url`:
 
 ```bash
-python3 <skill-dir>/scripts/fetch_thread.py --url 'https://lists.apache.org/thread/x7pwjxb3jg7m6tldy06rhckq8pcmzq5z' --context
+<skill-dir>/scripts/fetch_thread.py --url 'https://lists.apache.org/thread/x7pwjxb3jg7m6tldy06rhckq8pcmzq5z' --context
 ```
 
 The helper decodes the ID and an optional opaque List-ID query such as
@@ -64,7 +66,7 @@ question, or draft an email) without keeping a mail archive. Search and select
 the thread as above, then fetch it by ID with `--context`:
 
 ```bash
-python3 <skill-dir>/scripts/fetch_thread.py --list dev@pulsar.apache.org --message-id 'selected-message-id' --context
+<skill-dir>/scripts/fetch_thread.py --list dev@pulsar.apache.org --message-id 'selected-message-id' --context
 ```
 
 This mode downloads all messages into an owner-only temporary directory,

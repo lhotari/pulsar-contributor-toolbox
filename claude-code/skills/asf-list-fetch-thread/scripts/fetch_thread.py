@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run
+# /// script
+# requires-python = ">=3.9"
+# dependencies = []
+# ///
 """Retrieve ASF mailing-list threads; stdlib only, Python 3.9+.
 
 Archive/OAuth flow adapted from pulsar-sec/scripts/asf_security_reports.py.
