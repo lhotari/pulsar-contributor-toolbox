@@ -42,7 +42,7 @@ head: abc123${doc}
 
 <!-- prt:context -->
 
-**Draft produced by:** Codex gpt-5.6-sol (round 1, native reviewer) · Opus (adjudicated) (full-repo)
+**Draft produced by:** Codex gpt-6-astra (round 1, native reviewer) · Opus (adjudicated) (full-repo)
 
 <!-- /prt -->
 
@@ -68,7 +68,7 @@ test('a deliberate AI-assistance disclosure is not a leak', () => {
   const disclosures = [
     // pull/26197#issuecomment-5048315727 — on somebody else's PR, so this is
     // reviewer provenance, the class the old lint called private.
-    'I ran an AI-assisted review of this PR (Claude as the local reviewer plus OpenAI Codex `gpt-5.6-sol` as a second independent pass; both sets of findings were cross-verified against the actual sources before posting)',
+    'I ran an AI-assisted review of this PR (Claude as the local reviewer plus OpenAI Codex `gpt-6-astra` as a second independent pass; both sets of findings were cross-verified against the actual sources before posting)',
     'I performed a local review with Claude Code Fable 5 and it found these findings.',
     '<sub>*Assisted-by: Claude (Opus 5).*</sub>',
     '<sub>Prepared with the assistance of Claude Code (Opus 5).</sub>',
@@ -76,7 +76,7 @@ test('a deliberate AI-assistance disclosure is not a leak', () => {
     'These are findings from a local Claude Code review. Please check before merging — they are suggestions, not blockers.',
     // The model name alone, however it is re-embedded. Naming which model ran
     // is disclosure; naming the effort it ran at is mechanics.
-    'Run under `gpt-5.6-sol` against a full checkout.',
+    'Run under `gpt-6-astra` against a full checkout.',
     'GPT-5.6 flagged this one, and I verified it against ManagedLedgerImpl.',
     'AGENTS.md line 3 lists the assistants; consider adding Windsurf while you are here.',
   ];
@@ -90,7 +90,7 @@ test('a deliberate AI-assistance disclosure is not a leak', () => {
 
 test('the four real leaks from the live store are each still caught', () => {
   const leaks = {
-    'pr-26433': '**Review scope.** Tier `lean` — the caller supplied the tier, it was not measured. That means **one** independent reviewer (Codex `gpt-5.6-sol`, effort `xhigh`) plus a second Codex pass framed to refute, adjudicated in the main session against a full checkout at the PR head (`2a1f44d`). This is *not* the two-model consensus pipeline; every finding below carries its own agreement line.',
+    'pr-26433': '**Review scope.** Tier `lean` — the caller supplied the tier, it was not measured. That means **one** independent reviewer (Codex `gpt-6-astra`, effort `xhigh`) plus a second Codex pass framed to refute, adjudicated in the main session against a full checkout at the PR head (`2a1f44d`). This is *not* the two-model consensus pipeline; every finding below carries its own agreement line.',
     'pr-26434': '*Review depth: this was a single-reviewer pass with an independent adversarial second pass over the same checkout, not a two-model consensus review.*',
     'pr-26422': 'For transparency: this was a Codex-only review (one independent reviewer plus an adversarial second pass, adjudicated here), not the two-model consensus pipeline.',
     'pr-24809': 'One smaller thing I am not raising as a finding, because the two reviewers split on it and I could not substantiate the impact.',
@@ -105,7 +105,7 @@ test('the other pipeline mechanics the ruling names are caught too', () => {
   // Rounds and roles. `round` and `validator-role` catch none of the four
   // leaks above, so without these they would be untested arms.
   assert.deepEqual(labels(toolingFile('Raised by the round-3 refute pass, then re-derived by hand.')), ['refutation', 'round']);
-  assert.deepEqual(labels(toolingFile('Codex gpt-5.6-sol (round 1, native reviewer) read the full checkout.')), ['round']);
+  assert.deepEqual(labels(toolingFile('Codex gpt-6-astra (round 1, native reviewer) read the full checkout.')), ['round']);
   // Real text from pr-25939, which sits in `prt:notes` today — one edit away
   // from being outgoing, which is exactly how this leak travels.
   assert.deepEqual(labels(toolingFile('Mechanism confirmed, but one validator enumerated every production construction of CompletionException at head.')), ['validator-role']);
@@ -219,7 +219,7 @@ Thanks — that resolves it.
 });
 
 test('the reviewer provenance in prt:context is never itself a hit', () => {
-  // `**Draft produced by:** Codex gpt-5.6-sol (round 1, native reviewer) · Opus
+  // `**Draft produced by:** Codex gpt-6-astra (round 1, native reviewer) · Opus
   // (adjudicated)` sits in every fixture in this file and would fire `round`
   // and `adjudication` if the scan ever widened past `planActions`. That the
   // whole file above is clean is the assertion; this makes it explicit.

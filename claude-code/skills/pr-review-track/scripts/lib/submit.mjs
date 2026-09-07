@@ -621,7 +621,7 @@ const TOOLING_PHRASES = [
  *   - `\badversarial\b` (2 / 0) and `\bindependent (reviewer|review|pass|read)\b`
  *     (2 / 0). Both would refuse the maintainer's own disclosures — one of them
  *     the flagship "Claude as the local reviewer plus OpenAI Codex
- *     `gpt-5.6-sol` as a second independent pass". Neither catches a leak the
+ *     `gpt-6-astra` as a second independent pass". Neither catches a leak the
  *     surviving phrases miss.
  *   - `(two|three|four|2|3|4) rounds` (5 / 1: "2 rounds of snapshots"),
  *     `\bround[- ]?[1-9]\b …(review|pass|finding)` (1 / 0: "I had round 2

@@ -13,7 +13,7 @@ Write it to `$PRT_ROOT/<owner>/<repo>/pr-<N>/cache/findings.json`.
   "pr": 26289,
   "head": "e2467d03493d57f271db7cfb7deee7ecd9dc2597",
   "kind": "re-review",
-  "reviewers": ["Claude Fable", "Codex gpt-5.6-sol", "Opus (adjudicated)"],
+  "reviewers": ["Claude Fable", "Codex gpt-6-astra", "Opus (adjudicated)"],
   "coverage": "full-repo",
 
   "summary": "Markdown for the review's top comment. May be empty.",

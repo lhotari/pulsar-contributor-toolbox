@@ -243,7 +243,7 @@ Agent({
 })
 ```
 
-**Reviewer B — Codex `gpt-5.6-sol`**, via the Codex plugin's review runtime. Resolve the
+**Reviewer B — Codex `gpt-6-astra`**, via the Codex plugin's review runtime. Resolve the
 companion script first (the install path is version-stamped):
 
 ```bash
@@ -254,14 +254,14 @@ CODEX_COMPANION="$(ls -1dt "$HOME"/.claude/plugins/cache/openai-codex/codex/*/sc
 With a worktree, use Codex's native reviewer (best quality — it walks the repo itself):
 
 ```bash
-node "$CODEX_COMPANION" review --cwd "$WORK/tree" --base "refs/pr-review/<PR_NUMBER>/base" --model gpt-5.6-sol
+node "$CODEX_COMPANION" review --cwd "$WORK/tree" --base "refs/pr-review/<PR_NUMBER>/base" --model gpt-6-astra
 ```
 
 Without a worktree — or when the native reviewer rejects the target — fall back to a
 read-only Codex task over the brief (omitting `--write` keeps the sandbox read-only):
 
 ```bash
-node "$CODEX_COMPANION" task --model gpt-5.6-sol --effort high --prompt-file "$WORK/brief.md"
+node "$CODEX_COMPANION" task --model gpt-6-astra --effort high --prompt-file "$WORK/brief.md"
 ```
 
 At `lean` and `codex`, Codex carries the review alone, so raise the effort to
@@ -275,7 +275,7 @@ it completes.
 Notes:
 - `/codex:review` itself is `disable-model-invocation: true`, so invoke the companion script directly.
 - `review` accepts no custom focus text. If `--prompt` was given and you are on the native path,
-  pass the focus to Codex with `adversarial-review --cwd "$WORK/tree" --base "refs/pr-review/<PR_NUMBER>/base" --model gpt-5.6-sol "<focus>"` instead.
+  pass the focus to Codex with `adversarial-review --cwd "$WORK/tree" --base "refs/pr-review/<PR_NUMBER>/base" --model gpt-6-astra "<focus>"` instead.
 
 **Degradation** (state it in the output, never silently skip): if the companion script is
 missing or Codex is not set up, the Codex-led tiers have no reviewer — fall back to `solo`
@@ -321,7 +321,7 @@ keeping the reason. Write the result to `$WORK/candidate.md`.
 - `full` — both reviewers, concurrently, neither seeing the other's verdict.
 - `standard` — Codex only.
 - `lean` / `codex` — Codex only, a second pass explicitly framed to *refute*:
-  `task --model gpt-5.6-sol --effort high --cwd "$WORK/tree" --prompt-file "$WORK/crossvalidate.md"`.
+  `task --model gpt-6-astra --effort high --cwd "$WORK/tree" --prompt-file "$WORK/crossvalidate.md"`.
   At `codex`, vary that pass (a different effort, or another Codex model) so it is a
   genuinely independent look rather than the same reasoning run twice.
 - `solo` — none.
@@ -389,7 +389,7 @@ The full schema lives in `../pr-review-track/references/findings-schema.md`. In 
   "schema": 1, "repo": "apache/pulsar", "pr": 26289, "head": "<sha>",
   "kind": "initial",
   "tier": "standard",
-  "reviewers": ["Claude Fable", "Codex gpt-5.6-sol", "<adjudicator>"],
+  "reviewers": ["Claude Fable", "Codex gpt-6-astra", "<adjudicator>"],
   "coverage": "full-repo",
   "summary": "<the Summary section, as markdown>",
   "recommendedEvent": "COMMENT",

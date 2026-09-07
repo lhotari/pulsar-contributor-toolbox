@@ -123,7 +123,7 @@ test('only Claude spend counts — Codex is a separate quota', async () => {
   clear();
   const now = Date.now();
   writeTranscript('claude', { records: 10, outputPerRecord: 1000, spanMs: HOUR, now, model: 'claude-opus-5' });
-  writeTranscript('other', { records: 500, outputPerRecord: 100_000, spanMs: HOUR, now, model: 'gpt-5.6-sol' });
+  writeTranscript('other', { records: 500, outputPerRecord: 100_000, spanMs: HOUR, now, model: 'gpt-6-astra' });
 
   const { report } = await load();
   const r = report({ now });
