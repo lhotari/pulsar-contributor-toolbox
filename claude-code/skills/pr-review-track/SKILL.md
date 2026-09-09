@@ -305,6 +305,12 @@ whole section exists to prevent.
     this rule is a preference rather than a prohibition: a Claude host delegates
     to Codex freely, and should — within that same budget. See
     [Host, budget and models](#host-budget-and-models).
+12. **Keep the main checkout untouched.** Every reviewer that inspects a PR
+    branch gets its own temporary detached Git worktree, including parallel
+    reviewers of the same PR and reviewers delegated by a worker. Never check
+    out, switch, reset, clean, stash, or edit files in the user's checkout for
+    a review. Follow [Reviewer worktrees](#reviewer-worktrees) for setup and
+    cleanup; a diff-only review does not need a checkout.
 
 ## Routing
 
@@ -368,10 +374,11 @@ and whether the author actually did what was asked.
    adjudication of what the batch produced is the main session's job, and it
    happens once, not per PR.
 
-   Each worker does, for its own PR:
+   Each worker sets up its own scratch directory and reviewer worktree per
+   [Reviewer worktrees](#reviewer-worktrees), then does, for its own PR:
 
    ```bash
-   node "$PRT" context <N> > ctx.json      # analysis + delta + anchors + my open notes
+   node "$PRT" context <N> > "$REVIEW_TMP/ctx.json"  # analysis + delta + anchors + my open notes
    ```
 
    **First, read `ctx.json.asks`.** Any entry with `open: true` is the human
@@ -451,7 +458,7 @@ Full first-pass reviews of the top candidates, prepared for editing.
    node "$PRT" job add <N>… --kind review --tier <batch tier>
    node "$PRT" job next --max 4
    ```
-   Each worker invokes the **`pr-review` skill**
+   Each worker follows [Reviewer worktrees](#reviewer-worktrees) and invokes the **`pr-review` skill**
    (`/pr-review <N> --out <prdir>/cache --tier <batch tier>`), converts its
    findings to `cache/findings.json`, and writes the draft with
    `node "$PRT" draft <N> --findings cache/findings.json --kind initial --job-token <token>`.
@@ -911,6 +918,55 @@ Stop it with `TaskStop` when the batch is done.
 The watcher dies with the session. For a longer-lived setup, `node "$PRT" watch`
 runs fine in a terminal of its own.
 
+## Reviewer worktrees
+
+This applies to initial reviews, re-reviews, and revisions or note answers that
+need branch inspection. Allocate one unique scratch directory **per reviewer**,
+not just per PR. Parallel reviewers must never share a checkout, even when
+they review the same SHA. Prose-only workers need no worktree.
+
+Resolve the source repository and absolute `PRT` and PR cache paths before
+changing directories. Apply `pr-review`'s security gate to the metadata and
+diff before creating a worktree. If the gate disallows it, or setup fails,
+continue with static diff-only inspection and report the reduced coverage;
+never fall back to checking out the branch in the main directory.
+
+After the gate clears, fetch the PR head without updating a local branch and
+pin its full SHA. Fetch once in the coordinating worker, then pass that SHA to
+all its reviewers; do not let concurrent reviewers derive it from a shared
+`FETCH_HEAD` or a moving ref. Verify it matches the head used for the review's
+context and diff. Each reviewer then gets a separately allocated directory:
+
+```bash
+# SOURCE_REPO is the absolute source checkout; REVIEW_HEAD is the pinned SHA.
+REVIEW_TMP=$(mktemp -d "${TMPDIR:-/tmp}/prt-review-<N>-XXXXXX")
+REVIEW_TREE="$REVIEW_TMP/tree"
+git -C "$SOURCE_REPO" worktree add --detach "$REVIEW_TREE" "$REVIEW_HEAD"
+git -C "$REVIEW_TREE" rev-parse HEAD   # must equal REVIEW_HEAD
+```
+
+Set the reviewer's working directory to `REVIEW_TREE` explicitly. Run Git with
+`git -C "$REVIEW_TREE"`, pass `--cwd "$REVIEW_TREE"` to Codex companion calls,
+and tell native agents to run all repository commands there. Keep context,
+prompts, and intermediate output under `REVIEW_TMP`, and use absolute paths
+for durable findings and drafts in the PR's tracking directory. A detached
+worktree isolates files but is not a security sandbox; keep reviewers read-only.
+
+When invoking `pr-review`, adapt its setup to reuse the assigned worktree and
+pinned SHA for that reviewer, and allocate separate worktrees for any parallel
+reviewers or validators it starts. Its fixed `/tmp/pr-review-<N>` example and
+shared `WORK/tree` must not replace this per-reviewer allocation. Carry the
+pinned SHA through to `findings.head` and code permalinks.
+
+The coordinating worker owns cleanup on success, failure, or cancellation.
+Wait for every reviewer using a worktree to stop, save the findings and other
+needed artifacts to the tracking directory, then remove only that reviewer's
+worktree with `git -C "$SOURCE_REPO" worktree remove "$REVIEW_TREE"`. If removal
+refuses because files changed, preserve it and report the path; do not force
+removal. Remove remaining disposable scratch files only from directories this
+job created. Never remove another job's worktrees or refs. If a worker dies,
+the main session uses its recorded paths to perform the same cleanup.
+
 ## The job queue
 
 Per-PR work runs as background jobs so the terminal stays the human's. The queue
@@ -938,7 +994,8 @@ to fill the freed slot, spawn, end the turn. When the queue is empty, give the
 batch summary and arm the watcher.
 
 **Every worker's prompt carries** the PR number, the repo, the tier, the payload,
-its `token`, **the model it runs on, and the model and effort it delegates
+its `token`, the absolute source repository and scratch/worktree paths, the
+pinned review SHA (or the diff-only restriction), **the model it runs on, and the model and effort it delegates
 judgement to** (the row from
 [the model table](#3-which-model-does-which-piece-of-this-skills-work), resolved
 against the pair the [Codex half](#the-codex-half--the-model-and-the-effort-both-hosts)
@@ -947,6 +1004,10 @@ printed), and this contract:
 > Do the work for this kind of job. Write `review.md` **only** through
 > `prt draft <N> --job-token <token>` or
 > `prt job commit <N> --token <token> --from <file>` — never by editing it.
+> Follow *Reviewer worktrees*: use only your assigned checkout for repository
+> commands, give each parallel delegate its own worktree at the pinned SHA,
+> and leave the main checkout untouched. Record allocated paths for cleanup
+> and clean up after delegates stop, including on failure or cancellation.
 > Refer to code with permalinks built by `prt permalink <N> <path>:<lines>`,
 > per the skill's *Linking to code*: short and central, the bare URL alone in
 > its own paragraph so GitHub renders it; otherwise the inline `--markdown`
@@ -960,7 +1021,8 @@ printed), and this contract:
 > You are the harness, not the reviewer. Run `prt`, read what it gives you, and
 > hand the judgement that needs a frontier model to the model and effort you were
 > given, through
-> `node "$CODEX_COMPANION" task --model <model> --effort <effort> --prompt-file <file>`
+> `node "$CODEX_COMPANION" task --cwd <assigned-reviewer-worktree> --model <model> --effort <effort> --prompt-file <file>`
+> (for diff-only work, use the scratch directory as `--cwd` instead)
 > (no `--write`, so its sandbox stays read-only). Those two came from the batch's
 > budget: do not raise either because this PR looks important, and do not lower
 > them to be helpful. Fold what comes back into
