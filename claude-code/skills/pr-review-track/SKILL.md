@@ -899,9 +899,18 @@ is still open.
 
 ## Arm the watcher
 
-Whenever you hand back a batch of drafts, start the watcher so the human can
-work through the files at their own pace and each one posts the moment they
-arm it:
+Whenever you hand back drafts — including a single initial review, re-review,
+or revised draft — ensure the posting watcher is running before the final reply.
+The user has explicitly requested automatic watcher startup as part of this
+workflow; do not ask them to request or confirm it again. This authorizes starting
+the gated watcher, not arming a draft: the human still sets `Status: ready`,
+which is the explicit confirmation for the actions in that file. Never set it
+yourself. A repository requirement to confirm GitHub writes is satisfied by that
+human gate, not by an additional question about starting the watcher.
+
+Reuse an existing watcher for the same repository and tracking root; otherwise
+start `node "$PRT" watch --interval 20` in a persistent background process.
+On Claude Code, use `Monitor`:
 
 ```
 Monitor({
@@ -911,9 +920,18 @@ Monitor({
 })
 ```
 
-Each submission emits one line, which arrives as a chat notification. Tell the
-user the watcher is running and that `Status: ready` on line 1 is what fires it.
-Stop it with `TaskStop` when the batch is done.
+On Codex, use `exec_command` with `tty: true` and a short `yield_time_ms`, retain
+the returned session ID, and inspect its output with `write_stdin`. Do not skip
+startup because `Monitor` is unavailable. Check that the process is alive and
+has not exited with an error before reporting it as running. If startup fails,
+report the concrete failure rather than claiming the watcher is active.
+
+Each submission emits a status line; surface these through the host's available
+monitoring tools. Tell the user the watcher is running and that `Status: ready`
+on line 1 is what fires it. Leave it running while the human edits the drafts;
+an empty review-job queue is not a reason to stop the posting watcher. Stop it
+when requested or when the batch has been submitted or set aside (`TaskStop` for
+Monitor, or interrupt the retained process session on Codex).
 
 The watcher dies with the session. For a longer-lived setup, `node "$PRT" watch`
 runs fine in a terminal of its own.
