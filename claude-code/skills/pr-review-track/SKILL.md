@@ -1,6 +1,6 @@
 ---
 name: pr-review-track
-description: Keep up with pull requests in a GitHub project (especially apache/pulsar) across many PRs and many rounds. Tracks every in-progress review under ~/.claude/pr-review-track, detects whether the author actually addressed earlier feedback, and drafts the reply, inline comments and review resolution into a markdown file the human edits and arms before anything is posted. Use for "re-review", "show latest PRs", "review latest", "revisit/revise a draft review", "what needs my attention", "cleanup closed PRs", "ignore/archive this PR" or "bring back an archived review", or any request to manage a backlog of PR reviews. Invokes the pr-review skill to do the actual reviewing.
+description: Keep up with pull requests in a GitHub project (especially apache/pulsar) across many PRs and many rounds. Tracks every in-progress review under ~/.claude/pr-review-track, detects whether the author actually addressed earlier feedback, and drafts the reply, inline comments and review resolution into a markdown file the human edits and arms before anything is posted. Use for "re-review", "show latest PRs", "review latest", "revisit/revise a draft review", "what needs my attention", "cleanup closed PRs", "ignore/archive this PR" or "bring back an archived review", or any request to manage a backlog of PR reviews. Invokes the pr-review skill to do the actual reviewing. In Claude Code it reads the live subscription usage to pick one review tier for the batch and pushes work down to cheaper Claude models and to Codex when the allowance is tight; in Codex it runs Codex-only and never invokes a Claude model.
 argument-hint: |
   re-review [N...] | show-latest | approved | review-latest [--limit 10] | revisit-draft [N] [instructions] | ask [N] | sync | board | submit | watch | cleanup | archive [N...] | unarchive [N...] | open [N...]
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, Agent, Monitor, Skill
@@ -29,36 +29,161 @@ node "$PRT" doctor      # confirms repo, reviewer, editor, and GraphQL budget
 
 If `doctor` fails, stop and report — every command below depends on it.
 
-**Decide the tier once per session, then stop asking.** Reviewing ten PRs is the
-most expensive thing this skill does, and the `pr-review` pipeline scales itself
-to what is left:
+## Host, budget and models
+
+**Two questions, answered once per session, in this order.** Everything below
+is decided at the start of the session's first batch and reused for everything
+that follows — including later batches in the same sitting. Do not re-derive it
+per PR, per round, or per `re-review`.
+
+### 1. Which host is running this skill?
+
+The current agent runtime and its native tools decide it — never the repository
+path, and never the name of the skill directory.
+
+**Codex host.** Everything below about the Claude allowance does not apply and
+must not be run: skip `review-budget.sh`, skip `claude-usage.sh`, and never
+invoke Claude Opus, Claude Fable, the Claude `Agent` tool, or the Codex plugin's
+Claude Code companion. The tier is `codex` and the models are Codex models,
+always:
+
+| work | model |
+|---|---|
+| thoughtful — reading a delta, adjudicating a thread, drafting review prose, revising a draft | `gpt-6-astra` |
+| simple — summarising `prt` output, formatting a board, classifying a comment, a mechanical edit | `gpt-5.6-sol`, at a faster thinking level |
+
+Pass `--tier codex` to every `/pr-review` call so it takes the Codex-only
+pipeline too. **A Codex host never delegates to Claude, for any reason** —
+including when a tier flag says `full` or `standard`. A tier is review depth; it
+is never a model family.
+
+**Claude Code host.** Continue to question 2.
+
+### 2. How much Claude allowance is left? *(Claude Code only)*
+
+Reviewing ten PRs is the most expensive thing this skill does, and the
+`pr-review` pipeline scales itself to what is left.
+
+```bash
+RBUDGET=~/.claude/skills/pr-review-track/scripts/review-budget.sh
+[ -f "$RBUDGET" ] || RBUDGET=~/workspace-pulsar/pulsar-contributor-toolbox/claude-code/skills/pr-review-track/scripts/review-budget.sh
+"$RBUDGET"          # five lines; --json for the same thing structured
+```
+
+It wraps `scripts/claude-usage.sh --json` — the subscription's own reported
+utilization, not an estimate off local transcripts — and answers the one
+question that matters: **at the rate this window is being consumed, does the
+allowance run out before the window resets?**
+
+    pace = (share of the limit already used) / (share of the window elapsed)
+
+Both metered windows are read — the 5-hour session and the 7-day week — and the
+worse of the two picks the tier, so a batch that will hit the session wall in an
+hour is trimmed even on a fresh week. The raw weekly percentage floors it,
+because a week that is 94% gone is constrained however evenly it was spent. A
+window with too little spent to judge is printed and then ignored, rather than
+being allowed to spike the tier on the noise of a window that just opened.
+
+| it prints | the batch |
+|---|---|
+| `full` | comfortably under. Fable **and** Codex review; both cross-validate. |
+| `standard` | on schedule. One Fable pass, Codex validates. |
+| `lean` | ahead of pace. **Codex reviews alone at `xhigh`**; Opus only adjudicates. |
+| `codex` | the allowance will not carry a Claude-led batch. Everything that can go to Codex goes to Codex; Opus adjudicates a trimmed brief. |
+
+Exit code 3 means `codex`, so a shell caller can branch without parsing.
+
+**The `fable:` line is a second gate on the same reading** — `ok`, `sparing`,
+`avoid`. Fable is metered on its own weekly limit *and* against the shared one,
+so it is the first thing to give up when either is tight, and the gate can say
+`avoid` at a tier whose table still lists Fable.
+
+- `avoid` with a tier of `full` or `standard` → **take the tier down to `lean`
+  for the batch** and say why. `lean` is precisely the shape wanted here — Codex
+  reviewing alone at `xhigh`, Opus adjudicating — and `--tier` is the only
+  channel `pr-review` reads, so this is how "no Fable" is expressed. Do not
+  smuggle it into `--prompt`; that is the review focus and corrupting it
+  corrupts the review.
+- `sparing` → keep the tier, but reserve Fable for the one or two PRs whose diff
+  genuinely needs a second frontier reviewer. Pass those `--tier standard` and
+  the rest `--tier lean`.
+
+If the script cannot read the usage endpoint — it is undocumented and can
+disappear — fall back to `pr-review`'s local estimate, and say which of the two
+the tier came from:
 
 ```bash
 BUDGET=~/.claude/skills/pr-review/scripts/budget.mjs
 [ -f "$BUDGET" ] || BUDGET=~/workspace-pulsar/pulsar-contributor-toolbox/claude-code/skills/pr-review/scripts/budget.mjs
-node "$BUDGET" --json    # cached 30 min
+node "$BUDGET" --json    # pace inferred from local transcripts, cached 30 min
 ```
 
-The reading is cached at a resolution of **30 minutes** and reports its own age
-(`cached`, `cacheAgeMs`); a stale-by-minutes estimate picks the same tier, so
-take it. Run this **once**, at the start of the session's first batch, and reuse
-the answer for everything that follows — including later batches within the same
-sitting. Do not re-run it per PR, per round, or per `re-review`. Re-measure only
-when the session has been running long enough that the cache has expired anyway
-*and* a lot has been spent since, or when the user asks.
+Pass the tier straight through to every `/pr-review` call (`--tier <tier>`) and
+to every `prt job add --tier <tier>`. That keeps the batch at one consistent
+depth and stops each PR re-deriving it — `pr-review` skips its budget script
+entirely when it is given a tier.
 
-Pass the tier straight through to every `/pr-review` call (`--tier <tier>`).
-That both keeps the batch at one consistent depth and stops each PR re-deriving
-the tier — `pr-review` skips the budget script entirely when it is given one.
-Tell the user which tier the batch ran at, and at `lean` or `codex` say plainly
-that each PR got one independent reviewer rather than two. **In the terminal, to
-them.** The tier is the reader-of-this-session's business and nobody else's, so
-it never goes into a draft's outgoing text. **That is your job, not the lint's.**
-The pipeline-mechanics lint refuses the shapes this leak actually takes, and it
-is phrase-based: an ordinary sentence that carries the tier, the shape, the round
-or the model split in words it does not know — "this review ran at the lean
-depth", "finding 3 came out of the second pass" — passes it and posts. It is a
-backstop for a slip, never the reason it is safe to write one.
+Tell the user which tier the batch ran at and why, and at `lean` or `codex` say
+plainly that each PR got one independent reviewer rather than two. **In the
+terminal, to them.** The tier is the reader-of-this-session's business and
+nobody else's, so it never goes into a draft's outgoing text. **That is your job,
+not the lint's.** The pipeline-mechanics lint refuses the shapes this leak
+actually takes, and it is phrase-based: an ordinary sentence that carries the
+tier, the shape, the round or the model split in words it does not know — "this
+review ran at the lean depth", "finding 3 came out of the second pass" — passes
+it and posts. It is a backstop for a slip, never the reason it is safe to write
+one.
+
+### 3. Which model does which piece of *this* skill's work?
+
+The tier scales `pr-review`. This table scales **`pr-review-track` itself**, and
+it applies at every tier — most of what this skill does never needed a frontier
+model in the first place. Read down the table by default; reach up only for the
+row that names the work.
+
+| the work | Claude Code host | Codex host |
+|---|---|---|
+| running `prt` and reading its output — `sync`, `board`, `list`, `latest`, `cleanup`, `archive`, job bookkeeping | main session, inline. It is shell, not reasoning. | same |
+| presenting a `latest` ranking, a board, a batch report | main session, inline. Never a subagent. | same |
+| a `re-review` worker — reading the delta, deciding whether each thread was addressed, drafting the replies | harness on `sonnet`, judgement handed to **Codex `gpt-6-astra`** (`--effort high`) | `gpt-6-astra` |
+| an initial `review` worker | `/pr-review <N> --tier <tier>` — it routes its own models | `/pr-review <N> --tier codex` |
+| a `revise` worker — applying wording instructions to prose that already exists | `sonnet`, or Codex `gpt-5.6-sol` at `--effort medium` | `gpt-5.6-sol` |
+| answering a `prt:ask` note | main session inline when it is short; `sonnet` when it needs the diff re-read | `gpt-6-astra` |
+| drafting a `nudge`, a cleanup summary, an archive triage | `haiku` or `sonnet` | `gpt-5.6-sol` |
+| a mechanical sweep — every draft has a `prt:pr-actions` block, tallying anchors, listing files | `haiku`, or plain shell | `gpt-5.6-sol` at a fast thinking level |
+| final adjudication — which findings survive, the recommended resolution, what reaches the human | main session (Opus) | main session |
+
+Three rules the table is shorthand for:
+
+1. **Codex's quota is not the one under pressure.** On a Claude host, work handed
+   to `gpt-6-astra` costs nothing scarce. When a task needs real judgement over a
+   diff and does not need the main session's cached context, Codex is the
+   default — not the fallback. This is true at `full`, not only when constrained.
+2. **The main session's context is already cached**, so an inline Opus pass is
+   often *cheaper* than a fresh subagent paying a full cache write to be told the
+   same thing. Adjudication, and anything that is two sentences of judgement over
+   context you already hold, stays inline. Do not spawn a subagent to answer a
+   question you can already answer.
+3. **Never spend Opus or Fable on work a smaller model finishes correctly.**
+   Formatting, extraction, mechanical edits, and summarising output you have
+   already read are `haiku` / `sonnet` / `gpt-5.6-sol` work at every tier. At
+   `lean` and `codex` that stops being an economy and becomes the rule: Claude
+   adjudicates and does nothing else.
+
+Resolve the Codex companion once and reuse it — the install path is
+version-stamped:
+
+```bash
+CODEX_COMPANION="$(ls -1dt "$HOME"/.claude/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs 2>/dev/null | head -1)"
+[ -n "$CODEX_COMPANION" ] || CODEX_COMPANION="$HOME/.claude/plugins/marketplaces/openai-codex/plugins/codex/scripts/codex-companion.mjs"
+node "$CODEX_COMPANION" task --model gpt-6-astra --effort high --prompt-file <file>   # read-only without --write
+```
+
+If the companion is missing or Codex is not set up, say so once and do the work
+on Claude at the smallest model that fits the row — never silently, because a
+batch that was meant to run on Codex and ran on Claude instead is the thing this
+whole section exists to prevent.
+
 
 ## Invariants — never violate these
 
@@ -115,6 +240,15 @@ backstop for a slip, never the reason it is safe to write one.
     comment or a reply in a pending review, but it must ignore every `resolve:`
     or `unresolve:` request until a later non-`REPLY` verdict. This keeps a
     staging pass from changing any visible thread state.
+11. **A Codex host never invokes a Claude model.** Not Opus, not Fable, not the
+    Claude `Agent` tool, not the Codex plugin's Claude Code companion, and not
+    the Claude allowance scripts — which have nothing to say about a quota Codex
+    does not spend. `gpt-6-astra` does the thoughtful work and `gpt-5.6-sol` the
+    simple work, at every tier and whatever a `--tier` flag says, because a tier
+    is review depth and never a model family. The mirror of this rule is a
+    preference rather than a prohibition: a Claude host delegates to Codex
+    freely, and should. See
+    [Host, budget and models](#host-budget-and-models).
 
 ## Routing
 
@@ -137,6 +271,7 @@ Match the user's words — natural phrasing is expected, not just flags.
 | "open #26289" | `node "$PRT" open 26289` |
 | "nudge", "remind the authors", "who hasn't replied" | [Nudge](#nudge) |
 | "what's running", "how's the batch going", "is anything still queued" | `node "$PRT" job list` |
+| "how much budget is left", "am I going to run out", "which tier are we on" | [Host, budget and models](#2-how-much-claude-allowance-is-left-claude-code-only) — `"$RBUDGET"`, and report the five lines |
 | "stop the batch", "cancel the queue", "forget those reviews" | `node "$PRT" job cancel --all` (a running one needs its agent stopped first) |
 
 Anything not listed: run `node "$PRT" help` and route from there. Do not invent
@@ -168,6 +303,13 @@ and whether the author actually did what was asked.
    agent per entry — never more than it handed you — and **end your turn**, so
    the human has the prompt back while the batch runs. See
    [The job queue](#the-job-queue) for the loop and the worker's contract.
+
+   **A re-review worker is a `sonnet` agent on a Claude host** (`gpt-6-astra` on
+   a Codex host). It is a harness: it runs `prt`, reads the delta, and hands the
+   judgement — did this thread get addressed, and is the delta itself sound — to
+   Codex `gpt-6-astra`, then verifies what comes back before drafting. Never
+   spawn these on Opus or Fable; adjudication of what the batch produced is the
+   main session's job, and it happens once, not per PR.
 
    Each worker does, for its own PR:
 
@@ -257,6 +399,10 @@ Full first-pass reviews of the top candidates, prepared for editing.
    findings to `cache/findings.json`, and writes the draft with
    `node "$PRT" draft <N> --findings cache/findings.json --kind initial --job-token <token>`.
 
+   Run these workers on `sonnet` too. `pr-review` chooses its own reviewers from
+   the tier it was handed, so the worker around it is doing conversion and
+   bookkeeping — a job with no frontier reasoning in it.
+
    `maxConcurrentJobs` (default 4) is the ceiling, and `job next` already applied
    it — spawn what it handed you and no more. At `lean`/`codex` the limit that
    bites first is Codex's, not Claude's.
@@ -288,6 +434,13 @@ any batch already queued:
 node "$PRT" job add <N> --kind revise --priority now --instructions "<their words>"
 node "$PRT" job next --max 1
 ```
+
+Revision is editing prose that already exists against instructions someone else
+wrote, so it does not need a frontier model: run the worker on `sonnet`, or hand
+it to Codex `gpt-5.6-sol` at `--effort medium`. On a Codex host it is
+`gpt-5.6-sol`. The exception is a revision that has to re-decide something — the
+human disputing a finding rather than its wording — which is judgement, and goes
+to `gpt-6-astra` (or the main session, if the context is already open there).
 
 The worker follows the procedure below, and then — this part is not optional —
 writes the edited bytes to `cache/revise-<token>.md` and commits them with
@@ -728,7 +881,9 @@ to fill the freed slot, spawn, end the turn. When the queue is empty, give the
 batch summary and arm the watcher.
 
 **Every worker's prompt carries** the PR number, the repo, the tier, the payload,
-its `token`, and this contract:
+its `token`, **the model it runs on and the model it delegates judgement to**
+(from the table in [Host, budget and models](#3-which-model-does-which-piece-of-this-skills-work)),
+and this contract:
 
 > Do the work for this kind of job. Write `review.md` **only** through
 > `prt draft <N> --job-token <token>` or
@@ -742,6 +897,16 @@ its `token`, and this contract:
 > Return at most five lines: number, what happened, the recommended resolution,
 > and the path to the file. Everything substantial goes on disk, not in the
 > reply.
+>
+> You are the harness, not the reviewer. Run `prt`, read what it gives you, and
+> hand the judgement that needs a frontier model to the model you were told to
+> use — on a Claude host that is Codex `gpt-6-astra`, reached through
+> `node "$CODEX_COMPANION" task --model gpt-6-astra --effort high --prompt-file <file>`
+> (no `--write`, so its sandbox stays read-only). Fold what comes back into
+> `findings.json` yourself, verifying each claim against the code before you keep
+> it — a reviewer's output is a candidate, never a finding. Do not escalate to a
+> larger Claude model to save yourself a round trip, and say so in your outcome
+> line if the companion was unavailable and you did the work yourself.
 
 **If an agent finishes and its job is still `running`,** it died without
 recording anything. Record it yourself with `job fail`, and say so in the report:
@@ -839,6 +1004,11 @@ Archiving is the user's decision to make: propose it, do not do it unasked.
 - [commands.md](references/commands.md) — full `prt` reference.
 - [findings-schema.md](references/findings-schema.md) — the `findings.json`
   contract. Read before writing one.
+- [scripts/review-budget.sh](scripts/review-budget.sh) — the tier and the Fable
+  gate, from the live subscription usage. It wraps
+  [scripts/claude-usage.sh](scripts/claude-usage.sh), which prints the raw
+  endpoint JSON with `--json` if you need a figure the wrapper does not report.
+  **Claude Code only** — a Codex host runs neither.
 
 The reviewing itself lives in the **`pr-review`** skill; this skill decides
 *which* PRs to review, *when*, and how the result reaches GitHub.
