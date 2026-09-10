@@ -30,10 +30,12 @@ Useful for Pulsar development
 
 * [skills directory](skills/)
 
-Installing skills with [`link-skills-to-claude.sh`](link-skills-to-claude.sh)
+Install skills into `~/.claude/skills` and `~/.agents/skill` with
+[`link-skills-to-agents.sh`](link-skills-to-agents.sh). The script also creates
+a `prt` symlink alias for `pr-review-track` in both directories.
 
 ```shell
-./link-skills-to-claude.sh
+./link-skills-to-agents.sh
 ```
 
 ### Reviewing pull requests
