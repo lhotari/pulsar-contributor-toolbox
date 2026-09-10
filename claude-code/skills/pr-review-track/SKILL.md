@@ -343,6 +343,24 @@ Match the user's words — natural phrasing is expected, not just flags.
 Anything not listed: run `node "$PRT" help` and route from there. Do not invent
 subcommands.
 
+## Review comment tone
+
+On the reviewer's first review body for a PR (`summary` → `prt:body`), add one
+short sentence thanking the author for the contribution before any criticism.
+Use the review history to distinguish a first review from a follow-up; revising
+an unposted first draft still counts as the first review. Vary the wording
+naturally and, where possible, tie it to the actual contribution: "Thanks for
+adding coverage here." or "Thanks for working on this fix." Keep it friendly
+and understated, without effusive praise or a stock opening repeated on every
+PR. When recommending approval, keep `LGTM.` first and put the thank-you after
+it. Follow-up bodies do not need to repeat the opening thanks.
+
+Keep inline comments and thread replies fairly short, with a constructive,
+positive tone where the evidence supports it. Acknowledge a useful change or
+clarification when relevant, then state the remaining issue and a concrete next
+step. Avoid repeated pleasantries, forced praise, and blame; preserve the
+evidence and failure scenario needed to understand the criticism.
+
 ## Re-review
 
 The core loop: for every PR where a review is in progress, work out what changed

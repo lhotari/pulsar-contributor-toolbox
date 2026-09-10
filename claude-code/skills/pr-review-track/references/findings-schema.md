@@ -77,6 +77,11 @@ When `recommendedEvent` is `APPROVE`, start `summary` with the literal text
 `LGTM.` followed by any explanation; this becomes the `prt:body` review comment
 even when the generated verdict is `COMMENT`.
 
+For `summary`, `findings[].body`, and posted replies, follow
+[Review comment tone](../SKILL.md#review-comment-tone): a brief, varied thank-you
+in the first review body (after `LGTM.` when approving), and concise,
+constructive inline comments and thread replies.
+
 **`context.staged`** — when `prt context <N>` reports a staged review, those
 comments are already on GitHub in an unsubmitted review, and the human may have
 rewritten them there. Do not raise any of them again. A finding that repeats one
