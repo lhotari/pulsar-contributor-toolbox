@@ -73,6 +73,9 @@ Write it to `$PRT_ROOT/<owner>/<repo>/pr-<N>/cache/findings.json`.
 **`recommendedEvent`** — `APPROVE`, `REQUEST_CHANGES`, `COMMENT`, or `NONE`. With
 `requireExplicitApprove` on (the default), a recommendation of `APPROVE` is shown
 to the human but the file is written with `event: COMMENT`.
+When `recommendedEvent` is `APPROVE`, start `summary` with the literal text
+`LGTM.` followed by any explanation; this becomes the `prt:body` review comment
+even when the generated verdict is `COMMENT`.
 
 **`context.staged`** — when `prt context <N>` reports a staged review, those
 comments are already on GitHub in an unsubmitted review, and the human may have

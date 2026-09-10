@@ -256,6 +256,10 @@ whole section exists to prevent.
    workflow; an `APPROVE` verdict includes GitHub's separate **Approve workflows
    to run** action for eligible fork PR runs on the approved head. Do not
    require or invent a second approval marker.
+   When recommending approval, start the review summary (`findings.json`
+   `summary`, rendered as `prt:body`) with the literal text `LGTM.` followed by
+   any explanation. Apply this to initial drafts and revisions, even while the
+   verdict remains `event: COMMENT` pending the human's approval.
    `update-branch: true` and `trigger-ci: true` are writes to the pull request,
    so the same rule covers them: always generate them `false`, and say in prose
    when one looks worth setting (a PR behind its base, a fork PR whose CI is
