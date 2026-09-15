@@ -568,6 +568,17 @@ sits on bytes nobody approved.
 3. Edit the bytes you read. Never modify line 1, and never modify anything
    inside `prt:doc`: the head SHA and diff fingerprint are what the submitter
    pre-flights against, so a stale one must fail loudly rather than be tidied up.
+   **Re-read line 1 in the same command that writes**, however recently you
+   checked it: the human arms a file while you are still verifying, and an edit
+   that lands after `ready` posts words nobody approved. If it has become
+   `ready`, stop and say so. This applies to the adjudication pass over a
+   worker's fresh draft exactly as it does to a requested revision.
+   **Never restore `review.md` from a copy.** Undoing an edit by copying a
+   backup back is how a `submitted` file — rewritten by the submitter with its
+   log — was turned back into a `ready` one and posted a second time. The
+   submitter refuses that re-post now, but the file's truth is the one on disk
+   plus `history/`: re-read it and make the reverse edit, or leave the file alone
+   and report what changed.
    Working as a job, write the result to `cache/revise-<token>.md` and commit it
    with `job commit`; the file itself is prt's to write.
 4. If the file has no `prt:pr-actions` block and the PR is not merged, add one
@@ -930,33 +941,47 @@ which is the explicit confirmation for the actions in that file. Never set it
 yourself. A repository requirement to confirm GitHub writes is satisfied by that
 human gate, not by an additional question about starting the watcher.
 
-Reuse an existing watcher for the same repository and tracking root; otherwise
-start `node "$PRT" watch --interval 20` in a persistent background process.
-On Claude Code, use `Monitor`:
+The watcher is a process of its own, tracked by a pidfile under the tracking
+root, so it outlives the tool call that started it, the monitor window that
+watches it, and the session:
+
+```bash
+node "$PRT" watch --interval 20 --detach   # idempotent: reuses a live watcher, prints pid + log
+node "$PRT" watch --status                 # running (pid, since, log) or not; exit 3 when not
+node "$PRT" watch --stop                   # SIGTERM, waits for it to finish its tick and go
+```
+
+`--detach` is the whole start procedure. It refuses to start a second watcher
+on the same root and repo — two of them race each other to the same `ready`
+line — and it fails loudly, with the tail of the log, if the child died before
+it could poll, so never report a watcher as running on the strength of having
+asked for one: the command's own output is the evidence. `prt doctor` prints
+the same `watcher` line.
+
+Its output goes to the log the command prints. To surface submissions in the
+chat, tail that log — on Claude Code with `Monitor`:
 
 ```
 Monitor({
-  command: `node "${PRT}" watch --interval 20`,
-  description: "pr-review-track: posting reviews as they are marked ready",
-  persistent: true,
+  command: `tail -n 0 -F "<log path from --detach>"`,
+  description: "pr-review-track: reviews posting as they are marked ready",
+  timeout_ms: 1800000,
 })
 ```
 
-On Codex, use `exec_command` with `tty: true` and a short `yield_time_ms`, retain
-the returned session ID, and inspect its output with `write_stdin`. Do not skip
-startup because `Monitor` is unavailable. Check that the process is alive and
-has not exited with an error before reporting it as running. If startup fails,
-report the concrete failure rather than claiming the watcher is active.
+A monitor window expires; the watcher does not. When the tail expires, re-arm
+it and say nothing — re-check `--status` only if an expiry looks like a crash.
+Never run `prt watch` (without `--detach`) inside a monitor: the harness kills
+it when the window closes, and a watcher that dies unnoticed stops posting
+approved reviews silently, which is the failure the whole thing exists to
+prevent. On Codex, the same two commands, with the log tailed through
+`exec_command`.
 
-Each submission emits a status line; surface these through the host's available
-monitoring tools. Tell the user the watcher is running and that `Status: ready`
-on line 1 is what fires it. Leave it running while the human edits the drafts;
-an empty review-job queue is not a reason to stop the posting watcher. Stop it
-when requested or when the batch has been submitted or set aside (`TaskStop` for
-Monitor, or interrupt the retained process session on Codex).
-
-The watcher dies with the session. For a longer-lived setup, `node "$PRT" watch`
-runs fine in a terminal of its own.
+Each submission emits a status line. Tell the user the watcher is running and
+that `Status: ready` on line 1 is what fires it. Leave it running while the
+human edits the drafts; an empty review-job queue is not a reason to stop the
+posting watcher. Stop it with `prt watch --stop` when the user asks, or when the
+batch has been submitted or set aside.
 
 ## Reviewer worktrees
 

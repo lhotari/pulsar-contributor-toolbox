@@ -400,7 +400,7 @@ An `edited` note that is `blocking: no` is the one member of that family
 `prt submit` does not refuse, so it prints as a `warning:` and leaves the verdict
 alone — named, but not counted as something that stops a post.
 
-### `submit <N>… | --all-ready [--dry-run]`
+### `submit <N>… | --all-ready [--dry-run] [--allow-repost]`
 
 Runs the transaction for files whose line 1 says `ready` (also resumes `queued`
 and `partial`, and any PR with an open transaction whatever its status — an
@@ -409,6 +409,19 @@ interrupted run must be finishable). See `action-file.md` for the protocol.
 `--dry-run` runs capture and the full preflight against live GitHub and reports
 exactly what would be posted, without writing anything — to GitHub or to the
 file. It refuses to resume an open transaction, since resuming posts.
+
+A file whose words are already on the PR is refused before preflight, and set to
+`blocked` so the watcher stops looking at it: the outbox names the transaction
+that posted them and the URL it got back. It recognises two shapes — the exact
+payload a previous run posted, and a file of the same generation whose action
+(the `review`, a thread reply, a PR comment) has already landed even though the
+bytes differ by an edit. Both are what a completed file set back to `ready`
+looks like: a copy taken before the post restored over the submitted one, an
+editor buffer saved late. A new round is regenerated and carries a new
+generation, so it posts; so does the verdict that submits a staged `REPLY`
+pass, and a re-armed `update-branch`. `--allow-repost` is the human saying the
+words are meant to go out twice; the watcher never passes it. `prt validate`
+prints the same refusal.
 
 The verdict controls the action set. `REPLY` **stages**: it puts thread replies
 and new inline threads into a PENDING review — visible to nobody but you — and
@@ -430,15 +443,26 @@ one round update the branch first, then wait up to `workflowApprovalWaitSeconds`
 for the new head's runs to appear and approve those. See
 [action-file.md](action-file.md#prtpr-actions--acting-on-the-pull-request-itself).
 
-### `watch [--interval 20] [--quiesce 3] [--once] [--all-repos]`
+### `watch [--interval 20] [--quiesce 3] [--once] [--all-repos] [--detach | --status | --stop]`
 
 Polls the tracking tree and submits files as they become `ready`. Polling, not
 filesystem events, because editors save through temp-file replacement and a
 missed event means a review silently never posts.
 
 A file must be unchanged for `--quiesce` seconds before it is acted on. Each
-submission prints one line — those become chat notifications when the watcher
-runs under the `Monitor` tool.
+submission prints one line — those become chat notifications when the log of a
+detached watcher is tailed under the `Monitor` tool.
+
+`--detach` starts the same loop as a process of its own — stdout and stderr to
+`<root>/watch/<repo>.log`, its pid in `<root>/watch/<repo>.pid` — and returns
+once the child has written that pidfile, or fails with the tail of the log if
+the child died first. It is idempotent: a live watcher for the same root and
+repo is reused and reported, never doubled, and a foreground `watch` refuses to
+start beside one. `--status` prints the pid, start time and log (exit 3 when
+none is running; a stale pidfile is cleared on the way past). `--stop` sends
+SIGTERM and waits: the loop finishes the tick it is in — a submit in flight is
+never cut off — and then exits, without sitting out the rest of the interval.
+`--all-repos` watchers are tracked separately from single-repo ones.
 
 ### `recover <N>`
 

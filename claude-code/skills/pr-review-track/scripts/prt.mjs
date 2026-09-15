@@ -12,7 +12,8 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 import { viewerLogin, resolveRepo, rateLimit, GhError } from './lib/gh.mjs';
 import {
@@ -39,7 +40,7 @@ const MACHINE_ONLY_STATUSES = new Set(['queued', 'submitting', 'submitted', 'par
 import {
   newJob, planNext, orderQueue, finishedJob, failedJob, JOB_KINDS, mintToken,
 } from './lib/jobs.mjs';
-import { submitReady, diffFingerprint, findOpenTx, contentRefusals, carryDocHatches } from './lib/submit.mjs';
+import { submitReady, diffFingerprint, findOpenTx, contentRefusals, repostRefusal, carryDocHatches } from './lib/submit.mjs';
 import * as store from './lib/store.mjs';
 
 const VERSION = '1.0.0';
@@ -140,7 +141,9 @@ COMMANDS.help = () => {
   Posting  (the only commands that write to GitHub)
     validate <N>...                        parse + lint (fetches the diff to check anchors)
     submit <N>... | --all-ready            post files whose line 1 says "ready"
+           [--allow-repost]                (a file whose words already went out is refused without it)
     watch [--interval S] [--once]          poll for "ready" files and post them
+    watch --detach | --status | --stop     the same, as a process that outlives the session
     recover <N>                            reconcile an interrupted transaction
 
   Housekeeping
@@ -174,6 +177,7 @@ COMMANDS.doctor = async () => {
     editor: `${base.cfg.editorCmd} ${base.cfg.editorArgs.join(' ')}`.trim(),
     graphqlRateLimit: rl,
     trackedRepos: repos.map((r) => ({ repo: r, prs: store.listTracked(base.root, r).length })),
+    watcher: liveWatcher(watcherPaths(base.root, base.repo)),
   };
   emit(info);
   if (!JSON_OUT) {
@@ -184,6 +188,7 @@ COMMANDS.doctor = async () => {
     say(`  editor     ${info.editor}`);
     say(`  graphql    ${rl.remaining}/${rl.limit} points, resets ${rl.resetAt}`);
     for (const r of info.trackedRepos) say(`  tracking   ${r.repo}: ${r.prs} PR(s)`);
+    say(`  watcher    ${watcherLine(base.root, base.repo)}`);
     const q = queueLine(base);
     if (q) say(`  ${q}`);
   }
@@ -1850,6 +1855,11 @@ COMMANDS.validate = async () => {
     if (!parsed.errors.length) {
       row.actions = planActions(parsed).map((a) => ({ id: a.id, kind: a.kind }));
       row.refusals.push(...contentRefusals(parsed, base.cfg));
+      // The outbox is on disk, so this refusal is decidable here too: a file
+      // whose words already went out is turned away by `submit` without a
+      // network round trip, and `validate` has to say the same.
+      const repost = repostRefusal(path.dirname(file), parsed, planActions(parsed));
+      if (repost) row.refusals.push(repost);
       // An `edited` note that is NOT blocking is the one thing in this family
       // `prt submit` does not refuse, so it cannot be a refusal here — but the
       // file still reads as settled, with an `addressed` answer sitting under a
@@ -1941,7 +1951,7 @@ COMMANDS.submit = async () => {
     }
     let res;
     try {
-      res = await submitReady({ ...ctx, dryRun });
+      res = await submitReady({ ...ctx, dryRun, allowRepost: !!argv.flags['allow-repost'] });
     } catch (e) {
       res = { ok: false, status: dryRun ? 'would-block' : 'error', message: e.message };
       // A dry run answers a question; it never changes the answer.
@@ -1991,84 +2001,237 @@ COMMANDS.recover = async () => {
  * events: editors save through temp-file replacement, events get coalesced,
  * and a missed event here means a review silently never posts.
  */
+// ------------------------------------------------------------------ the watcher
+//
+// A watcher that dies with whatever started it stops posting approved reviews
+// silently — the exact failure polling was chosen to avoid — and a harness
+// monitor window is one of the things that ends. So the watcher can run as a
+// detached process of its own, tracked by a pidfile under the tracking root,
+// and every way of starting one first asks whether one is already running:
+// two watchers on the same files race each other to the same `ready` line.
+
+const WATCH_ALL = 'all-repos';
+
+function watcherPaths(root, repo) {
+  const slug = repo === WATCH_ALL ? WATCH_ALL : repo.replace('/', '__');
+  const dir = path.join(root, 'watch');
+  return { dir, slug, pid: path.join(dir, `${slug}.pid`), log: path.join(dir, `${slug}.log`) };
+}
+
+function pidAlive(pid) {
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
+}
+
+/** Best effort: is that pid still a `prt watch`, or a reused number? */
+function looksLikeWatcher(pid) {
+  try {
+    const cmd = execFileSync('ps', ['-o', 'command=', '-p', String(pid)], { encoding: 'utf8' });
+    return /prt(\.mjs)?\b.*\bwatch\b/.test(cmd);
+  } catch {
+    return true; // no `ps` to ask — trust the pidfile
+  }
+}
+
+/** The watcher the pidfile names, if it is still running; a stale file is removed. */
+function liveWatcher(paths) {
+  if (!fs.existsSync(paths.pid)) return null;
+  let rec;
+  try { rec = JSON.parse(fs.readFileSync(paths.pid, 'utf8')); } catch { rec = null; }
+  if (rec && Number.isInteger(rec.pid) && pidAlive(rec.pid) && looksLikeWatcher(rec.pid)) {
+    return { ...rec, log: paths.log };
+  }
+  try { fs.unlinkSync(paths.pid); } catch { /* already gone */ }
+  return null;
+}
+
+function watcherLine(root, repo) {
+  const w = liveWatcher(watcherPaths(root, repo));
+  return w ? `running (pid ${w.pid}) since ${w.startedAt}, log ${w.log}` : 'not running';
+}
+
+function writePidfile(paths, pid, flags) {
+  fs.mkdirSync(paths.dir, { recursive: true });
+  store.writeAtomic(paths.pid, `${JSON.stringify({ pid, startedAt: new Date().toISOString(), flags }, null, 2)}\n`);
+}
+
+/** Send SIGTERM and wait for the process to go, up to `waitMs`. */
+async function stopWatcher(paths, w, waitMs = 30_000) {
+  try { process.kill(w.pid, 'SIGTERM'); } catch { /* already gone */ }
+  const until = Date.now() + waitMs;
+  while (pidAlive(w.pid) && Date.now() < until) await new Promise((r) => setTimeout(r, 100));
+  const gone = !pidAlive(w.pid);
+  if (gone) { try { fs.unlinkSync(paths.pid); } catch { /* the child removed it */ } }
+  return gone;
+}
+
+/** The flags a detached child is started with: the user's, minus the ones that mean "manage, don't run". */
+function watchChildArgs() {
+  const out = ['watch'];
+  for (const [k, v] of Object.entries(argv.flags)) {
+    if (['detach', 'status', 'stop', 'json'].includes(k)) continue;
+    out.push(v === true ? `--${k}` : `--${k}=${v}`);
+  }
+  return out;
+}
+
 COMMANDS.watch = async () => {
   const base = await context();
   const interval = Number(argv.flags.interval ?? base.cfg.watchIntervalSeconds) * 1000;
   const quiesce = Number(argv.flags.quiesce ?? base.cfg.quiesceSeconds) * 1000;
   const once = !!argv.flags.once;
-  const repos = argv.flags['all-repos'] ? store.listRepos(base.root) : [base.repo];
+  const allRepos = !!argv.flags['all-repos'];
+  const repos = allRepos ? store.listRepos(base.root) : [base.repo];
+  const paths = watcherPaths(base.root, allRepos ? WATCH_ALL : base.repo);
+  const live = liveWatcher(paths);
+
+  if (argv.flags.status) {
+    emit({ watcher: live, log: paths.log });
+    say(`watcher for ${allRepos ? 'all repos' : base.repo}: ${live ? `running (pid ${live.pid}) since ${live.startedAt}` : 'not running'}`);
+    say(`  log  ${paths.log}`);
+    if (!live) process.exitCode = 3;
+    return;
+  }
+
+  if (argv.flags.stop) {
+    if (!live) { emit({ stopped: false }); say(`no watcher is running for ${allRepos ? 'all repos' : base.repo}`); return; }
+    const gone = await stopWatcher(paths, live);
+    emit({ stopped: gone, pid: live.pid });
+    if (!gone) die(`watcher pid ${live.pid} did not stop within 30s`);
+    say(`stopped watcher pid ${live.pid}`);
+    return;
+  }
+
+  if (argv.flags.detach) {
+    if (live) {
+      // Idempotent on purpose: the skill calls this every time it hands back a
+      // draft, and "already running" is the answer it wants most of the time.
+      emit({ started: false, reused: true, pid: live.pid, startedAt: live.startedAt, log: paths.log });
+      say(`watcher already running (pid ${live.pid}) since ${live.startedAt} — reusing it`);
+      say(`  log  ${paths.log}`);
+      return;
+    }
+    fs.mkdirSync(paths.dir, { recursive: true });
+    const out = fs.openSync(paths.log, 'a');
+    const child = spawn(process.execPath, [fileURLToPath(import.meta.url), ...watchChildArgs()], {
+      detached: true,
+      stdio: ['ignore', out, out],
+      env: process.env,
+      cwd: process.cwd(),
+    });
+    child.unref();
+    fs.closeSync(out);
+    // The child writes its own pidfile once `context()` has succeeded; if it
+    // fails before that (no gh, no repo), say so now rather than reporting a
+    // watcher that is already dead.
+    const until = Date.now() + 10_000;
+    let started = null;
+    while (Date.now() < until) {
+      started = liveWatcher(paths);
+      if (started && started.pid === child.pid) break;
+      if (!pidAlive(child.pid)) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    if (!started || started.pid !== child.pid) {
+      const tail = fs.existsSync(paths.log) ? fs.readFileSync(paths.log, 'utf8').trim().split('\n').slice(-5).join('\n  ') : '';
+      die(`watcher failed to start${tail ? `:\n  ${tail}` : ''}\n  log ${paths.log}`);
+    }
+    emit({ started: true, reused: false, pid: child.pid, startedAt: started.startedAt, log: paths.log });
+    say(`started watcher pid ${child.pid} for ${allRepos ? 'all repos' : base.repo} (every ${interval / 1000}s)`);
+    say(`  log  ${paths.log}`);
+    return;
+  }
+
+  if (live && !once) {
+    die(`a watcher for ${allRepos ? 'all repos' : base.repo} is already running (pid ${live.pid}, since ${live.startedAt}) — reuse it, or \`prt watch --stop\` first\n  log ${paths.log}`);
+  }
 
   const seen = new Map();     // "repo#n" -> {mtime, at} when first seen ready
   const failures = new Map(); // "repo#n" -> {count, until} exponential backoff
   let running = true;
+  let wake = () => {};
   for (const sig of ['SIGINT', 'SIGTERM']) {
-    process.on(sig, () => { running = false; console.log(`[prt] watch stopping (${sig})`); });
+    process.on(sig, () => { running = false; console.log(`[prt] watch stopping (${sig})`); wake(); });
   }
+  if (!once) writePidfile(paths, process.pid, argv.flags);
+  const cleanup = () => {
+    if (once) return;
+    try {
+      const rec = JSON.parse(fs.readFileSync(paths.pid, 'utf8'));
+      if (rec.pid === process.pid) fs.unlinkSync(paths.pid);
+    } catch { /* not ours, or already gone */ }
+  };
+  process.on('exit', cleanup);
 
   console.log(`[prt] watching ${repos.join(', ')} every ${interval / 1000}s — set "Status: ready" on line 1 to post`);
-  while (running) {
-    for (const repo of repos) {
-      // Each repo carries its own repo.json overrides; applying the cwd repo's
-      // settings to all of them would silently change behaviour per repo.
-      const rcfg = store.repoConfig(store.loadConfig(base.root), repo);
-      const rbase = { ...base, repo, cfg: { ...rcfg, reviewer: base.login } };
-      for (const n of store.listTracked(base.root, repo)) {
-        const file = store.actionFilePath(base.root, repo, n);
-        if (!fs.existsSync(file)) continue;
-        let text;
-        try { text = fs.readFileSync(file, 'utf8'); } catch { continue; }
-        const status = parseStatus(text);
-        const key = `${repo}#${n}`;
-        if (!['ready', 'queued', 'partial'].includes(status)) { seen.delete(key); continue; }
+  try {
+    while (running) {
+      for (const repo of repos) {
+        // Each repo carries its own repo.json overrides; applying the cwd repo's
+        // settings to all of them would silently change behaviour per repo.
+        const rcfg = store.repoConfig(store.loadConfig(base.root), repo);
+        const rbase = { ...base, repo, cfg: { ...rcfg, reviewer: base.login } };
+        for (const n of store.listTracked(base.root, repo)) {
+          const file = store.actionFilePath(base.root, repo, n);
+          if (!fs.existsSync(file)) continue;
+          let text;
+          try { text = fs.readFileSync(file, 'utf8'); } catch { continue; }
+          const status = parseStatus(text);
+          const key = `${repo}#${n}`;
+          if (!['ready', 'queued', 'partial'].includes(status)) { seen.delete(key); continue; }
 
-        // cleanup (or anything else) can rename this directory out from under
-        // the poll. A watcher that dies here stops posting approved reviews
-        // silently — the exact failure polling was chosen to avoid.
-        let mtime;
-        try {
-          mtime = fs.statSync(file).mtimeMs;
-        } catch {
+          // cleanup (or anything else) can rename this directory out from under
+          // the poll. A watcher that dies here stops posting approved reviews
+          // silently — the exact failure polling was chosen to avoid.
+          let mtime;
+          try {
+            mtime = fs.statSync(file).mtimeMs;
+          } catch {
+            seen.delete(key);
+            continue;
+          }
+          const backoff = failures.get(key);
+          if (backoff && Date.now() < backoff.until) continue;
+          const first = seen.get(key);
+          if (first === undefined || first.mtime !== mtime) {
+            seen.set(key, { mtime, at: Date.now() });
+            continue; // wait for the file to settle
+          }
+          if (Date.now() - first.at < quiesce) continue;
+
+          console.log(`[prt] ${key} is ${status} — submitting`);
+          let failed = false;
+          try {
+            const res = await submitReady(prCtx(rbase, n));
+            const icon = res.ok ? '✅' : res.status === 'blocked' ? '⛔' : '⚠️';
+            console.log(`${icon} [prt] ${key} → ${res.status}: ${String(res.message).split('\n')[0]}`);
+            for (const u of res.urls ?? []) console.log(`[prt] ${key} posted ${u}`);
+            failed = !res.ok && res.status !== 'blocked';
+          } catch (e) {
+            console.log(`⚠️ [prt] ${key} submit threw: ${e.message}`);
+            failed = true;
+          }
+          if (failed) {
+            // Without backoff a PR that cannot succeed (outage, wedged state) is
+            // retried every tick forever, burning preflight calls and drowning
+            // the chat in identical lines.
+            const n2 = (failures.get(key)?.count ?? 0) + 1;
+            const waitMs = Math.min(30 * 60_000, interval * 2 ** n2);
+            failures.set(key, { count: n2, until: Date.now() + waitMs });
+            console.log(`[prt] ${key} failed ${n2}x — next attempt in ${Math.round(waitMs / 1000)}s`);
+          } else {
+            failures.delete(key);
+          }
           seen.delete(key);
-          continue;
+          try { writeBoard(rbase); } catch { /* a board write must never kill the watch */ }
         }
-        const backoff = failures.get(key);
-        if (backoff && Date.now() < backoff.until) continue;
-        const first = seen.get(key);
-        if (first === undefined || first.mtime !== mtime) {
-          seen.set(key, { mtime, at: Date.now() });
-          continue; // wait for the file to settle
-        }
-        if (Date.now() - first.at < quiesce) continue;
-
-        console.log(`[prt] ${key} is ${status} — submitting`);
-        let failed = false;
-        try {
-          const res = await submitReady(prCtx(rbase, n));
-          const icon = res.ok ? '✅' : res.status === 'blocked' ? '⛔' : '⚠️';
-          console.log(`${icon} [prt] ${key} → ${res.status}: ${String(res.message).split('\n')[0]}`);
-          for (const u of res.urls ?? []) console.log(`[prt] ${key} posted ${u}`);
-          failed = !res.ok && res.status !== 'blocked';
-        } catch (e) {
-          console.log(`⚠️ [prt] ${key} submit threw: ${e.message}`);
-          failed = true;
-        }
-        if (failed) {
-          // Without backoff a PR that cannot succeed (outage, wedged state) is
-          // retried every tick forever, burning preflight calls and drowning
-          // the chat in identical lines.
-          const n2 = (failures.get(key)?.count ?? 0) + 1;
-          const waitMs = Math.min(30 * 60_000, interval * 2 ** n2);
-          failures.set(key, { count: n2, until: Date.now() + waitMs });
-          console.log(`[prt] ${key} failed ${n2}x — next attempt in ${Math.round(waitMs / 1000)}s`);
-        } else {
-          failures.delete(key);
-        }
-        seen.delete(key);
-        try { writeBoard(rbase); } catch { /* a board write must never kill the watch */ }
       }
+      if (once) break;
+      // A stop signal ends the wait, not the tick after it: `prt watch --stop`
+      // should not have to outwait the interval.
+      await new Promise((r) => { wake = r; setTimeout(r, interval); });
     }
-    if (once) break;
-    await new Promise((r) => setTimeout(r, interval));
+  } finally {
+    cleanup();
   }
 };
 

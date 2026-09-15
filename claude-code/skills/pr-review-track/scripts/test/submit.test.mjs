@@ -465,6 +465,121 @@ test('the approved snapshot, not later edits, is what gets posted', () => {
   assert.equal(approved.includes('COMPLETELY DIFFERENT'), false);
 });
 
+// ------------------------------------------------------------------ re-posting
+//
+// The journal stops a crash from double-posting. These are the other way the
+// same words go out twice: a completed file set back to `ready` — the copy the
+// model took before the post restored over the file the submitter had already
+// rewritten, forty-six seconds after the review landed — and the watcher, which
+// reads nothing but line 1, running it again.
+
+/** Every call but the `viewer` lookup `prt` makes to learn who it is. */
+const beyondIdentity = (log) => calls(log).filter((c) => !c.args.join(' ').includes('viewer'));
+
+const REVIEW_POST = {
+  when: { args: ['--method', 'POST'], arg: 'pulls/1/reviews' },
+  stdout: '{"id":99,"state":"COMMENTED","html_url":"https://x/1#r99"}',
+};
+
+test('a completed file set back to ready is refused, not posted twice', () => {
+  const armed = actionFile({ doc: ['generation: 2'] });
+  const dir = setupPr(armed);
+  const log = path.join(ROOT, 'repost.jsonl');
+  const scenario = writeScenario('repost', baseRules([REVIEW_POST]), log);
+  assert.equal(runPrt(['submit', '1', '--repo', REPO], scenario).status, 0);
+  assert.equal(calls(log).filter(isWrite).length, 1);
+
+  // The bytes from before the post, `Status: ready` and all, land back on top
+  // of the submitted file.
+  fs.writeFileSync(path.join(dir, 'review.md'), armed);
+  const log2 = path.join(ROOT, 'repost2.jsonl');
+  const again = writeScenario('repost2', baseRules([REVIEW_POST]), log2);
+  const r = runPrt(['submit', '1', '--repo', REPO], again);
+  assert.notEqual(r.status, 0);
+  assert.deepEqual(beyondIdentity(log2), [], 'refused before preflight — GitHub is not even asked about the PR');
+  const file = fs.readFileSync(path.join(dir, 'review.md'), 'utf8');
+  assert.equal(file.split('\n')[0], 'Status: blocked', 'blocked, so the watcher stops looking at it');
+  assert.match(file, /already posted: transaction \S+ put the exact payload .*\(https:\/\/x\/1#r99\)/);
+  assert.match(file, /--allow-repost/);
+
+  // `validate` reaches the same verdict from the same code.
+  const v = runPrt(['validate', '1', '--repo', REPO], writeScenario('repost-validate', baseRules(), path.join(ROOT, 'repost-v.jsonl')));
+  assert.notEqual(v.status, 0);
+  assert.match(v.stdout, /refuses: already posted/);
+
+  // The human saying they mean it is the one thing that posts it again.
+  fs.writeFileSync(path.join(dir, 'review.md'), armed);
+  const log3 = path.join(ROOT, 'repost3.jsonl');
+  const forced = writeScenario('repost3', baseRules([REVIEW_POST]), log3);
+  assert.equal(runPrt(['submit', '1', '--repo', REPO, '--allow-repost'], forced).status, 0);
+  assert.equal(calls(log3).filter(isWrite).length, 1);
+});
+
+test('a restored copy that differs by an edit is still the same review', () => {
+  // What actually happened: the first run posted an edited copy, the restored
+  // one carried the human's original wording. Different payload, same
+  // generation, same action — and the second is still the duplicate.
+  const dir = setupPr(actionFile({ doc: ['generation: 2'], inline: 'Inline text, as edited by the model.' }));
+  const log = path.join(ROOT, 'repost-edit.jsonl');
+  assert.equal(runPrt(['submit', '1', '--repo', REPO], writeScenario('repost-edit', baseRules([REVIEW_POST]), log)).status, 0);
+
+  fs.writeFileSync(path.join(dir, 'review.md'), actionFile({ doc: ['generation: 2'], inline: 'Inline text, as the human armed it.' }));
+  const log2 = path.join(ROOT, 'repost-edit2.jsonl');
+  const r = runPrt(['submit', '1', '--repo', REPO], writeScenario('repost-edit2', baseRules([REVIEW_POST]), log2));
+  assert.notEqual(r.status, 0);
+  assert.deepEqual(beyondIdentity(log2), []);
+  assert.match(fs.readFileSync(path.join(dir, 'review.md'), 'utf8'), /already posted: transaction .* put "review" from generation 2/);
+
+  // A new round is a new generation, and posts.
+  fs.writeFileSync(path.join(dir, 'review.md'), actionFile({ doc: ['generation: 3'], inline: 'Round two.' }));
+  const log3 = path.join(ROOT, 'repost-edit3.jsonl');
+  assert.equal(runPrt(['submit', '1', '--repo', REPO], writeScenario('repost-edit3', baseRules([REVIEW_POST]), log3)).status, 0);
+  assert.equal(calls(log3).filter(isWrite).length, 1);
+});
+
+test('the verdict that submits a staged review is not a re-post of the staging pass', () => {
+  const dir = setupPr(replyFile({ inline: false }));
+  const log = path.join(ROOT, 'stage-then-verdict.jsonl');
+  const staged = writeScenario('stage-then-verdict', baseRules(STAGE_RULES, { threads: [THREAD] }), log);
+  assert.equal(runPrt(['submit', '1', '--repo', REPO], staged).status, 0);
+  assert.equal(stateOf(dir).staged.reviewDatabaseId, '77');
+
+  // Same file, same (absent) generation, a verdict instead of REPLY: different
+  // action ids, so the earlier run is not this one.
+  fs.writeFileSync(path.join(dir, 'review.md'), actionFile({ inline: false }));
+  const log2 = path.join(ROOT, 'stage-then-verdict2.jsonl');
+  const verdict = writeScenario('stage-then-verdict2', baseRules([
+    {
+      when: { arg: 'pulls/1/reviews', args: ['--paginate'] },
+      stdout: '[[{"id":77,"node_id":"PRR_77","state":"PENDING","user":{"login":"me"},"html_url":"https://x/1#pullrequestreview-77"}]]',
+    },
+    {
+      when: { args: ['--method', 'POST'], arg: 'pulls/1/reviews/77/events' },
+      stdout: '{"id":77,"state":"COMMENTED","html_url":"https://x/1#pullrequestreview-77"}',
+    },
+  ]), log2);
+  const r = runPrt(['submit', '1', '--repo', REPO], verdict);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(calls(log2).filter(isWrite).length, 1, 'the staged review is submitted');
+  assert.equal(fs.readFileSync(path.join(dir, 'review.md'), 'utf8').split('\n')[0], 'Status: submitted');
+});
+
+test('re-arming update-branch is a second request, not a duplicate', () => {
+  const armed = actionFile({ event: 'NONE', body: '', inline: false, doc: ['generation: 1'] })
+    .replace('<!-- prt:verdict', '<!-- prt:pr-actions\nupdate-branch: true\ntrigger-ci: false\n-->\n\n<!-- prt:verdict');
+  const dir = setupPr(armed);
+  const rules = [{ when: { args: ['--method', 'PUT'], arg: 'pulls/1/update-branch' }, stdout: '{"message":"Updating pull request branch."}' }];
+  const log = path.join(ROOT, 'ub.jsonl');
+  const r1 = runPrt(['submit', '1', '--repo', REPO], writeScenario('ub', baseRules(rules), log));
+  assert.equal(r1.status, 0, r1.stderr);
+
+  fs.writeFileSync(path.join(dir, 'review.md'), armed);
+  const log2 = path.join(ROOT, 'ub2.jsonl');
+  const r2 = runPrt(['submit', '1', '--repo', REPO], writeScenario('ub2', baseRules(rules), log2));
+  assert.equal(r2.status, 0, r2.stderr);
+  assert.equal(calls(log2).filter((c) => c.args.includes('PUT')).length, 1, 'the branch is updated again, as asked');
+});
+
 // ---------------------------------------------------------- pipeline mechanics
 //
 // Only the wiring lives here — `toolingLint: true` in DEFAULT_CONFIG, the

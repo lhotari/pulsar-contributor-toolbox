@@ -859,6 +859,11 @@ the head.
    bytes are copied to
    `outbox/<txId>/approved.md` and journalled in `outbox/<txId>/tx.json`. Status
    becomes `queued`; from here your edits no longer affect this run.
+   Before anything is asked of GitHub, the outbox is checked for a run that
+   already posted these words — the same payload, or the same action from the
+   same generation. A completed file set back to `ready` (a pre-post copy
+   restored over it, a late editor save) is refused here as `blocked`, naming
+   the transaction and the URL; `prt submit --allow-repost` is the override.
 2. **Preflight** — every precondition is re-checked against live GitHub:
    - PR still open; the event is legal (you cannot approve your own PR)
    - head SHA, base ref, and diff fingerprint all unchanged

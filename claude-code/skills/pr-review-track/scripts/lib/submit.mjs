@@ -89,6 +89,78 @@ export function findOpenTx(prPath) {
 }
 
 /**
+ * Action kinds that put words on GitHub. The PR-level actions and thread
+ * state changes are not here on purpose: running `update-branch` a second time
+ * is a second request, not a duplicate, and the human re-arms it by setting the
+ * flag back to `true`.
+ */
+const CONTENT_ACTION_KINDS = new Set(['review', 'thread-reply', 'issue-comment', 'stage-comment', 'stage-reply']);
+
+/**
+ * Every transaction in this PR dir that put words on GitHub, oldest first —
+ * whatever state it ended in. A `partial` run posted some of its actions, and
+ * those are as posted as a `complete` run's.
+ */
+export function postedTxs(prPath) {
+  const outbox = path.join(prPath, 'outbox');
+  if (!fs.existsSync(outbox)) return [];
+  const out = [];
+  for (const d of fs.readdirSync(outbox).sort()) {
+    const f = path.join(outbox, d, 'tx.json');
+    if (!fs.existsSync(f)) continue;
+    let tx;
+    try { tx = readTx(f); } catch { continue; }
+    const posted = (tx.actions ?? []).filter((a) => a.state === 'done' && CONTENT_ACTION_KINDS.has(a.kind));
+    if (posted.length) out.push({ tx, file: f, dir: path.join(outbox, d), posted });
+  }
+  return out;
+}
+
+/**
+ * Why this file must not be posted again, or null.
+ *
+ * The journal keeps a crash mid-flight from double-posting. This is the other
+ * way the same words go out twice: a file whose run completed is set back to
+ * `ready` — a copy taken before the post restored over the submitted one, an
+ * editor buffer saved late — and the watcher, which reads nothing but line 1,
+ * runs it again. It happened: two identical reviews on one pull request,
+ * forty-six seconds apart.
+ *
+ * Two things identify such a file. The exact payload a previous run posted,
+ * whatever generation it claims; and, for a copy that differs from what went
+ * out by an edit, the generation `prt draft` stamped it with, under which the
+ * same action id has already landed. Neither catches a legitimate second run:
+ * a new round is regenerated and carries a new generation, and a staged
+ * `REPLY` pass followed by the verdict that submits it posts different action
+ * ids from the same generation. `--allow-repost` is the human saying they mean
+ * it.
+ */
+export function repostRefusal(prPath, parsed, planned) {
+  const prior = postedTxs(prPath);
+  if (!prior.length) return null;
+  const hash = payloadHash(parsed);
+  const generation = parsed.doc?.generation == null ? null : String(parsed.doc.generation);
+  const wanted = planned.filter((a) => CONTENT_ACTION_KINDS.has(a.kind));
+  for (const { tx, posted } of prior.reverse()) {
+    const same = tx.payloadHash === hash;
+    const landed = generation !== null && tx.generation != null && String(tx.generation) === generation
+      ? wanted.filter((a) => posted.some((p) => p.id === a.id && p.kind === a.kind)).map((a) => a.id)
+      : [];
+    if (!same && !landed.length) continue;
+    const urls = posted.map((p) => p.result?.url).filter(Boolean);
+    const what = same
+      ? 'the exact payload this file carries'
+      : `${landed.map((id) => `"${id}"`).join(', ')} from generation ${generation}`;
+    return `already posted: transaction ${tx.txId} put ${what} on the PR at ${tx.updatedAt ?? tx.createdAt}`
+      + `${urls.length ? ` (${urls.join(', ')})` : ''}. `
+      + 'A completed file set back to `ready` is usually a copy restored over the submitted one — the submitted '
+      + 'version is in history/. Draft the next round with `prt draft` to post again, or pass '
+      + '`--allow-repost` to `prt submit` if these words are meant to go out twice';
+  }
+  return null;
+}
+
+/**
  * Step 1 — capture. Reads `review.md` twice, 150ms apart, and requires the two
  * reads to be identical, so a buffer still being written is refused rather than
  * captured. That narrows the window rather than closing it: an editor that
@@ -1485,7 +1557,10 @@ export async function submitReady(ctx) {
       writeAtomic(actionPath, setStatus(captured.text, 'queued'));
     }
 
-    const pre = await preflight(ctx, captured.parsed, captured.tx);
+    // Refused before preflight, which is where the network starts: a file that
+    // already went out needs no live state to be turned away.
+    const repost = ctx.allowRepost ? null : repostRefusal(prPath, captured.parsed, captured.actions);
+    const pre = repost ? { reasons: [repost] } : await preflight(ctx, captured.parsed, captured.tx);
 
     if (ctx.dryRun) {
       captured.tx.state = 'abandoned';
