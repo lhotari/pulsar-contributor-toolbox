@@ -80,10 +80,32 @@ function assertSafeNumber(n) {
   return Number(n);
 }
 
+/**
+ * The repository a working directory inside the tracking tree names:
+ * `<root>/<owner>/<repo>/…` or `<root>/_archive/<owner>/<repo>/…`. The skill's
+ * own procedures put a shell in a PR directory (`cp review.md cache/…`), and
+ * from there `gh repo view` can only fail — the tracking root is not a
+ * checkout — so every command run beside the file it was about died with
+ * "Pass --repo" until this read the answer off the path instead.
+ */
+function repoFromTrackingPath(root, cwd = process.cwd()) {
+  let rel;
+  try {
+    rel = path.relative(fs.realpathSync(root), fs.realpathSync(cwd));
+  } catch {
+    return null;
+  }
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  const parts = rel.split(path.sep);
+  if (parts[0] === '_archive') parts.shift();
+  if (parts.length < 2 || parts[0].startsWith('_') || parts[0].startsWith('.')) return null;
+  return `${parts[0]}/${parts[1]}`;
+}
+
 async function context() {
   const root = argv.flags.root || store.DEFAULT_ROOT;
   let cfg = store.loadConfig(root);
-  const repo = await resolveRepo(argv.flags.repo);
+  const repo = await resolveRepo(argv.flags.repo || repoFromTrackingPath(root));
   cfg = store.repoConfig(cfg, repo);
   if (!cfg.reviewer) cfg.reviewer = await viewerLogin();
   return { root, repo, cfg, login: cfg.reviewer };

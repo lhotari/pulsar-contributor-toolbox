@@ -48,6 +48,26 @@ function run(args, { session = 's1', pid = process.pid } = {}) {
 
 const jobRow = (n) => run(['job', 'list']).json.jobs.find((j) => j.number === n);
 
+test('a shell inside a PR directory needs no --repo', () => {
+  // `gh repo view` cannot answer from the tracking tree; the path can.
+  const dir = track(7);
+  const r = spawnSync(process.execPath, [PRT, 'job', 'list', '--root', ROOT, '--json'], {
+    cwd: dir,
+    encoding: 'utf8',
+    env: { ...process.env, CLAUDE_CODE_SESSION_ID: 's1', CLAUDE_PID: String(process.pid) },
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(JSON.parse(r.stdout).repo ?? REPO, REPO);
+
+  // An archived PR's directory names the repo the same way.
+  const archived = path.join(ROOT, '_archive', 'o', 'r', 'pr-8');
+  fs.mkdirSync(archived, { recursive: true });
+  const r2 = spawnSync(process.execPath, [PRT, 'job', 'list', '--root', ROOT, '--json'], {
+    cwd: archived, encoding: 'utf8', env: { ...process.env, CLAUDE_CODE_SESSION_ID: 's1', CLAUDE_PID: String(process.pid) },
+  });
+  assert.equal(r2.status, 0, r2.stderr);
+});
+
 test('adding queues a job the list can see', () => {
   track(1);
   assert.equal(run(['job', 'add', '1', '--kind', 'review', '--tier', 'consensus']).status, 0);

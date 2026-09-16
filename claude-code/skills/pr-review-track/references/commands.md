@@ -9,8 +9,11 @@ node "$PRT" <command> [args] [--repo owner/repo] [--root DIR] [--json]
 ```
 
 `--repo` defaults to the GitHub repo of the current working directory (the
-upstream parent when the checkout is a fork). `--json` makes every command emit
-machine-readable output — use it whenever a model consumes the result.
+upstream parent when the checkout is a fork), or — when the working directory
+is inside the tracking root, where there is no checkout to ask — to the repo
+the path names (`<root>/<owner>/<repo>/…`, archived or not). `--json` makes
+every command emit machine-readable output — use it whenever a model consumes
+the result.
 
 ## Discovery
 
