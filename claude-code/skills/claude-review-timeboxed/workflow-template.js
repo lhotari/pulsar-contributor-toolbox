@@ -19,8 +19,9 @@ const WT = '/tmp/claude-1000/review-REVISION'
 const CTX = `
 You are reviewing REVIEW_TARGET_DESCRIPTION, frozen in a detached git worktree at ${WT} (commit REVISION;
 merge-base with the default branch BASE_REVISION). Work ONLY inside that directory with read-only commands
-(cat, sed -n, grep -rn --include='*.java', git show, git log, git diff). Do NOT edit files, run builds or tests,
-push, or post anything. Cite every claim as file:line at REVISION.
+(cat, sed -n, grep -rn with the repository's source patterns SOURCE_PATTERNS, git show, git log, git diff). Do NOT
+edit files, run builds or tests, push, or post anything. Cite every claim as file:line at REVISION.
+Repository conventions to apply: STYLE_RULES (from its CLAUDE.md, CONTRIBUTING or coding guide).
 TIME BOX: about AGENT_MINUTES minutes of work. Prefer a few precise, source-cited findings over many vague ones.
 
 What changed since the previous review (oldest first):
@@ -96,47 +97,83 @@ const VERDICT_SCHEMA = {
   required: ['verdict', 'reasoning', 'severity_adjustment'],
 }
 
-// One entry per lens. model: 'sonnet' for lookups and consistency checks, 'opus' for focused code or test review,
-// 'fable' for concurrency, disputed premises, and the contrarian hunt. effort: 'low' | 'medium' | 'high'.
+// Model profile, chosen from the usage reading and the user's request (see SKILL.md "Model policy"):
+// 'normal' when usage is at most 75%; 'high' when the user asks for high effort or a thorough review;
+// 'tight' when usage is above 75% or the user asks for quick or cheap.
+const PROFILE = 'normal'
+const PROFILES = {
+  normal: {
+    lookup:   { model: 'sonnet', effort: 'medium' },
+    task:     { model: 'opus',   effort: 'medium' },   // raise to 'high' or 'xhigh' by task difficulty
+    taskHard: { model: 'opus',   effort: 'xhigh' },
+    brain:    { model: 'fable',  effort: 'high' },     // 'xhigh' for the core-change lens
+    core:     { model: 'fable',  effort: 'xhigh' },
+    verify:   { model: 'fable',  effort: 'high' },     // 'xhigh' for verifiers of high-severity findings
+    verifyCap: 8,
+  },
+  high: {
+    lookup:   { model: 'sonnet', effort: 'high' },
+    task:     { model: 'fable',  effort: 'high' },
+    taskHard: { model: 'fable',  effort: 'high' },
+    brain:    { model: 'fable',  effort: 'xhigh' },
+    core:     { model: 'fable',  effort: 'xhigh' },
+    verify:   { model: 'fable',  effort: 'xhigh' },
+    verifyCap: 8,
+  },
+  tight: {
+    lookup:   { model: 'sonnet', effort: 'low' },
+    task:     { model: 'sonnet', effort: 'medium' },
+    taskHard: { model: 'opus',   effort: 'medium' },   // only the single hardest task
+    brain:    { model: 'opus',   effort: 'medium' },
+    core:     { model: 'opus',   effort: 'high' },
+    verify:   { model: 'opus',   effort: 'medium' },
+    verifyCap: 4,
+  },
+}
+const P = PROFILES[PROFILE]
+
+// One entry per lens with its role in the profile.
 const LENSES = [
   {
-    key: 'checklist', model: 'sonnet', effort: 'medium', schema: CHECKLIST_SCHEMA,
+    key: 'checklist', role: 'lookup', schema: CHECKLIST_SCHEMA,
     prompt: `LENS: Mechanical checklist (Sonnet). For EVERY recommended action in the previous review and EVERY row of the
 response's disposition table, verify against the frozen source (not the response text) with file:line or test-method
 evidence, or mark contradicted. Also verify: origin and local heads, that any amended commit changed only its message,
 that docs and conf files agree, and that stated validation artifacts exist and say what the response says. Presence only.`,
   },
   {
-    key: 'core-change', model: 'fable', effort: 'high', schema: FINDINGS_SCHEMA,
-    prompt: `LENS: CORE_CHANGE_TITLE (Fable). Read REGION_LIST. Construct interleavings and answer with line-by-line evidence:
+    key: 'core-change', role: 'core', schema: FINDINGS_SCHEMA,
+    prompt: `LENS: CORE_CHANGE_TITLE. Read REGION_LIST. Construct interleavings and answer with line-by-line evidence:
 QUESTION_LIST (lost wakeup, double owner, lock order, resource ownership, state left inconsistent on failure, what a
 revert would cost). Report confirmations briefly.`,
   },
   {
-    key: 'tests', model: 'opus', effort: 'medium', schema: FINDINGS_SCHEMA,
-    prompt: `LENS: Test quality (Opus). Scope with "git diff BASE_OR_PREVIOUS..HEAD -- '*Test*.java'". For each new or
-changed test: pins the claimed behaviour; deterministic (no sleeps; bounded latches only); no reflection into private
-state; resources released; assertions specific; a real negative control (would it fail against the previous code?).
-Flag rows that silently do not run in CI, assertions that are tautological, and timing-dependent waits. Cite lines.`,
+    key: 'tests', role: 'task', schema: FINDINGS_SCHEMA,
+    prompt: `LENS: Test quality. Scope with "git diff BASE_OR_PREVIOUS..HEAD" restricted to the repository's test sources
+(TEST_PATH_PATTERNS, for example '*Test*.java', '*_test.go', 'tests/**'). For each new or changed test: pins the claimed
+behaviour; deterministic (no sleeps; bounded waits only); no reflection or unsafe access into private state; resources
+released; assertions specific; a real negative control (would it fail against the previous code?). Flag rows that
+silently do not run in CI, assertions that are tautological, and timing-dependent waits. Cite lines.`,
   },
   {
-    key: 'docs-hygiene', model: 'sonnet', effort: 'medium', schema: FINDINGS_SCHEMA,
-    prompt: `LENS: Documentation, configuration and hygiene (Sonnet). Check every behavioural statement in Javadoc, config
-docs, conf files, the PR body and the local PR-body draft against the code at the frozen revision; list each statement
-that is false, stale or unsupported. Check commit messages for semantic titles, trailers and accuracy. Scan the diff for
-project style rules (line length, log levels, inline fully qualified names, license headers).`,
+    key: 'docs-hygiene', role: 'lookup', schema: FINDINGS_SCHEMA,
+    prompt: `LENS: Documentation, configuration and hygiene. Check every behavioural statement in API docs, config docs,
+conf files, the PR body and the local PR-body draft against the code at the frozen revision; list each statement that is
+false, stale or unsupported. Check commit messages for the repository's title convention, trailers and accuracy. Scan
+the diff for the repository's own style rules (STYLE_RULES, taken from its CLAUDE.md, CONTRIBUTING or coding guide:
+for example line length, log levels, license headers, import or include conventions).`,
   },
   {
-    key: 'contrarian', model: 'fable', effort: 'high', schema: FINDINGS_SCHEMA,
-    prompt: `LENS: Contrarian regression hunt (Fable). Try to break the change. Hypotheses to confirm or refute with source:
+    key: 'contrarian', role: 'brain', schema: FINDINGS_SCHEMA,
+    prompt: `LENS: Contrarian regression hunt. Try to break the change. Hypotheses to confirm or refute with source:
 HYPOTHESIS_LIST. Also: anything else in the diff that looks wrong, and whether any commit bundles unrelated work.`,
   },
 ]
 
 phase('Find')
-log(`Running ${LENSES.length} lenses`)
+log(`Profile ${PROFILE}; running ${LENSES.length} lenses`)
 const results = await parallel(LENSES.map(l => () =>
-  agent(CTX + '\n\n' + l.prompt, { label: `find:${l.key}`, phase: 'Find', schema: l.schema, model: l.model, effort: l.effort })
+  agent(CTX + '\n\n' + l.prompt, { label: `find:${l.key}`, phase: 'Find', schema: l.schema, model: P[l.role].model, effort: P[l.role].effort })
 ))
 const byKey = {}
 LENSES.forEach((l, i) => { byKey[l.key] = results[i] })
@@ -149,21 +186,22 @@ const missing = LENSES.filter((l, i) => !results[i]).map(l => l.key)
 if (missing.length) log(`WARNING: lenses returned null: ${missing.join(', ')}`)
 
 // Verify only what could change the verdict; low-severity items and confirmations pass through labelled.
-const VERIFY_CAP = 8
 const toVerify = findings.filter(f => f.severity !== 'low' && f.kind !== 'confirmation')
-const capped = toVerify.slice(0, VERIFY_CAP)
-if (toVerify.length > capped.length) log(`Verification capped at ${VERIFY_CAP} of ${toVerify.length} non-low findings`)
-log(`Collected ${findings.length} findings; verifying ${capped.length} with Fable`)
+const capped = toVerify.slice(0, P.verifyCap)
+if (toVerify.length > capped.length) log(`Verification capped at ${P.verifyCap} of ${toVerify.length} non-low findings`)
+log(`Collected ${findings.length} findings; verifying ${capped.length} with ${P.verify.model}`)
 
 phase('Verify')
 const verified = await parallel(capped.map(f => () =>
   agent(CTX + `\n\nYou are an adversarial verifier. Try to REFUTE this finding strictly against the frozen source at REVISION (and earlier revisions via git show where the finding compares revisions). Reproduce any interleaving line by line. If the claim is only partly right, give the corrected claim. TIME BOX: three minutes.\n\nFINDING (lens ${f.lens}, ${f.severity}, ${f.kind}): ${f.title}\nClaim: ${f.claim}\nEvidence: ${f.evidence}\nRecommendation: ${f.recommendation}`,
-    { label: `verify:${f.id}`, phase: 'Verify', schema: VERDICT_SCHEMA, model: 'fable', effort: 'high' })
+    { label: `verify:${f.id}`, phase: 'Verify', schema: VERDICT_SCHEMA, model: P.verify.model,
+      effort: (f.severity === 'high' && PROFILE !== 'tight') ? 'xhigh' : P.verify.effort })
     .then(v => ({ ...f, verdict: v || { verdict: 'unverifiable', reasoning: 'verifier returned null', severity_adjustment: 'keep' } }))
 ))
 const verifiedIds = new Set(capped.map(f => f.id + f.lens))
 return {
-  lensSummaries: LENSES.map(l => ({ lens: l.key, model: l.model, summary: byKey[l.key] ? byKey[l.key].summary : null })),
+  profile: PROFILE,
+  lensSummaries: LENSES.map(l => ({ lens: l.key, model: P[l.role].model, effort: P[l.role].effort, summary: byKey[l.key] ? byKey[l.key].summary : null })),
   checklist,
   verified: verified.filter(Boolean),
   unverified: findings.filter(f => !verifiedIds.has(f.id + f.lens)),
