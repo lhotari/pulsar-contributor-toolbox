@@ -112,11 +112,10 @@ const VERDICT_SCHEMA = {
 
 // Model profile (SKILL.md "Model policy"). Roles: lookup (very trivial), task (focused review), taskHard (difficult
 // focused review), brain (concurrency, disputed premises, contrarian), core (the core-change lens), verify.
-// Sonnet 5.5 ('sonnet') everywhere, Sonnet 5 only for lookups; the effort is the cost knob.
-const SONNET_5 = 'claude-sonnet-5'
+// Sonnet 5 ('sonnet') everywhere; the effort is the cost knob.
 const PROFILES = {
   normal: {
-    lookup:   { model: SONNET_5, effort: 'medium' },
+    lookup:   { model: 'sonnet', effort: 'medium' },
     task:     { model: 'sonnet', effort: 'medium' },
     taskHard: { model: 'sonnet', effort: 'high' },
     brain:    { model: 'sonnet', effort: 'xhigh' },
@@ -125,7 +124,7 @@ const PROFILES = {
     verifyCap: 8,
   },
   high: {
-    lookup:   { model: SONNET_5, effort: 'high' },
+    lookup:   { model: 'sonnet', effort: 'high' },
     task:     { model: 'sonnet', effort: 'xhigh' },
     taskHard: { model: 'sonnet', effort: 'xhigh' },
     brain:    { model: 'sonnet', effort: 'xhigh' },
@@ -134,7 +133,7 @@ const PROFILES = {
     verifyCap: 8,
   },
   tight: {
-    lookup:   { model: SONNET_5, effort: 'low' },
+    lookup:   { model: 'sonnet', effort: 'low' },
     task:     { model: 'sonnet', effort: 'medium' },
     taskHard: { model: 'sonnet', effort: 'high' },
     brain:    { model: 'sonnet', effort: 'high' },

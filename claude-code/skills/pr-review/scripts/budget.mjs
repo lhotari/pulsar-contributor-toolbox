@@ -360,8 +360,8 @@ export function report({ now = Date.now(), config = loadConfig() } = {}) {
 }
 
 const TIER_ADVICE = {
-  full: 'Full pipeline: Sonnet 5.5 (xhigh) and Codex review independently, both cross-validate, then a short Fable 5.1 check.',
-  standard: 'Sonnet 5.5 (xhigh) and Codex review independently; Codex alone cross-validates.',
+  full: 'Full pipeline: Sonnet 5 (xhigh) and Codex review independently, both cross-validate, then a short Fable 5.1 check.',
+  standard: 'Sonnet 5 (xhigh) and Codex review independently; Codex alone cross-validates.',
   lean: 'Codex reviews; the main session adjudicates inline. No Claude subagent, no second round.',
   codex: 'Codex does the reviewing and the refuting. The main session only adjudicates, on a trimmed brief.',
 };

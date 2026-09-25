@@ -100,8 +100,8 @@ Exit codes: **3** the Claude tier is `codex`, **4** the Codex budget is
 
 | `claude tier:` | the batch |
 |---|---|
-| `full` | comfortably under. Sonnet 5.5 (`xhigh`) **and** Codex review; both cross-validate; one short Fable 5.1 check at `high`. |
-| `standard` | on schedule. One Sonnet 5.5 `xhigh` pass, Codex validates. |
+| `full` | comfortably under. Sonnet 5 (`xhigh`) **and** Codex review; both cross-validate; one short Fable 5.1 check at `high`. |
+| `standard` | on schedule. One Sonnet 5 `xhigh` pass, Codex validates. |
 | `lean` | ahead of pace. **Codex reviews alone**; the main session only adjudicates. |
 | `codex` | the allowance will not carry a Claude-led batch. Everything that can go to Codex goes to Codex; the main session adjudicates a trimmed brief. |
 
@@ -204,18 +204,16 @@ that kind of work may spend*.
 |---|---|---|
 | running `prt` and reading its output — `sync`, `board`, `list`, `latest`, `cleanup`, `archive`, job bookkeeping | main session, inline. It is shell, not reasoning. | same |
 | presenting a `latest` ranking, a board, a batch report | main session, inline. Never a subagent. | same |
-| a `re-review` worker — reading the delta, deciding whether each thread was addressed, drafting the replies | harness on `sonnet` (Sonnet 5.5), judgement handed to Codex at the **thoughtful** pair | the **thoughtful** pair |
+| a `re-review` worker — reading the delta, deciding whether each thread was addressed, drafting the replies | harness on `sonnet`, judgement handed to Codex at the **thoughtful** pair | the **thoughtful** pair |
 | an initial `review` worker | `/pr-review <N> --tier <tier>` — it routes its own models | `/pr-review <N> --tier codex` |
-| a `revise` worker — applying wording instructions to prose that already exists | `sonnet` (Sonnet 5.5), or Codex at the **simple** pair | the **simple** pair |
+| a `revise` worker — applying wording instructions to prose that already exists | `sonnet`, or Codex at the **simple** pair | the **simple** pair |
 | answering a `prt:ask` note | main session inline when it is short; `sonnet` when it needs the diff re-read | the **thoughtful** pair |
-| drafting a `nudge`, a cleanup summary, an archive triage | Sonnet 5 (`claude-sonnet-5`), or the **simple** pair | the **simple** pair |
-| a mechanical sweep — every draft has a `prt:pr-actions` block, tallying anchors, listing files | Sonnet 5 (`claude-sonnet-5`), or plain shell | the **simple** pair |
+| drafting a `nudge`, a cleanup summary, an archive triage | `sonnet` at low effort, or the **simple** pair | the **simple** pair |
+| a mechanical sweep — every draft has a `prt:pr-actions` block, tallying anchors, listing files | `sonnet` at low effort, or plain shell | the **simple** pair |
 | final adjudication — which findings survive, the recommended resolution, what reaches the human | main session | main session, at the **thoughtful** effort |
 
-Claude subagents run on Sonnet 5.5 (`sonnet`) everywhere; only the two
-low-intelligence rows may drop to Sonnet 5. The `Agent` tool's `model` accepts
-only aliases, so pin `claude-sonnet-5` through a `Workflow` `agent()` or
-`claude -p --model claude-sonnet-5`; when neither is convenient, `sonnet` is fine.
+Claude subagents run on Sonnet 5 (`sonnet`) everywhere; the effort is the knob,
+and the two low-intelligence rows run it low.
 Fable and Opus are not used by this skill; Fable 5.1 appears only inside
 `pr-review`'s `full` tier.
 
@@ -234,8 +232,8 @@ Three rules the table is shorthand for:
    context you already hold, stays inline. Do not spawn a subagent to answer a
    question you can already answer.
 3. **Never spend more effort than the work needs.** Formatting, extraction,
-   mechanical edits, and summarising output you have already read are Sonnet 5 /
-   `gpt-5.6-luna` work at low effort at every tier. At
+   mechanical edits, and summarising output you have already read are low-effort
+   Sonnet 5 / `gpt-5.6-luna` work at every tier. At
    `lean` and `codex` that stops being an economy and becomes the rule: Claude
    adjudicates and does nothing else.
 
@@ -252,7 +250,7 @@ node "$CODEX_COMPANION" task --model <model> --effort <effort> --prompt-file <fi
 work — never a pair you chose yourself.
 
 If the companion is missing or Codex is not set up, say so once and do the work
-on Claude — Sonnet 5.5, or Sonnet 5 for the low-intelligence rows — never silently, because a
+on Claude — Sonnet 5, at low effort for the low-intelligence rows — never silently, because a
 batch that was meant to run on Codex and ran on Claude instead is the thing this
 whole section exists to prevent.
 
@@ -405,7 +403,7 @@ and whether the author actually did what was asked.
    it is the thoughtful pair itself. It is a harness: it runs `prt`, reads the
    delta, and hands the judgement — did this thread get addressed, and is the
    delta itself sound — to Codex at the thoughtful pair the budget printed, then
-   verifies what comes back before drafting. Spawn these on Sonnet 5.5 only;
+   verifies what comes back before drafting. Spawn these on Sonnet 5 only;
    adjudication of what the batch produced is the main session's job, and it
    happens once, not per PR.
 

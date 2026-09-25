@@ -32,11 +32,11 @@ Read the PIP end to end. If it has (or claims) a reference implementation, **ver
 Run **independent reviews from different models, each with a distinct lens.** Convergence across models = highest confidence; a lone finding is a hypothesis to verify.
 
 Suggested panel (adapt to what's available):
-- **Sonnet 5.5 (xhigh)** — design coherence + subtractive minimalism (smallest sufficient type set; does each element pull its weight in the whole shape?).
-- **Sonnet 5.5 (xhigh)** — durability + implementability (which decisions are safe 5-year bets vs churn-risk; premature generalization; missing invariants that force a later break; third-party-implementer traps).
+- **Sonnet 5 (xhigh)** — design coherence + subtractive minimalism (smallest sufficient type set; does each element pull its weight in the whole shape?).
+- **Sonnet 5 (xhigh)** — durability + implementability (which decisions are safe 5-year bets vs churn-risk; premature generalization; missing invariants that force a later break; third-party-implementer traps).
 - **Codex (`gpt-6-astra`, high reasoning)** — adversarial ("argue the design is bigger than it needs to be"; security; backward-compat).
 
-Give each reviewer the SAME lens questions + a shared list of seed candidates, but let each bring its angle. Have them return structured verdicts: **CUT / RESHAPE / KEEP** per element, with rationale, an additive add-back path, and the tradeoff. (Run the Sonnet reviewers as parallel `Workflow` agents with `model: 'sonnet', effort: 'xhigh'`; Codex via `codex exec -m gpt-6-astra -c model_reasoning_effort="high"`.) Use only these models; tune cost through effort. Very low-intelligence chores (collecting call sites, formatting tables) may run on Sonnet 5 (`claude-sonnet-5`) or `gpt-5.6-luna`.
+Give each reviewer the SAME lens questions + a shared list of seed candidates, but let each bring its angle. Have them return structured verdicts: **CUT / RESHAPE / KEEP** per element, with rationale, an additive add-back path, and the tradeoff. (Run the Sonnet reviewers as parallel `Workflow` agents with `model: 'sonnet', effort: 'xhigh'`; Codex via `codex exec -m gpt-6-astra -c model_reasoning_effort="high"`.) Use only these models; tune cost through effort. Very low-intelligence chores (collecting call sites, formatting tables) may run on Sonnet 5 at low effort or `gpt-5.6-luna`.
 
 **Fable 5.1 (high), once per round, after you decide.** When the round's verdicts, your decisions and their decision records are all written down, ask one `model: 'fable', effort: 'high'` agent for a short review of that package: a decision that does not follow from the evidence, a cut that breaks a stated invariant, a keep that is really speculative. At most ten lines; it reads the decisions, not the whole draft from scratch. Verify what it raises before acting.
 
