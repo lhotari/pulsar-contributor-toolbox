@@ -12,11 +12,13 @@ export const meta = {
   phases: [
     { title: 'Find', detail: 'independent lenses with models from the profile' },
     { title: 'Verify', detail: 'the profile\'s verify model refutes medium-or-higher findings, high severity first' },
+    { title: 'Check', detail: 'one short Fable 5.1 check of the verified result', model: 'fable' },
   ],
 }
 
 // Switches.
 const PROFILE = 'normal'              // 'normal' | 'high' | 'tight', see SKILL.md "Model policy"
+const FABLE_CHECK = PROFILE !== 'tight' // one short Fable 5.1 check once every detail is in; false to skip
 const HAS_PREVIOUS_REVIEW = true      // false for a first review: the checklist lens checks stated claims instead
 const WT = 'WORKTREE_PATH'            // the WORKTREE line printed by scripts/freeze-and-path.sh
 
@@ -110,32 +112,34 @@ const VERDICT_SCHEMA = {
 
 // Model profile (SKILL.md "Model policy"). Roles: lookup (very trivial), task (focused review), taskHard (difficult
 // focused review), brain (concurrency, disputed premises, contrarian), core (the core-change lens), verify.
+// Sonnet 5.5 ('sonnet') everywhere, Sonnet 5 only for lookups; the effort is the cost knob.
+const SONNET_5 = 'claude-sonnet-5'
 const PROFILES = {
   normal: {
-    lookup:   { model: 'sonnet', effort: 'medium' },
-    task:     { model: 'opus',   effort: 'medium' },
-    taskHard: { model: 'opus',   effort: 'high' },
-    brain:    { model: 'fable',  effort: 'high' },
-    core:     { model: 'fable',  effort: 'xhigh' },
-    verify:   { model: 'fable',  effort: 'high' },
+    lookup:   { model: SONNET_5, effort: 'medium' },
+    task:     { model: 'sonnet', effort: 'medium' },
+    taskHard: { model: 'sonnet', effort: 'high' },
+    brain:    { model: 'sonnet', effort: 'xhigh' },
+    core:     { model: 'sonnet', effort: 'xhigh' },
+    verify:   { model: 'sonnet', effort: 'xhigh' },
     verifyCap: 8,
   },
   high: {
-    lookup:   { model: 'sonnet', effort: 'high' },
-    task:     { model: 'fable',  effort: 'high' },
-    taskHard: { model: 'fable',  effort: 'high' },
-    brain:    { model: 'fable',  effort: 'xhigh' },
-    core:     { model: 'fable',  effort: 'xhigh' },
-    verify:   { model: 'fable',  effort: 'xhigh' },
+    lookup:   { model: SONNET_5, effort: 'high' },
+    task:     { model: 'sonnet', effort: 'xhigh' },
+    taskHard: { model: 'sonnet', effort: 'xhigh' },
+    brain:    { model: 'sonnet', effort: 'xhigh' },
+    core:     { model: 'sonnet', effort: 'xhigh' },
+    verify:   { model: 'sonnet', effort: 'xhigh' },
     verifyCap: 8,
   },
   tight: {
-    lookup:   { model: 'sonnet', effort: 'low' },
+    lookup:   { model: SONNET_5, effort: 'low' },
     task:     { model: 'sonnet', effort: 'medium' },
-    taskHard: { model: 'opus',   effort: 'medium' },
-    brain:    { model: 'opus',   effort: 'medium' },
-    core:     { model: 'opus',   effort: 'high' },
-    verify:   { model: 'opus',   effort: 'medium' },
+    taskHard: { model: 'sonnet', effort: 'high' },
+    brain:    { model: 'sonnet', effort: 'high' },
+    core:     { model: 'sonnet', effort: 'xhigh' },
+    verify:   { model: 'sonnet', effort: 'high' },
     verifyCap: 4,
   },
 }
@@ -233,18 +237,29 @@ if (candidates.length > capped.length) log(`Verification covers ${capped.length}
 
 phase('Verify')
 const verified = await parallel(capped.map(f => () => {
-  const effort = (f.severity === 'high' && PROFILE !== 'tight') ? 'xhigh' : P.verify.effort
+  const effort = f.severity === 'high' ? 'xhigh' : P.verify.effort
   return agent(CTX + `\n\nYou are an adversarial verifier. Try to REFUTE this finding strictly against the frozen source at REVISION (and earlier revisions via git show where the finding compares revisions). Reproduce any interleaving line by line. If the claim is only partly right, give the corrected claim. TIME BOX: ${verifyMinutes} minutes.\n\nFINDING (lens ${f.lens}, ${f.severity}, ${f.kind}): ${f.title}\nClaim: ${f.claim}\nEvidence: ${f.evidence}\nRecommendation: ${f.recommendation}`,
     { label: `verify:${f.id}`, phase: 'Verify', schema: VERDICT_SCHEMA, model: P.verify.model, effort })
     .then(v => ({ ...f, verifierModel: P.verify.model, verifierEffort: effort,
       verdict: v || { verdict: 'unverifiable', reasoning: 'verifier returned null', severity_adjustment: 'keep' } }))
 }))
 const verifiedIds = new Set(capped.map(f => f.id + f.lens))
+
+// A short Fable 5.1 check at high effort, now that every detail is in: it reads the verified result, not the target.
+let fableCheck = null
+const kept = verified.filter(Boolean).filter(f => f.verdict.verdict !== 'refuted')
+if (FABLE_CHECK && kept.length && !verifySkipped) {
+  phase('Check')
+  fableCheck = await agent(CTX + `\n\nYou are a final sanity check on a finished review, not another reviewer. Below are the verified findings with the verifiers' verdicts. Open the source at REVISION only to settle a doubt. Reply in at most ten lines: a finding that is wrong, a severity that is off, or a material miss the lenses' scope implies. Say "nothing to add" if that is the answer.\n\n` +
+    kept.map(f => `- [${f.severity}] ${f.title} (${f.lens}): ${f.verdict.verdict}; ${f.verdict.reasoning}`).join('\n'),
+    { label: 'check:fable', phase: 'Check', model: 'fable', effort: 'high' })
+}
 return {
   profile: PROFILE,
   timing: { latestFinishEpoch: latestFinish, verifySkipped, verifyCapUsed: capped.length, truncatedLenses: truncated, missingLenses: missing },
   lensSummaries: LENSES.map(l => ({ lens: l.key, model: P[l.role].model, effort: P[l.role].effort, summary: byKey[l.key] ? byKey[l.key].summary : null })),
   checklist,
+  fableCheck,
   verified: verified.filter(Boolean),
   unverified: [...findings, ...contradicted].filter(f => !verifiedIds.has(f.id + f.lens)),
 }

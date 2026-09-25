@@ -13,9 +13,9 @@
 # however evenly it was spent.
 #
 #   Claude side (wraps claude-usage.sh --json) -> a `pr-review` tier, plus a
-#                                                 separate gate on Fable
-#   Codex side  (wraps codex-usage.sh  --json) -> a model and an effort ceiling
-#                                                 for thoughtful and simple work
+#                                                 gate on the short Fable check
+#   Codex side  (wraps codex-usage.sh  --json) -> an effort ceiling for gpt-6-astra,
+#                                                 and gpt-5.6-luna for simple work
 #
 # Usage:
 #   ./review-budget.sh                # both halves, compact report
@@ -27,7 +27,7 @@
 # Exit codes, so a shell caller can branch without parsing:
 #   0  both quotas comfortable
 #   3  the Claude tier is `codex` — hand what you can to Codex
-#   4  the Codex budget is `critical` — trim effort and model everywhere
+#   4  the Codex budget is `critical` — drop the effort everywhere
 #      (4 wins when both are true: there is no cheap side left to move work to)
 
 set -euo pipefail
@@ -139,7 +139,7 @@ claude_plan() {
 }
 
 # --------------------------------------------------------------------------
-# Codex: a model and an effort ceiling. Every window the account exposes is
+# Codex: an effort ceiling for gpt-6-astra. Every window the account exposes is
 # paced generically — `primary`/`secondary` are labels that move around, and
 # `credits` is not a window at all, so select on windowDurationMins.
 # --------------------------------------------------------------------------
@@ -181,22 +181,20 @@ codex_plan() {
        elif $peak >= 55 or ($worst != null and $worst >= 1.0) then "normal"
        else "rich" end) as $budget
 
-    # At `critical` the expensive model itself goes, not just its effort: a
-    # cheap model thinking hard beats an expensive one that cannot finish.
-    | (if $budget == "critical" then { model: "gpt-5.6-sol", effort: "high" }
+    # Judgement stays on gpt-6-astra and only its effort moves; low-intelligence
+    # work goes to gpt-5.6-luna. Neither has `minimal`, so `low` is the floor.
+    | (if $budget == "critical" then { model: "gpt-6-astra", effort: "low" }
        elif $budget == "tight"  then { model: "gpt-6-astra", effort: "medium" }
        elif $budget == "normal" then { model: "gpt-6-astra", effort: "high" }
        else { model: "gpt-6-astra", effort: "xhigh" } end) as $thoughtful
 
-    | (if $budget == "critical" then { model: "gpt-5.6-sol", effort: "minimal" }
-       elif $budget == "tight"  then { model: "gpt-5.6-sol", effort: "minimal" }
-       else { model: "gpt-5.6-sol", effort: "low" } end) as $simple
+    | { model: "gpt-5.6-luna", effort: "low" } as $simple
 
     | (if $blocked then "rate limit or spend control already reached — Codex cannot carry the batch either"
        elif $windows | length == 0 then "no rate limit windows reported\(if ($root.planType // null) then " for a \($root.planType) plan" else "" end)"
        else "\(($windows | map(select(.percent != null)) | max_by(.percent) | "\(.window) at \(.percent)%"))\(if $worst then ", pace \($worst)×" else "" end) — \(
-              if $budget == "critical" then "drop to the cheap model everywhere"
-              elif $budget == "tight" then "keep gpt-6-astra but cap its effort"
+              if $budget == "critical" then "drop the effort to low everywhere"
+              elif $budget == "tight" then "cap the effort at medium"
               elif $budget == "normal" then "roughly on schedule"
               else "comfortably under" end)"
        end) as $why

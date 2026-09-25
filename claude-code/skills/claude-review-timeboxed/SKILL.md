@@ -10,9 +10,10 @@ allowed-tools: Bash(git:*), Bash(bash:*), Bash(date:*), Bash(ls:*), Bash(cat:*),
 ## Overview
 
 Freeze the target, fan out independent lenses with models chosen from the request, the time box and the
-remaining allowance, refute the medium-or-higher findings with the strongest model the profile allows (high
-severity first), re-check the summary claims yourself, and write one source-cited review file. The box is met by
-sizing and by wall-clock deadlines the agents can see, and the review says what the clock cut.
+remaining allowance, refute the medium-or-higher findings at the highest effort the profile allows (high
+severity first), let Fable 5.1 give the verified result one short look, re-check the summary claims yourself, and
+write one source-cited review file. The box is met by sizing and by wall-clock deadlines the agents can see, and
+the review says what the clock cut.
 
 **Violating the letter of the procedure is violating its spirit.** A review that skips freezing, the usage
 check or verification is not "a faster review"; it is a different, weaker artifact.
@@ -39,7 +40,7 @@ output overrides. Do not substitute Codex agents and call them Claude reviewers.
   BookKeeper, the site. The procedure does not depend on the language; the lens prompts take the repository's
   source and test patterns and its own style and test rules (from its CLAUDE.md, CONTRIBUTING or coding guide).
 - Not for posting to GitHub, running builds or tests, or editing code: this skill is read-only and produces a
-  file. Use `pr-review` when the terminal-only Fable-and-Codex consensus pipeline is wanted instead.
+  file. Use `pr-review` when the terminal-only Sonnet-and-Codex consensus pipeline is wanted instead.
 
 ## Inputs and defaults
 
@@ -72,15 +73,21 @@ If the reading is 95% or more, do not launch the workflow; report the reading an
 
 An explicit request wins over the reading; say in the Method line when the two disagree.
 
-| Profile | When | Very trivial: lookups, doc and config consistency, checklists | Tasks: focused code or test review with a stated question list | Brains: concurrency and interleavings, disputed premises, contrarian, verifiers |
-|---|---|---|---|---|
-| normal | reading at most 75% and no override | Sonnet, medium | Opus; medium, high or xhigh by task difficulty | Fable; high by default, xhigh for the core-change lens and for verifiers of high-severity findings, medium only for trivial Fable work |
-| high | user asks for high effort or a thorough review | Sonnet, high | Fable, high | Fable, xhigh |
-| tight | reading above 75% and no override, or user asks for cheap | Sonnet, low | Sonnet, medium; Opus, medium for the single hardest task | Opus, high for the core-change lens; Opus, medium for contrarian and verifiers; verify cap halved |
+Claude agents run on **Sonnet 5.5** (`sonnet`); Sonnet 5 (`claude-sonnet-5`) takes only the very trivial lookups.
+The effort is the cost knob. Work that used to go to Fable runs on Sonnet 5.5 at `xhigh`. **Fable 5.1** (`fable`)
+is used once, at `high` effort, after verification: a short check of the verified findings, when every detail is
+in (the template's `Check` phase, on by default outside the tight profile). No other Claude model is used.
 
-Task difficulty for the Opus effort: medium for one file with a known question list, high for cross-file control
-flow or test-fixture judgement, xhigh for ownership, lifecycle or recovery logic that is not the core change. The
-template's roles are `lookup`, `task`, `taskHard`, `brain`, `core` and `verify`; assign each lens the role that
+| Profile | When | Very trivial: lookups, doc and config consistency, checklists | Tasks: focused code or test review with a stated question list | Brains: concurrency and interleavings, disputed premises, contrarian, verifiers | Fable 5.1 check |
+|---|---|---|---|---|---|
+| normal | reading at most 75% and no override | Sonnet 5, medium | Sonnet 5.5; medium or high by task difficulty | Sonnet 5.5, xhigh | yes, high |
+| high | user asks for high effort or a thorough review | Sonnet 5, high | Sonnet 5.5, xhigh | Sonnet 5.5, xhigh | yes, high |
+| tight | reading above 75% and no override, or user asks for cheap | Sonnet 5, low | Sonnet 5.5; medium, high for the single hardest task | Sonnet 5.5, xhigh for the core-change lens; high for contrarian and verifiers; verify cap halved | no |
+
+Task difficulty for the Sonnet 5.5 effort: medium for one file with a known question list, high for cross-file
+control flow, test-fixture judgement, or ownership, lifecycle or recovery logic that is not the core change.
+Verifiers of high-severity findings always run at xhigh. Set `FABLE_CHECK = false` when the user asks to save
+allowance or the Fable weekly limit is tight. The template's roles are `lookup`, `task`, `taskHard`, `brain`, `core` and `verify`; assign each lens the role that
 matches its work. Never spend a brain on a lookup and never spend a lookup model on an interleaving.
 
 ## Procedure
@@ -107,7 +114,8 @@ matches its work. Never spend a brain on a lookup and never spend a lookup model
    first, deduplicated, capped by the sizing table.
 5. **Do first-hand checks while it runs.** Re-read the two or three highest-stakes regions yourself and any
    artifact the response cites (negative-control logs, CI snapshots).
-6. **Synthesize yourself.** Parse the result; keep the verifiers' corrected claims, not the originals; list
+6. **Synthesize yourself.** Parse the result; keep the verifiers' corrected claims, not the originals; check
+   anything `fableCheck` raises against source before acting on it; list
    refuted findings under their own heading; resolve any lens-versus-verifier disagreement with your own source
    read and say which side you took and why; accept premise corrections that the source supports and say so.
    Report missing or truncated lenses and any reduced or skipped verification.
@@ -174,7 +182,7 @@ holds up, ordered actions, finding index with lens and verifier model and effort
 - "The findings look right, verification would blow the budget."
 - "Usage is probably fine, I'll skip the script." / "The cached number is close enough."
 - "The response says it was fixed."
-- "One Fable agent can do all of it."
+- "One Fable agent can do all of it." / "Fable should re-review the whole target."
 - "The agents will just finish; no need for deadlines."
 
 All of these mean: go back to the procedure.

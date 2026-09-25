@@ -100,10 +100,10 @@ Exit codes: **3** the Claude tier is `codex`, **4** the Codex budget is
 
 | `claude tier:` | the batch |
 |---|---|
-| `full` | comfortably under. Fable **and** Codex review; both cross-validate. |
-| `standard` | on schedule. One Fable pass, Codex validates. |
-| `lean` | ahead of pace. **Codex reviews alone**; Opus only adjudicates. |
-| `codex` | the allowance will not carry a Claude-led batch. Everything that can go to Codex goes to Codex; Opus adjudicates a trimmed brief. |
+| `full` | comfortably under. Sonnet 5.5 (`xhigh`) **and** Codex review; both cross-validate; one short Fable 5.1 check at `high`. |
+| `standard` | on schedule. One Sonnet 5.5 `xhigh` pass, Codex validates. |
+| `lean` | ahead of pace. **Codex reviews alone**; the main session only adjudicates. |
+| `codex` | the allowance will not carry a Claude-led batch. Everything that can go to Codex goes to Codex; the main session adjudicates a trimmed brief. |
 
 `lean` and `codex` lean on Codex hard — `pr-review` raises Codex to `--effort
 xhigh` at both, on the reasoning that Codex's quota is not the one under
@@ -114,19 +114,16 @@ effort, so the answer is not to run the batch anyway at an effort nothing can
 carry — see [when both sides are constrained](#when-both-sides-are-constrained).
 
 **The `fable:` line is a second gate on the same reading** — `ok`, `sparing`,
-`avoid`. Fable is metered on its own weekly limit *and* against the shared one,
-so it is the first thing to give up when either is tight, and the gate can say
-`avoid` at a tier whose table still lists Fable.
+`avoid`. Fable 5.1 appears only as `full`'s short check once the review is
+adjudicated; it is metered on its own weekly limit *and* against the shared one,
+so it is the first thing to give up when either is tight.
 
-- `avoid` with a tier of `full` or `standard` → **take the tier down to `lean`
-  for the batch** and say why. `lean` is precisely the shape wanted here — Codex
-  reviewing alone at `xhigh`, Opus adjudicating — and `--tier` is the only
-  channel `pr-review` reads, so this is how "no Fable" is expressed. Do not
-  smuggle it into `--prompt`; that is the review focus and corrupting it
-  corrupts the review.
-- `sparing` → keep the tier, but reserve Fable for the one or two PRs whose diff
-  genuinely needs a second frontier reviewer. Pass those `--tier standard` and
-  the rest `--tier lean`.
+- `avoid` with a tier of `full` → **take the tier down to `standard`** for the
+  batch and say why. `--tier` is the only channel `pr-review` reads, so this is
+  how "no Fable" is expressed. Do not smuggle it into `--prompt`; that is the
+  review focus and corrupting it corrupts the review.
+- `sparing` → keep `full` for the one or two PRs whose adjudicated findings
+  most deserve a second look, and pass the rest `--tier standard`.
 
 If the Claude half is unavailable — the usage endpoint is undocumented and can
 disappear — fall back to `pr-review`'s local estimate, and say which of the two
@@ -138,7 +135,7 @@ BUDGET=~/.claude/skills/pr-review/scripts/budget.mjs
 node "$BUDGET" --json    # pace inferred from local transcripts, cached 30 min
 ```
 
-#### The Codex half — the model and the effort *(both hosts)*
+#### The Codex half — the effort, and the model for simple work *(both hosts)*
 
 Codex's quota is separate, but it is not infinite, and a Claude host that hands
 it everything can exhaust it just as fast. The same pace maths picks what a
@@ -146,17 +143,17 @@ Codex call may spend — which the script prints ready to paste:
 
 | `codex budget:` | thoughtful work | simple work |
 |---|---|---|
-| `rich` | `gpt-6-astra --effort xhigh` | `gpt-5.6-sol --effort low` |
-| `normal` | `gpt-6-astra --effort high` | `gpt-5.6-sol --effort low` |
-| `tight` | `gpt-6-astra --effort medium` | `gpt-5.6-sol --effort minimal` |
-| `critical` | `gpt-5.6-sol --effort high` | `gpt-5.6-sol --effort minimal` |
+| `rich` | `gpt-6-astra --effort xhigh` | `gpt-5.6-luna --effort low` |
+| `normal` | `gpt-6-astra --effort high` | `gpt-5.6-luna --effort low` |
+| `tight` | `gpt-6-astra --effort medium` | `gpt-5.6-luna --effort low` |
+| `critical` | `gpt-6-astra --effort low` | `gpt-5.6-luna --effort low` |
 
-**At `critical` the model goes, not just the effort.** A cheap model thinking
-hard beats an expensive one that runs out mid-batch, and `critical` is also what
-the script reports when the account has already hit a rate limit or a spend
-control — where `gpt-6-astra` would simply fail. Everywhere else the ladder
-trims effort and keeps `gpt-6-astra` for judgement, because the effort knob is
-what actually costs.
+**Judgement always stays on `gpt-6-astra`; the effort is the knob.** No Codex
+model other than `gpt-6-astra` reviews, validates or drafts judgement.
+`gpt-5.6-luna` does only the very low-intelligence work the **simple** rows name.
+`critical` is also what the script reports when the account has already hit a
+rate limit or a spend control — then Codex cannot carry the batch at any effort
+(see below).
 
 Use the printed pair verbatim. Do not raise the effort for a PR that feels
 important; the batch is what has to fit, and the way to spend more on one PR is
@@ -207,13 +204,20 @@ that kind of work may spend*.
 |---|---|---|
 | running `prt` and reading its output — `sync`, `board`, `list`, `latest`, `cleanup`, `archive`, job bookkeeping | main session, inline. It is shell, not reasoning. | same |
 | presenting a `latest` ranking, a board, a batch report | main session, inline. Never a subagent. | same |
-| a `re-review` worker — reading the delta, deciding whether each thread was addressed, drafting the replies | harness on `sonnet`, judgement handed to Codex at the **thoughtful** pair | the **thoughtful** pair |
+| a `re-review` worker — reading the delta, deciding whether each thread was addressed, drafting the replies | harness on `sonnet` (Sonnet 5.5), judgement handed to Codex at the **thoughtful** pair | the **thoughtful** pair |
 | an initial `review` worker | `/pr-review <N> --tier <tier>` — it routes its own models | `/pr-review <N> --tier codex` |
-| a `revise` worker — applying wording instructions to prose that already exists | `sonnet`, or Codex at the **simple** pair | the **simple** pair |
+| a `revise` worker — applying wording instructions to prose that already exists | `sonnet` (Sonnet 5.5), or Codex at the **simple** pair | the **simple** pair |
 | answering a `prt:ask` note | main session inline when it is short; `sonnet` when it needs the diff re-read | the **thoughtful** pair |
-| drafting a `nudge`, a cleanup summary, an archive triage | `haiku` or `sonnet` | the **simple** pair |
-| a mechanical sweep — every draft has a `prt:pr-actions` block, tallying anchors, listing files | `haiku`, or plain shell | the **simple** pair |
-| final adjudication — which findings survive, the recommended resolution, what reaches the human | main session (Opus) | main session, at the **thoughtful** effort |
+| drafting a `nudge`, a cleanup summary, an archive triage | Sonnet 5 (`claude-sonnet-5`), or the **simple** pair | the **simple** pair |
+| a mechanical sweep — every draft has a `prt:pr-actions` block, tallying anchors, listing files | Sonnet 5 (`claude-sonnet-5`), or plain shell | the **simple** pair |
+| final adjudication — which findings survive, the recommended resolution, what reaches the human | main session | main session, at the **thoughtful** effort |
+
+Claude subagents run on Sonnet 5.5 (`sonnet`) everywhere; only the two
+low-intelligence rows may drop to Sonnet 5. The `Agent` tool's `model` accepts
+only aliases, so pin `claude-sonnet-5` through a `Workflow` `agent()` or
+`claude -p --model claude-sonnet-5`; when neither is convenient, `sonnet` is fine.
+Fable and Opus are not used by this skill; Fable 5.1 appears only inside
+`pr-review`'s `full` tier.
 
 Three rules the table is shorthand for:
 
@@ -224,14 +228,14 @@ Three rules the table is shorthand for:
    constrained. *Usually* is doing real work in that sentence: check the Codex
    half before leaning on it, because a `tight` or `critical` Codex budget means
    the cheap escape hatch is not there this week.
-2. **The main session's context is already cached**, so an inline Opus pass is
+2. **The main session's context is already cached**, so an inline pass is
    often *cheaper* than a fresh subagent paying a full cache write to be told the
    same thing. Adjudication, and anything that is two sentences of judgement over
    context you already hold, stays inline. Do not spawn a subagent to answer a
    question you can already answer.
-3. **Never spend Opus or Fable on work a smaller model finishes correctly.**
-   Formatting, extraction, mechanical edits, and summarising output you have
-   already read are `haiku` / `sonnet` / `gpt-5.6-sol` work at every tier. At
+3. **Never spend more effort than the work needs.** Formatting, extraction,
+   mechanical edits, and summarising output you have already read are Sonnet 5 /
+   `gpt-5.6-luna` work at low effort at every tier. At
    `lean` and `codex` that stops being an economy and becomes the rule: Claude
    adjudicates and does nothing else.
 
@@ -248,7 +252,7 @@ node "$CODEX_COMPANION" task --model <model> --effort <effort> --prompt-file <fi
 work — never a pair you chose yourself.
 
 If the companion is missing or Codex is not set up, say so once and do the work
-on Claude at the smallest model that fits the row — never silently, because a
+on Claude — Sonnet 5.5, or Sonnet 5 for the low-intelligence rows — never silently, because a
 batch that was meant to run on Codex and ran on Claude instead is the thing this
 whole section exists to prevent.
 
@@ -401,7 +405,7 @@ and whether the author actually did what was asked.
    it is the thoughtful pair itself. It is a harness: it runs `prt`, reads the
    delta, and hands the judgement — did this thread get addressed, and is the
    delta itself sound — to Codex at the thoughtful pair the budget printed, then
-   verifies what comes back before drafting. Never spawn these on Opus or Fable;
+   verifies what comes back before drafting. Spawn these on Sonnet 5.5 only;
    adjudication of what the batch produced is the main session's job, and it
    happens once, not per PR.
 
@@ -1202,7 +1206,7 @@ Archiving is the user's decision to make: propose it, do not do it unasked.
 - [findings-schema.md](references/findings-schema.md) — the `findings.json`
   contract. Read before writing one.
 - [scripts/review-budget.sh](scripts/review-budget.sh) — the tier, the Fable
-  gate, and the Codex model/effort pair, from live subscription usage. It wraps
+  check gate, and the Codex model/effort pairs, from live subscription usage. It wraps
   [scripts/claude-usage.sh](scripts/claude-usage.sh) and
   [scripts/codex-usage.sh](scripts/codex-usage.sh), either of which prints its
   provider's raw JSON with `--json` if you need a figure the wrapper does not
