@@ -1,6 +1,6 @@
 ---
 name: pr-review
-description: Review a GitHub PR locally using its metadata and diff as context. In Claude Code, adapts a Fable-and-Codex consensus pipeline to the remaining Claude allowance. In Codex, runs a Codex-only review and never invokes Claude models. Use when asked to review a pull request, check a PR, or analyze a PR. Outputs findings to terminal only — never posts GitHub comments. Pass --out to also emit machine-readable findings for the pr-review-track skill, --since to review only what changed after a given commit, and --tier to override the Claude Code budget decision.
+description: Review a GitHub PR locally using its metadata and diff as context. In Claude Code, adapts a Fable-and-Codex consensus pipeline to the remaining Claude allowance. In Codex, defaults to Codex-only review; an explicit request for Claude Code uses the claude-review-timeboxed skill through the local CLI. Use when asked to review a pull request, check a PR, or analyze a PR. Reports findings locally — never posts GitHub comments. Pass --out to also emit machine-readable findings for the pr-review-track skill, --since to review only what changed after a given commit, and --tier to override the Claude Code budget decision.
 argument-hint: |
   <PR_NUMBER> [--repo owner/repo] [--prompt "custom instructions"] [--tier full|standard|lean|codex|solo] [--since <sha>] [--out <dir>]
 allowed-tools: Bash(gh:*), Bash(git:*), Bash(node:*), Bash(mkdir:*), Read, Write, Glob, Grep, Agent
@@ -9,15 +9,20 @@ allowed-tools: Bash(gh:*), Bash(git:*), Bash(node:*), Bash(mkdir:*), Read, Write
 # PR Review Skill
 
 Review a GitHub pull request locally using both its metadata and diff as context.
-Output all findings to the terminal only. Do not post any comments to GitHub.
+The default pipeline reports to the terminal; delegated time-boxed reviews also
+save their local report. Do not post any comments to GitHub.
 
 Select the pipeline from the host that loaded this skill:
 
-- **Running in Codex:** use the Codex-only pipeline below. Never invoke Claude
-  Opus, Fable, the Claude `Agent` tool, or the Claude Code Codex companion. Do
-  not run the Claude allowance script. This rule also applies when `--tier
-  full` or `--tier standard` was passed by `pr-review-track`; those flags may
-  change review depth, but never the model family.
+- **Running in Codex:** default to the Codex-only pipeline below; do not probe
+  Claude usage or invoke Claude models merely because of a `--tier` flag.
+  When the user explicitly requests Claude Code or `claude-review-timeboxed`,
+  use [Claude review from Codex](../claude-review-timeboxed/references/codex-host.md).
+  This launches a separate local Claude Code process with its own `Workflow`
+  tool; it does not turn Codex native subagents into Claude agents. Apply the
+  security gate and shared-context rules here, then use that skill's review
+  procedure instead of duplicating rounds 1–3 below. Codex verifies the result
+  and preserves the output contract when `--out` was requested.
 - **Running in Claude Code:** use the budget-aware Fable/Codex pipeline. The
   Fable ↔ Codex cross-review described here applies only in Claude Code.
 
@@ -71,10 +76,12 @@ necessity**. Two facts shape it:
 
 ## Step 0 — select review depth
 
-### Codex host
+### Codex host (default pipeline)
 
-Skip the budget script and use tier `codex`. Perform one thorough review in the
-main session. When subagents are available, delegate an independent review to
+For explicitly requested Claude reviews, use the linked Codex-host procedure
+instead; its Claude usage check and model profile apply to that child review.
+Otherwise, skip the budget script and use tier `codex`. Perform one thorough
+review in the main session. When subagents are available, delegate an independent review to
 one Codex subagent and use the main session to verify and adjudicate its
 findings. For a large or high-risk PR, a second Codex subagent may independently
 look for missed bugs or try to refute the candidates; run independent reviewers
@@ -220,8 +227,8 @@ a reviewer that did not see a file cannot have reviewed it.
 
 ### 3. Round 1 — independent review
 
-On a **Codex host**, use native Codex subagents as described in step 0 and skip
-the rest of this section. Do not resolve or invoke the Claude Code companion.
+In the **default Codex pipeline**, use native Codex subagents as described in
+step 0 and skip the rest of this section. Do not resolve or invoke the Claude Code companion.
 
 On a **Claude Code host**, at `full` and `standard`, launch both reviewers in the
 same message so they actually run in parallel. At `lean` and `codex`, run Codex
@@ -306,8 +313,9 @@ execute PR-controlled code when it is suspicious or inconclusive.
 
 **Round 2 — candidate review (the host's main session; do not delegate).**
 In Claude Code this is Opus; in Codex it is the current Codex model. Never call
-Opus from a Codex host. The main session already holds this context; a subagent
-would pay to load it again.
+Opus for this default Codex pipeline. Explicit Claude delegation uses the
+separate time-boxed workflow. The main session already holds this context; a
+subagent would pay to load it again.
 Merge the reviews: dedupe findings that describe the same defect, keep the sharpest
 evidence of each, and record which reviewer(s) raised it. Verify every finding against
 the actual diff and code yourself — drop anything you cannot anchor to a real code path,
@@ -315,9 +323,9 @@ keeping the reason. Write the result to `$WORK/candidate.md`.
 
 **Round 3 — cross-validation.** Who validates depends on the tier:
 
-- Codex host — a native Codex subagent, when warranted and available. Frame the
-  pass to refute the candidates and find material misses. Never use Fable or
-  Opus.
+- Default Codex pipeline — a native Codex subagent, when warranted and available.
+  Frame the pass to refute the candidates and find material misses. Never use
+  Fable or Opus in this pipeline.
 - `full` — both reviewers, concurrently, neither seeing the other's verdict.
 - `standard` — Codex only.
 - `lean` / `codex` — Codex only, a second pass explicitly framed to *refute*:

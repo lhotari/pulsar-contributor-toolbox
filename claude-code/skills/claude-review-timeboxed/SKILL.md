@@ -17,6 +17,14 @@ sizing and by wall-clock deadlines the agents can see, and the review says what 
 **Violating the letter of the procedure is violating its spirit.** A review that skips freezing, the usage
 check or verification is not "a faster review"; it is a different, weaker artifact.
 
+## Codex host
+
+When the user requests this skill or a Claude Code review from Codex, read
+[Running through the local Claude Code CLI](references/codex-host.md). Codex owns
+freezing, process supervision and final verification; the Claude child runs this
+skill's `Workflow`. The reference also covers uncommitted overlays and private
+output overrides. Do not substitute Codex agents and call them Claude reviewers.
+
 ## When to use
 
 - Any review with a time budget, not only quick ones: a ten-minute pass on a small delta, a fifteen-minute
@@ -44,8 +52,9 @@ check or verification is not "a faster review"; it is a different, weaker artifa
 | Output | `<main repo root>/.claude/timeboxed-reviews/<date -I>-<description>-<12-char sha>.md` | `--out <path>` |
 
 The main repo root is the primary checkout even when you run inside a git worktree: the parent of
-`git rev-parse --git-common-dir`. Never place the file in a sibling directory or in the worktree. The word
-"quick" selects this skill; it does not select the tight profile.
+`git rev-parse --git-common-dir`. Use that root for the default output, not a sibling or review worktree.
+An explicit `--out` or user confidentiality requirement overrides the output location. The word "quick"
+selects this skill; it does not select the tight profile.
 
 ## Model policy
 

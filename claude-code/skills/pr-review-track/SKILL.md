@@ -1,6 +1,6 @@
 ---
 name: pr-review-track
-description: Keep up with pull requests in a GitHub project (especially apache/pulsar) across many PRs and many rounds. Tracks every in-progress review under ~/.claude/pr-review-track, detects whether the author actually addressed earlier feedback, and drafts the reply, inline comments and review resolution into a markdown file the human edits and arms before anything is posted. Use for "re-review", "show latest PRs", "review latest", "revisit/revise a draft review", "what needs my attention", "cleanup closed PRs", "ignore/archive this PR" or "bring back an archived review", or any request to manage a backlog of PR reviews. Invokes the pr-review skill to do the actual reviewing. It reads live subscription usage — Claude's and Codex's — to pick one review tier for the batch and one model/effort pair per kind of work. In Claude Code it pushes work down to cheaper Claude models and out to Codex as the allowance tightens; in Codex it runs Codex-only, never invokes a Claude model, and tunes its own effort to what Codex has left.
+description: Track GitHub PR reviews across many PRs and rounds, especially apache/pulsar. Use for re-review, reviewing latest PRs, revising drafts, checking pending feedback, and archiving reviews. Invokes pr-review for analysis, verifies whether earlier feedback was addressed, and prepares local review drafts that a human edits and arms before posting. Adapts models and effort to live usage. Codex defaults to Codex-only review but honors explicit requests for a Claude Code time-boxed review.
 argument-hint: |
   re-review [N...] | show-latest | approved | review-latest [--limit 10] | revisit-draft [N] [instructions] | ask [N] | sync | board | submit | watch | cleanup | archive [N...] | unarchive [N...] | open [N...]
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, Agent, Monitor, Skill
@@ -41,15 +41,27 @@ per PR, per round, or per `re-review`.
 The current agent runtime and its native tools decide it — never the repository
 path, and never the name of the skill directory.
 
-**Codex host.** Never invoke Claude Opus, Claude Fable, the Claude `Agent` tool,
-or the Codex plugin's Claude Code companion, and never run `claude-usage.sh` —
-it reports a quota Codex does not spend. Read the Codex half of question 2 and
-nothing else — `--codex-only` is the flag that reads Codex alone.
+**Codex host, default.** Use Codex reviewers and read only the Codex half of
+question 2 (`--codex-only`); do not probe Claude usage or invoke Claude models.
+Pass `--tier codex` to ordinary `/pr-review` calls. A `full` or `standard` tier
+changes depth, not the model family.
 
-The tier is `codex` — pass `--tier codex` to every `/pr-review` call so it takes
-the Codex-only pipeline too. **A Codex host never delegates to Claude, for any
-reason**, including when a tier flag says `full` or `standard`. A tier is review
-depth; it is never a model family.
+**Explicit Claude request from Codex.** If the user asks for Claude Code or the
+`claude-review-timeboxed` skill, route the requested review through
+[Claude review from Codex](../claude-review-timeboxed/references/codex-host.md).
+The child uses that skill's fresh Claude usage reading and model profile; the
+remaining tracker work stays on the normal Codex budget. Carry the user's
+reviewer choice, time box, prior findings, investigation context and output
+restrictions into every affected worker; a queued `--tier codex` must not erase
+an explicit Claude request. Do not silently change unrelated jobs or invent a
+new `prt --tier` value. Record the actual review method/models privately.
+
+The Claude child returns review evidence only. The owning tracker worker still
+controls job tokens, head checks and draft creation through `prt`; the child
+never posts or arms a draft. When the target includes uncommitted local changes,
+keep its report separate from publishable `findings.json`: local overlay line
+numbers are not findings on the public PR head. If the user wants local review
+instead of comments, preserve `Status: hold` and do not arm a watcher.
 
 **Claude Code host.** Read both halves. Claude's allowance picks the tier;
 Codex's picks the model and effort of everything delegated to it.
@@ -63,7 +75,7 @@ both quotas:
 RBUDGET=~/.claude/skills/pr-review-track/scripts/review-budget.sh
 [ -f "$RBUDGET" ] || RBUDGET=~/workspace-pulsar/pulsar-contributor-toolbox/claude-code/skills/pr-review-track/scripts/review-budget.sh
 "$RBUDGET"                 # both halves; --json for the same thing structured
-"$RBUDGET" --codex-only    # Codex host: never touches Claude credentials
+"$RBUDGET" --codex-only    # default Codex pipeline; Claude delegation checks its own quota
 ```
 
 It wraps `scripts/claude-usage.sh --json` and `scripts/codex-usage.sh --json` —
@@ -300,15 +312,12 @@ whole section exists to prevent.
     comment or a reply in a pending review, but it must ignore every `resolve:`
     or `unresolve:` request until a later non-`REPLY` verdict. This keeps a
     staging pass from changing any visible thread state.
-11. **A Codex host never invokes a Claude model.** Not Opus, not Fable, not the
-    Claude `Agent` tool, not the Codex plugin's Claude Code companion, and not
-    `claude-usage.sh` — which reports a quota Codex does not spend. It runs
-    Codex models at every tier and whatever a `--tier` flag says, because a tier
-    is review depth and never a model family; *which* Codex model and at what
-    effort comes from the Codex budget, not from a fixed pair. The mirror of
-    this rule is a preference rather than a prohibition: a Claude host delegates
-    to Codex freely, and should — within that same budget. See
-    [Host, budget and models](#host-budget-and-models).
+11. **Codex-only is the default, not a veto of the user's reviewer choice.**
+    Tier flags alone never select Claude. An explicit Claude Code/time-boxed
+    review request uses the local CLI procedure linked under
+    [Host, budget and models](#host-budget-and-models), including Claude's own
+    usage check. Native Codex subagents remain Codex models. The child receives
+    the same confidentiality, read-only and no-posting constraints as its host.
 12. **Keep the main checkout untouched.** Every reviewer that inspects a PR
     branch gets its own temporary detached Git worktree, including parallel
     reviewers of the same PR and reviewers delegated by a worker. Never check
@@ -1197,8 +1206,8 @@ Archiving is the user's decision to make: propose it, do not do it unasked.
   [scripts/claude-usage.sh](scripts/claude-usage.sh) and
   [scripts/codex-usage.sh](scripts/codex-usage.sh), either of which prints its
   provider's raw JSON with `--json` if you need a figure the wrapper does not
-  report. On a Codex host run it as `--codex-only`, which reads Codex alone and
-  never touches Claude credentials.
+  report. For the default Codex pipeline run it as `--codex-only`, which reads
+  Codex alone and never touches Claude credentials.
 
 The reviewing itself lives in the **`pr-review`** skill; this skill decides
 *which* PRs to review, *when*, and how the result reaches GitHub.
