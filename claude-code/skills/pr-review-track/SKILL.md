@@ -100,7 +100,7 @@ Exit codes: **3** the Claude tier is `codex`, **4** the Codex budget is
 
 | `claude tier:` | the batch |
 |---|---|
-| `full` | comfortably under. Sonnet 5.5 (`xhigh`) **and** Codex review; both cross-validate; one short Fable 5.1 check at `high`. |
+| `full` | comfortably under. Sonnet 5.5 (`xhigh`) **and** Codex review; both cross-validate; one short Fable 5.1 check at `medium`. |
 | `standard` | on schedule. One Sonnet 5.5 `xhigh` pass, Codex validates. |
 | `lean` | ahead of pace. **Codex reviews alone**; the main session only adjudicates. |
 | `codex` | the allowance will not carry a Claude-led batch. Everything that can go to Codex goes to Codex; the main session adjudicates a trimmed brief. |

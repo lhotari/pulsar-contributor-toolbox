@@ -19,6 +19,7 @@ export const meta = {
 // Switches.
 const PROFILE = 'normal'              // 'normal' | 'high' | 'tight', see SKILL.md "Model policy"
 const FABLE_CHECK = PROFILE !== 'tight' // one short Fable 5.1 check once every detail is in; false to skip
+const FABLE_EFFORT = 'medium'         // 'high' only when the context is well defined: narrow target, few verified findings
 const HAS_PREVIOUS_REVIEW = true      // false for a first review: the checklist lens checks stated claims instead
 const WT = 'WORKTREE_PATH'            // the WORKTREE line printed by scripts/freeze-and-path.sh
 
@@ -244,14 +245,14 @@ const verified = await parallel(capped.map(f => () => {
 }))
 const verifiedIds = new Set(capped.map(f => f.id + f.lens))
 
-// A short Fable 5.1 check at high effort, now that every detail is in: it reads the verified result, not the target.
+// A short Fable 5.1 check at FABLE_EFFORT, now that every detail is in: it reads the verified result, not the target.
 let fableCheck = null
 const kept = verified.filter(Boolean).filter(f => f.verdict.verdict !== 'refuted')
 if (FABLE_CHECK && kept.length && !verifySkipped) {
   phase('Check')
   fableCheck = await agent(CTX + `\n\nYou are a final sanity check on a finished review, not another reviewer. Below are the verified findings with the verifiers' verdicts. Open the source at REVISION only to settle a doubt. Reply in at most ten lines: a finding that is wrong, a severity that is off, or a material miss the lenses' scope implies. Say "nothing to add" if that is the answer.\n\n` +
     kept.map(f => `- [${f.severity}] ${f.title} (${f.lens}): ${f.verdict.verdict}; ${f.verdict.reasoning}`).join('\n'),
-    { label: 'check:fable', phase: 'Check', model: 'fable', effort: 'high' })
+    { label: 'check:fable', phase: 'Check', model: 'fable', effort: FABLE_EFFORT })
 }
 return {
   profile: PROFILE,

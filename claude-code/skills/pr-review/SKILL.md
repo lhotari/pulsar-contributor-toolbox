@@ -82,9 +82,10 @@ use `gpt-6.1-sol` at `high` for all review judgment. Follow model/effort pairs
 supplied by `pr-review-track`, with its `firstScan` pair for initial scans.
 `gpt-6.1-sol` is the only cheaper Codex default. Lightweight chores (listing,
 formatting, extraction) use it at `low` effort, or Sonnet 5.5 at low effort.
-Work that once went to Fable runs on Sonnet 5.5 at `xhigh`. **Fable 5.1**
-(`fable`) is reserved for one short check at `high` effort once every detail is
-on the table — the round 4 check at `full`. Claude subagents that need an effort
+Sonnet 5.5 at `high` or `xhigh` performs about as well as Fable 5.1 on most
+review work, so work that once went to Fable runs on Sonnet 5.5 at `xhigh`.
+**Fable 5.1** (`fable`) is reserved for one short check at `medium` effort once
+every detail is on the table — the round 4 check at `full`. Claude subagents that need an effort
 are launched through the `Workflow` tool, whose `agent()` takes `model` and
 `effort`; the `Agent` tool cannot set effort.
 
@@ -138,7 +139,7 @@ Honour the tier. If the script is missing or errors, use `standard` and note it.
 
 | tier | Round 1 | Cross-validation | Claude spend |
 |---|---|---|---|
-| `full` | Sonnet 5.5 **and** Codex, independently | **both** validate | 2 Sonnet 5.5 `xhigh` passes + one short Fable 5.1 `high` check + main session |
+| `full` | Sonnet 5.5 **and** Codex, independently | **both** validate | 2 Sonnet 5.5 `xhigh` passes + one short Fable 5.1 `medium` check + main session |
 | `standard` | Sonnet 5.5 **and** Codex, independently | Codex only | 1 Sonnet 5.5 `xhigh` pass + main session |
 | `lean` | **Codex only**, Sol `high` first scan | Codex, second pass framed to refute | main session inline only |
 | `codex` | **Codex only** | Codex, independent refutation pass | main session adjudicates a trimmed brief |
@@ -370,9 +371,11 @@ re-read the code and decide, rather than deferring to it.
 **Round 4 — a short Fable 5.1 check (`full` only).** Once adjudication is drafted,
 every detail exists: write `$WORK/final.md` with the surviving findings, the dropped
 ones with reasons, and the split verdicts you settled. Then ask one
-`model: 'fable', effort: 'high'` workflow agent to read it (and the worktree where it
+`model: 'fable', effort: 'medium'` workflow agent to read it (and the worktree where it
 must) and return **at most ten lines**: a finding that is wrong, a severity that is
-off, a material miss. It is a sanity check on a finished review, not another
+off, a material miss. Use `effort: 'high'` only when the context is well defined: a
+few surviving findings, each pinned to specific code, and no open split verdicts.
+It is a sanity check on a finished review, not another
 reviewer — do not hand it the brief to re-review from scratch. Verify anything it
 raises against the code before changing the review. Skip it when adjudication left
 nothing to check.

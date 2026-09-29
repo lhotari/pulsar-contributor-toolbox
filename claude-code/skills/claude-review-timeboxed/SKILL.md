@@ -73,15 +73,17 @@ If the reading is 95% or more, do not launch the workflow; report the reading an
 
 An explicit request wins over the reading; say in the Method line when the two disagree.
 
-Claude agents run on **Sonnet 5.5** (`sonnet`); the effort is the cost knob. Work that used to go to Fable runs on
-Sonnet 5.5 at `xhigh`. **Fable 5.1** (`fable`) is used once, at `high` effort, after verification: a short check of
-the verified findings, when every detail is in (the template's `Check` phase, on by default outside the tight
-profile). No other Claude model is used.
+Claude agents run on **Sonnet 5.5** (`sonnet`); the effort is the cost knob. Sonnet 5.5 at `high` or `xhigh`
+performs about as well as Fable 5.1 on most review work, so work that used to go to Fable runs on Sonnet 5.5 at
+`xhigh`. **Fable 5.1** (`fable`) is used once, after verification: a short check of the verified findings, when every
+detail is in (the template's `Check` phase, on by default outside the tight profile). It runs at `medium` effort;
+raise it to `high` (`FABLE_EFFORT`) only when the context is well defined: a narrow target and a small set of
+verified, source-cited findings. No other Claude model is used.
 
 | Profile | When | Very trivial: lookups, doc and config consistency, checklists | Tasks: focused code or test review with a stated question list | Brains: concurrency and interleavings, disputed premises, contrarian, verifiers | Fable 5.1 check |
 |---|---|---|---|---|---|
-| normal | reading at most 75% and no override | Sonnet 5.5, medium | Sonnet 5.5; medium or high by task difficulty | Sonnet 5.5, xhigh | yes, high |
-| high | user asks for high effort or a thorough review | Sonnet 5.5, high | Sonnet 5.5, xhigh | Sonnet 5.5, xhigh | yes, high |
+| normal | reading at most 75% and no override | Sonnet 5.5, medium | Sonnet 5.5; medium or high by task difficulty | Sonnet 5.5, xhigh | yes, medium |
+| high | user asks for high effort or a thorough review | Sonnet 5.5, high | Sonnet 5.5, xhigh | Sonnet 5.5, xhigh | yes, medium; high when the context is well defined |
 | tight | reading above 75% and no override, or user asks for cheap | Sonnet 5.5, low | Sonnet 5.5; medium, high for the single hardest task | Sonnet 5.5, xhigh for the core-change lens; high for contrarian and verifiers; verify cap halved | no |
 
 Task difficulty for the Sonnet 5.5 effort: medium for one file with a known question list, high for cross-file
