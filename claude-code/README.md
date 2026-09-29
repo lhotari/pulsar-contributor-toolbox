@@ -42,7 +42,7 @@ a `prt` symlink alias for `pr-review-track` in both directories.
 
 Two skills that work together:
 
-* [`pr-review`](skills/pr-review/) — reviews one PR. Claude Sonnet 5 and Codex
+* [`pr-review`](skills/pr-review/) — reviews one PR. Claude Sonnet 5.5 and Codex
   `gpt-6-astra` review independently, the main session synthesizes, both
   cross-validate the result, and a short Fable 5.1 check reads the finished
   review when the budget allows. Terminal output only; it never posts to GitHub.

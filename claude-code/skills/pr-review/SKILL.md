@@ -75,14 +75,14 @@ necessity**. Two facts shape it:
   option — a fresh subagent on a smaller model is not automatically cheaper.
 
 **Models.** Honor an explicit user model request before these defaults. Claude
-subagents run on **Sonnet 5** (`sonnet`). Codex first scans use **`gpt-6.1-sol`
+subagents run on **Sonnet 5.5** (`sonnet`). Codex first scans use **`gpt-6.1-sol`
 at `high` effort** at every tier. Deeper validation uses `gpt-6-astra` at `high`
 effort (`xhigh` with a rich Codex budget); when budget is tight or critical,
 use `gpt-6.1-sol` at `high` for all review judgment. Follow model/effort pairs
 supplied by `pr-review-track`, with its `firstScan` pair for initial scans.
 `gpt-6.1-sol` is the only cheaper Codex default. Lightweight chores (listing,
-formatting, extraction) use it at `low` effort, or Sonnet 5 at low effort.
-Work that once went to Fable runs on Sonnet 5 at `xhigh`. **Fable 5.1**
+formatting, extraction) use it at `low` effort, or Sonnet 5.5 at low effort.
+Work that once went to Fable runs on Sonnet 5.5 at `xhigh`. **Fable 5.1**
 (`fable`) is reserved for one short check at `high` effort once every detail is
 on the table — the round 4 check at `full`. Claude subagents that need an effort
 are launched through the `Workflow` tool, whose `agent()` takes `model` and
@@ -138,8 +138,8 @@ Honour the tier. If the script is missing or errors, use `standard` and note it.
 
 | tier | Round 1 | Cross-validation | Claude spend |
 |---|---|---|---|
-| `full` | Sonnet 5 **and** Codex, independently | **both** validate | 2 Sonnet 5 `xhigh` passes + one short Fable 5.1 `high` check + main session |
-| `standard` | Sonnet 5 **and** Codex, independently | Codex only | 1 Sonnet 5 `xhigh` pass + main session |
+| `full` | Sonnet 5.5 **and** Codex, independently | **both** validate | 2 Sonnet 5.5 `xhigh` passes + one short Fable 5.1 `high` check + main session |
+| `standard` | Sonnet 5.5 **and** Codex, independently | Codex only | 1 Sonnet 5.5 `xhigh` pass + main session |
 | `lean` | **Codex only**, Sol `high` first scan | Codex, second pass framed to refute | main session inline only |
 | `codex` | **Codex only** | Codex, independent refutation pass | main session adjudicates a trimmed brief |
 | `solo` | none — one main-session pass inline | none | main session inline only |
@@ -248,11 +248,11 @@ On a **Claude Code host**, at `full` and `standard`, launch both reviewers in th
 same message so they actually run in parallel. At `lean` and `codex`, run Codex
 alone — skip Reviewer A.
 
-**Reviewer A — Claude Sonnet 5 at `xhigh`** (`full` and `standard` only), as a
+**Reviewer A — Claude Sonnet 5.5 at `xhigh`** (`full` and `standard` only), as a
 one-agent workflow so the effort can be set:
 
 ```javascript
-export const meta = { name: 'pr-review-sonnet', description: 'Sonnet 5 xhigh PR review' }
+export const meta = { name: 'pr-review-sonnet', description: 'Sonnet 5.5 xhigh PR review' }
 return await agent(`Read ${args.work}/brief.md and review PR #${args.pr}. Repo checkout for context:
   ${args.work}/tree (read it, do not modify it). Review only — never edit files, never post to GitHub.
   Return findings in the exact format specified in the brief, and nothing else:
@@ -415,7 +415,7 @@ The full schema lives in `../pr-review-track/references/findings-schema.md`. In 
   "schema": 1, "repo": "apache/pulsar", "pr": 26289, "head": "<sha>",
   "kind": "initial",
   "tier": "standard",
-  "reviewers": ["Claude Sonnet 5", "Codex gpt-6.1-sol", "<actual validator/adjudicator>"],
+  "reviewers": ["Claude Sonnet 5.5", "Codex gpt-6.1-sol", "<actual validator/adjudicator>"],
   "coverage": "full-repo",
   "summary": "<the Summary section, as markdown>",
   "recommendedEvent": "COMMENT",

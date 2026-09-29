@@ -65,7 +65,7 @@ review-file location. No tests or builds run under this read-only skill.
 This invocation shape has been exercised with the local CLI. Check flags first
 and adapt paths and tool permissions to the task. Run from the frozen worktree;
 pass the brief through stdin so shell quoting cannot execute its contents.
-The coordinator runs on Sonnet 5 (`review_model=sonnet`); choose its effort
+The coordinator runs on Sonnet 5.5 (`review_model=sonnet`); choose its effort
 from the request and skill profile (`xhigh` for high or thorough reviews).
 
 ```sh

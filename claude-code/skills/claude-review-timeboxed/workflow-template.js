@@ -112,7 +112,7 @@ const VERDICT_SCHEMA = {
 
 // Model profile (SKILL.md "Model policy"). Roles: lookup (very trivial), task (focused review), taskHard (difficult
 // focused review), brain (concurrency, disputed premises, contrarian), core (the core-change lens), verify.
-// Sonnet 5 ('sonnet') everywhere; the effort is the cost knob.
+// Sonnet 5.5 ('sonnet') everywhere; the effort is the cost knob.
 const PROFILES = {
   normal: {
     lookup:   { model: 'sonnet', effort: 'medium' },

@@ -100,8 +100,8 @@ Exit codes: **3** the Claude tier is `codex`, **4** the Codex budget is
 
 | `claude tier:` | the batch |
 |---|---|
-| `full` | comfortably under. Sonnet 5 (`xhigh`) **and** Codex review; both cross-validate; one short Fable 5.1 check at `high`. |
-| `standard` | on schedule. One Sonnet 5 `xhigh` pass, Codex validates. |
+| `full` | comfortably under. Sonnet 5.5 (`xhigh`) **and** Codex review; both cross-validate; one short Fable 5.1 check at `high`. |
+| `standard` | on schedule. One Sonnet 5.5 `xhigh` pass, Codex validates. |
 | `lean` | ahead of pace. **Codex reviews alone**; the main session only adjudicates. |
 | `codex` | the allowance will not carry a Claude-led batch. Everything that can go to Codex goes to Codex; the main session adjudicates a trimmed brief. |
 
@@ -214,7 +214,7 @@ that kind of work may spend*.
 | a mechanical sweep — every draft has a `prt:pr-actions` block, tallying anchors, listing files | `sonnet` at low effort, or plain shell | the **simple** pair |
 | final adjudication — which findings survive, the recommended resolution, what reaches the human | main session | main session, at the **thoughtful** effort |
 
-Claude subagents run on Sonnet 5 (`sonnet`) everywhere; the effort is the knob,
+Claude subagents run on Sonnet 5.5 (`sonnet`) everywhere; the effort is the knob,
 and the two low-intelligence rows run it low.
 Fable and Opus are not used by this skill; Fable 5.1 appears only inside
 `pr-review`'s `full` tier.
@@ -235,7 +235,7 @@ Three rules the table is shorthand for:
    question you can already answer.
 3. **Never spend more effort than the work needs.** Formatting, extraction,
    mechanical edits, and summarising output you have already read are low-effort
-   Sonnet 5 / `gpt-6.1-sol` work at every tier. At
+   Sonnet 5.5 / `gpt-6.1-sol` work at every tier. At
    `lean` and `codex` that stops being an economy and becomes the rule: Claude
    adjudicates and does nothing else.
 
@@ -252,7 +252,7 @@ node "$CODEX_COMPANION" task --model <model> --effort <effort> --prompt-file <fi
 work, unless the user explicitly requested a model or effort.
 
 If the companion is missing or Codex is not set up, say so once and do the work
-on Claude — Sonnet 5, at low effort for the low-intelligence rows — never silently, because a
+on Claude — Sonnet 5.5, at low effort for the low-intelligence rows — never silently, because a
 batch that was meant to run on Codex and ran on Claude instead is the thing this
 whole section exists to prevent.
 
@@ -405,7 +405,7 @@ and whether the author actually did what was asked.
    it is the thoughtful pair itself. It is a harness: it runs `prt`, reads the
    delta, and hands the judgement — did this thread get addressed, and is the
    delta itself sound — to Codex at the thoughtful pair the budget printed, then
-   verifies what comes back before drafting. Spawn these on Sonnet 5 only;
+   verifies what comes back before drafting. Spawn these on Sonnet 5.5 only;
    adjudication of what the batch produced is the main session's job, and it
    happens once, not per PR.
 
