@@ -18,13 +18,13 @@ function runPlan(t, usage, json = true) {
 }
 
 const solHigh = { model: 'gpt-6.1-sol', effort: 'high' };
-for (const [percent, budget, thoughtful] of [
-  [10, 'rich', { model: 'gpt-6-astra', effort: 'xhigh' }],
-  [60, 'normal', { model: 'gpt-6-astra', effort: 'high' }],
-  [80, 'tight', solHigh],
-  [95, 'critical', solHigh],
+for (const [percent, budget, thoughtful, reReview] of [
+  [10, 'rich', { model: 'gpt-6-astra', effort: 'xhigh' }, { model: 'gpt-6-astra', effort: 'medium' }],
+  [60, 'normal', { model: 'gpt-6-astra', effort: 'high' }, { model: 'gpt-6.1-sol', effort: 'xhigh' }],
+  [80, 'tight', solHigh, solHigh],
+  [95, 'critical', solHigh, solHigh],
 ]) {
-  test(`${budget}: first scan and lightweight work keep their defaults`, (t) => {
+  test(`${budget}: re-review ceiling is separate from initial-review validation`, (t) => {
     // A completed window makes raw utilization determine the tier.
     const result = runPlan(t, { primary: { windowDurationMins: 300, usedPercent: percent, resetsAt: Math.floor(Date.now() / 1000) } });
     assert.equal(result.status, budget === 'critical' ? 4 : 0);
@@ -33,6 +33,7 @@ for (const [percent, budget, thoughtful] of [
     assert.equal(plan.blocked, false);
     assert.deepEqual(plan.firstScan, solHigh);
     assert.deepEqual(plan.thoughtful, thoughtful);
+    assert.deepEqual(plan.reReview, reReview);
     assert.deepEqual(plan.simple, { model: 'gpt-6.1-sol', effort: 'low' });
   });
 }
@@ -44,11 +45,13 @@ test('a reached spend control remains blocked despite cheaper defaults', (t) => 
   assert.equal(plan.blocked, true);
   assert.equal(plan.budget, 'critical');
   assert.deepEqual(plan.thoughtful, solHigh);
+  assert.deepEqual(plan.reReview, solHigh);
 });
 
-test('text output exposes the first-scan pair', (t) => {
+test('text output exposes the first-scan and re-review pairs', (t) => {
   const result = runPlan(t, {}, false);
   assert.equal(result.status, 0);
   assert.match(result.stdout, /first scan: gpt-6\.1-sol --effort high/);
+  assert.match(result.stdout, /re-review: +gpt-6-astra --effort medium/);
   assert.match(result.stdout, /simple: +gpt-6\.1-sol --effort low/);
 });

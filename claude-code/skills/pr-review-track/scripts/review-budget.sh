@@ -14,7 +14,7 @@
 #
 #   Claude side (wraps claude-usage.sh --json) -> a `pr-review` tier, plus a
 #                                                 gate on the short Fable check
-#   Codex side  (wraps codex-usage.sh  --json) -> model/effort pairs for review scans, follow-up,
+#   Codex side  (wraps codex-usage.sh  --json) -> model/effort pairs for review scans, follow-up, re-reviews,
 #                                                 and gpt-6.1-sol for simple work
 #
 # Usage:
@@ -187,6 +187,11 @@ codex_plan() {
        elif $budget == "normal" then { model: "gpt-6-astra", effort: "high" }
        else { model: "gpt-6-astra", effort: "xhigh" } end) as $thoughtful
 
+    # Re-reviews have a separate ceiling, including their final validation.
+    | (if $budget == "rich" then { model: "gpt-6-astra", effort: "medium" }
+       elif $budget == "normal" then { model: "gpt-6.1-sol", effort: "xhigh" }
+       else $firstScan end) as $reReview
+
     | { model: "gpt-6.1-sol", effort: "low" } as $simple
 
     | (if $blocked then "rate limit or spend control already reached — Codex cannot carry the batch either"
@@ -200,7 +205,7 @@ codex_plan() {
 
     | { available: true, budget: $budget, why: $why, worstPace: $worst,
         peakPercent: $peak, blocked: $blocked, plan: ($root.planType // null),
-        firstScan: $firstScan, thoughtful: $thoughtful, simple: $simple, windows: $windows }
+        firstScan: $firstScan, thoughtful: $thoughtful, reReview: $reReview, simple: $simple, windows: $windows }
   '
 }
 
@@ -231,6 +236,7 @@ else
        "  windows:    \(.codex.windows | wins)\n" +
        "  first scan: \(.codex.firstScan.model) --effort \(.codex.firstScan.effort)\n" +
        "  thoughtful: \(.codex.thoughtful.model) --effort \(.codex.thoughtful.effort)\n" +
+       "  re-review:  \(.codex.reReview.model) --effort \(.codex.reReview.effort)\n" +
        "  simple:     \(.codex.simple.model) --effort \(.codex.simple.effort)"
      else "codex budget: unavailable — \(.codex.why)" end)
   '

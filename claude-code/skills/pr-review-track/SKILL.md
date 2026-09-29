@@ -139,18 +139,22 @@ Codex's quota is separate, but it is not infinite, and a Claude host that hands
 it everything can exhaust it just as fast. The same pace maths picks what a
 Codex call may spend — which the script prints ready to paste:
 
-| `codex budget:` | first scan | thoughtful follow-up / validation | simple work |
-|---|---|---|---|
-| `rich` | `gpt-6.1-sol --effort high` | `gpt-6-astra --effort xhigh` | `gpt-6.1-sol --effort low` |
-| `normal` | `gpt-6.1-sol --effort high` | `gpt-6-astra --effort high` | `gpt-6.1-sol --effort low` |
-| `tight` | `gpt-6.1-sol --effort high` | `gpt-6.1-sol --effort high` | `gpt-6.1-sol --effort low` |
-| `critical` | `gpt-6.1-sol --effort high` | `gpt-6.1-sol --effort high` | `gpt-6.1-sol --effort low` |
+| `codex budget:` | first scan | initial-review follow-up / validation | re-review follow-up / final validation | simple work |
+|---|---|---|---|---|
+| `rich` | `gpt-6.1-sol --effort high` | `gpt-6-astra --effort xhigh` | `gpt-6-astra --effort medium` | `gpt-6.1-sol --effort low` |
+| `normal` | `gpt-6.1-sol --effort high` | `gpt-6-astra --effort high` | `gpt-6.1-sol --effort xhigh` | `gpt-6.1-sol --effort low` |
+| `tight` | `gpt-6.1-sol --effort high` | `gpt-6.1-sol --effort high` | `gpt-6.1-sol --effort high` | `gpt-6.1-sol --effort low` |
+| `critical` | `gpt-6.1-sol --effort high` | `gpt-6.1-sol --effort high` | `gpt-6.1-sol --effort high` | `gpt-6.1-sol --effort low` |
 
 **An explicit user model request takes precedence over these defaults.**
 `gpt-6.1-sol` is the only cheaper Codex default: `high` for first scans and all
 review judgment under tight or critical budgets, `low` for lightweight work.
 Use the script's `firstScan` pair for the first scan of each review task,
-including re-reviews; use `thoughtful` for deeper follow-up and validation.
+including re-reviews. Use `thoughtful` only for initial-review follow-up and
+validation; use `reReview` for re-review follow-up, feedback verification, and
+final adjudication. This includes incremental `--since` reviews and final
+checks after fixes, even at tier `full`. Do not promote a re-review to the
+initial-review pair because the PR is complex or a finding needs another pass.
 If usage is unavailable, use Sol `high` for review work and Sol `low` for chores,
 and disclose the missing budget reading.
 
@@ -178,7 +182,9 @@ to every `prt job add --tier <tier>`. That keeps the batch at one consistent
 depth and stops each PR re-deriving it — `pr-review` skips its own budget script
 entirely when it is given a tier. The Codex pair travels the same way: every
 worker's prompt names the model and effort it may spend, so no worker picks its
-own.
+own. Carry the review kind too: re-review workers and any nested `pr-review`
+calls receive `firstScan` and `reReview`, never `thoughtful` as their validation
+pair. A resumed re-review job keeps this rule even if its stored tier is `full`.
 
 Tell the user which tier the batch ran at and why, and at `lean` or `codex` say
 plainly that each PR got one independent reviewer rather than two. **In the
@@ -198,7 +204,7 @@ it applies at every tier — most of what this skill does never needed a frontie
 model in the first place. Read down the table by default; reach up only for the
 row that names the work.
 
-Where a row says **firstScan**, **thoughtful** or **simple**, substitute the pair the Codex half
+Where a row says **firstScan**, **thoughtful**, **reReview** or **simple**, substitute the pair the Codex half
 printed. The row decides *which kind of work this is*; the budget decides *what
 that kind of work may spend*.
 
@@ -206,18 +212,18 @@ that kind of work may spend*.
 |---|---|---|
 | running `prt` and reading its output — `sync`, `board`, `list`, `latest`, `cleanup`, `archive`, job bookkeeping | main session, inline. It is shell, not reasoning. | same |
 | presenting a `latest` ranking, a board, a batch report | main session, inline. Never a subagent. | same |
-| a `re-review` worker — reading the delta, deciding whether each thread was addressed, drafting the replies | harness on `sonnet`, first scan handed to Codex at **firstScan**, follow-up at **thoughtful** | **firstScan**, then **thoughtful** |
+| a `re-review` worker — reading the delta, deciding whether each thread was addressed, drafting the replies | harness on `sonnet`, first scan handed to Codex at **firstScan**, follow-up at **reReview** | **firstScan**, then **reReview** |
 | an initial `review` worker | `/pr-review <N> --tier <tier>` with the Codex pairs in worker instructions | `/pr-review <N> --tier codex` with the same pairs |
 | a `revise` worker — applying wording instructions to prose that already exists | `sonnet`, or Codex at the **simple** pair | the **simple** pair |
-| answering a `prt:ask` note | main session inline when it is short; `sonnet` when it needs the diff re-read | the **thoughtful** pair |
+| answering a `prt:ask` note | main session inline when it is short; `sonnet` when it needs the diff re-read; re-review judgment uses **reReview** | **reReview** during re-review; otherwise **thoughtful** |
 | drafting a `nudge`, a cleanup summary, an archive triage | `sonnet` at low effort, or the **simple** pair | the **simple** pair |
 | a mechanical sweep — every draft has a `prt:pr-actions` block, tallying anchors, listing files | `sonnet` at low effort, or plain shell | the **simple** pair |
-| final adjudication — which findings survive, the recommended resolution, what reaches the human | main session | main session, at the **thoughtful** effort |
+| final adjudication — which findings survive, the recommended resolution, what reaches the human | main session; re-review judgment uses **reReview** | **thoughtful** for initial reviews; **reReview** for re-reviews |
 
 Claude subagents run on Sonnet 5.5 (`sonnet`) everywhere; the effort is the knob,
 and the two low-intelligence rows run it low.
 Fable and Opus are not used by this skill; Fable 5.1 appears only inside
-`pr-review`'s `full` tier.
+`pr-review`'s `full` tier for initial reviews.
 
 Three rules the table is shorthand for:
 
@@ -402,12 +408,14 @@ and whether the author actually did what was asked.
    [The job queue](#the-job-queue) for the loop and the worker's contract.
 
    **A re-review worker is a `sonnet` agent on a Claude host**; on a Codex host
-   it is the thoughtful pair itself. It is a harness: it runs `prt`, reads the
-   delta, and hands the judgement — did this thread get addressed, and is the
-   delta itself sound — to Codex at the thoughtful pair the budget printed, then
+   it starts at the firstScan pair. It is a harness: it runs `prt`, reads the
+   delta, and hands follow-up judgement — did this thread get addressed, and is
+   the delta itself sound — to Codex at the reReview pair the budget printed, then
    verifies what comes back before drafting. Spawn these on Sonnet 5.5 only;
    adjudication of what the batch produced is the main session's job, and it
-   happens once, not per PR.
+   happens once, not per PR. Any final re-review judgment also uses reReview;
+   if the main session runs above that pair, delegate the judgment at reReview
+   and use the main session to assemble the result.
 
    Each worker sets up its own scratch directory and reviewer worktree per
    [Reviewer worktrees](#reviewer-worktrees), then does, for its own PR:

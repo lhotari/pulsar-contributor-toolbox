@@ -76,7 +76,7 @@ necessity**. Two facts shape it:
 
 **Models.** Honor an explicit user model request before these defaults. Claude
 subagents run on **Sonnet 5.5** (`sonnet`). Codex first scans use **`gpt-6.1-sol`
-at `high` effort** at every tier. Deeper validation uses `gpt-6-astra` at `high`
+at `high` effort** at every tier. For initial reviews, deeper validation uses `gpt-6-astra` at `high`
 effort (`xhigh` with a rich Codex budget); when budget is tight or critical,
 use `gpt-6.1-sol` at `high` for all review judgment. Follow model/effort pairs
 supplied by `pr-review-track`, with its `firstScan` pair for initial scans.
@@ -88,6 +88,27 @@ review work, so work that once went to Fable runs on Sonnet 5.5 at `xhigh`.
 every detail is on the table — the round 4 check at `full`. Claude subagents that need an effort
 are launched through the `Workflow` tool, whose `agent()` takes `model` and
 `effort`; the `Agent` tool cannot set effort.
+
+### Re-review model ceiling (both hosts)
+
+A re-review checks a previously reviewed PR, including `--since <sha>`, author
+responses, fixes, and a final review round. Keep the first scan on Sol `high`;
+use the following pair for all subsequent review judgment, validation, and final
+adjudication instead of the initial-review deeper-validation defaults:
+
+| Codex budget | Re-review follow-up and final adjudication |
+|---|---|
+| `rich` | `gpt-6-astra` at `medium` |
+| `normal` | `gpt-6.1-sol` at `xhigh` |
+| `tight` / `critical` | `gpt-6.1-sol` at `high` |
+| unavailable / not supplied | `gpt-6.1-sol` at `high` |
+
+Use `pr-review-track`'s `reReview` pair when supplied. A `full` tier, complex
+PR, or additional validation round does not raise this ceiling. Skip the Fable
+round 4 check on re-reviews. If the main session is above the selected pair,
+delegate review judgment at that pair and assemble the result in the main
+session. Explicit user model/effort requests still take precedence. Initial
+reviews keep their existing model selection.
 
 ## Step 0 — select review depth
 
@@ -338,7 +359,8 @@ keeping the reason. Write the result to `$WORK/candidate.md`.
 - `standard` — Codex only.
 - `lean` / `codex` — Codex only, a second pass explicitly framed to *refute*:
   `task --model <validation-model> --effort <validation-effort> --cwd "$WORK/tree" --prompt-file "$WORK/crossvalidate.md"`.
-  Select the validation pair from the Models rule above, respecting explicit user
+  Select the validation pair from the Models rule above (the re-review ceiling
+  for re-reviews), respecting explicit user
   model requests. Independence comes from the refutation brief and fresh pass;
   tight budgets keep Sol at `high` for both passes.
 - `solo` — none.
@@ -368,7 +390,7 @@ Adjudicate in the main session, with the code open:
 With a single validator (`standard` and below) a lone REFUTE is not a majority —
 re-read the code and decide, rather than deferring to it.
 
-**Round 4 — a short Fable 5.1 check (`full` only).** Once adjudication is drafted,
+**Round 4 — a short Fable 5.1 check (initial reviews at `full` only).** Once adjudication is drafted,
 every detail exists: write `$WORK/final.md` with the surviving findings, the dropped
 ones with reasons, and the split verdicts you settled. Then ask one
 `model: 'fable', effort: 'medium'` workflow agent to read it (and the worktree where it
