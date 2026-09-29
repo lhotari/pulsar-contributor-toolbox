@@ -10,7 +10,7 @@
 //   1. DISCLOSURE IS LEGAL. Saying that AI assisted, and naming the models, is
 //      deliberate practice here and what the ASF Generative Tooling guidance
 //      asks for. Every fixture in that test is verbatim text the maintainer has
-//      actually posted to apache/pulsar, cited to the comment it came from.
+//      actually posted to apache/pulsar, except the refreshed model-name fixture.
 //   2. THE FOUR REAL LEAKS. The passages this session drafted and had to fix.
 //      They are the recall floor: rescoping the lint must not lose one.
 //   3. ORDINARY PULSAR PROSE. The measured false positives of the bare-word
@@ -61,7 +61,7 @@ const labels = (text) => toolingLint(parseActionFile(text)).map((h) => h.label).
 // ------------------------------------------------------------ 1. disclosure
 //
 // The lint blocks the pipeline's internal mechanics, NOT the fact that AI ran.
-// Every string here was posted to apache/pulsar by the maintainer; an earlier
+// These strings came from maintainer posts, with one model name refreshed; an earlier
 // version of this lint refused 72 of his comments, and that was the bug.
 
 test('a deliberate AI-assistance disclosure is not a leak', () => {
@@ -77,7 +77,7 @@ test('a deliberate AI-assistance disclosure is not a leak', () => {
     // The model name alone, however it is re-embedded. Naming which model ran
     // is disclosure; naming the effort it ran at is mechanics.
     'Run under `gpt-6-astra` against a full checkout.',
-    'GPT-5.6 flagged this one, and I verified it against ManagedLedgerImpl.',
+    'GPT-6.1-sol flagged this one, and I verified it against ManagedLedgerImpl.',
     'AGENTS.md line 3 lists the assistants; consider adding Windsurf while you are here.',
   ];
   for (const body of disclosures) assert.deepEqual(labels(toolingFile(body)), [], body);

@@ -14,8 +14,8 @@
 #
 #   Claude side (wraps claude-usage.sh --json) -> a `pr-review` tier, plus a
 #                                                 gate on the short Fable check
-#   Codex side  (wraps codex-usage.sh  --json) -> an effort ceiling for gpt-6-astra,
-#                                                 and gpt-5.6-luna for simple work
+#   Codex side  (wraps codex-usage.sh  --json) -> model/effort pairs for review scans, follow-up,
+#                                                 and gpt-6.1-sol for simple work
 #
 # Usage:
 #   ./review-budget.sh                # both halves, compact report
@@ -27,7 +27,7 @@
 # Exit codes, so a shell caller can branch without parsing:
 #   0  both quotas comfortable
 #   3  the Claude tier is `codex` — hand what you can to Codex
-#   4  the Codex budget is `critical` — drop the effort everywhere
+#   4  the Codex budget is `critical` — use Sol high and reduce batch size
 #      (4 wins when both are true: there is no cheap side left to move work to)
 
 set -euo pipefail
@@ -139,8 +139,8 @@ claude_plan() {
 }
 
 # --------------------------------------------------------------------------
-# Codex: an effort ceiling for gpt-6-astra. Every window the account exposes is
-# paced generically — `primary`/`secondary` are labels that move around, and
+# Codex: model/effort defaults; explicit user requests take precedence.
+# Every window the account exposes is paced generically — `primary`/`secondary` are labels that move around, and
 # `credits` is not a window at all, so select on windowDurationMins.
 # --------------------------------------------------------------------------
 codex_plan() {
@@ -181,27 +181,26 @@ codex_plan() {
        elif $peak >= 55 or ($worst != null and $worst >= 1.0) then "normal"
        else "rich" end) as $budget
 
-    # Judgement stays on gpt-6-astra and only its effort moves; low-intelligence
-    # work goes to gpt-5.6-luna. Neither has `minimal`, so `low` is the floor.
-    | (if $budget == "critical" then { model: "gpt-6-astra", effort: "low" }
-       elif $budget == "tight"  then { model: "gpt-6-astra", effort: "medium" }
+    # First scans always use Sol high; constrained budgets keep follow-up there too.
+    | { model: "gpt-6.1-sol", effort: "high" } as $firstScan
+    | (if $budget == "critical" or $budget == "tight" then $firstScan
        elif $budget == "normal" then { model: "gpt-6-astra", effort: "high" }
        else { model: "gpt-6-astra", effort: "xhigh" } end) as $thoughtful
 
-    | { model: "gpt-5.6-luna", effort: "low" } as $simple
+    | { model: "gpt-6.1-sol", effort: "low" } as $simple
 
     | (if $blocked then "rate limit or spend control already reached — Codex cannot carry the batch either"
        elif $windows | length == 0 then "no rate limit windows reported\(if ($root.planType // null) then " for a \($root.planType) plan" else "" end)"
        else "\(($windows | map(select(.percent != null)) | max_by(.percent) | "\(.window) at \(.percent)%"))\(if $worst then ", pace \($worst)×" else "" end) — \(
-              if $budget == "critical" then "drop the effort to low everywhere"
-              elif $budget == "tight" then "cap the effort at medium"
+              if $budget == "critical" then "use Sol high for reviews and reduce batch size"
+              elif $budget == "tight" then "use Sol high for reviews"
               elif $budget == "normal" then "roughly on schedule"
               else "comfortably under" end)"
        end) as $why
 
     | { available: true, budget: $budget, why: $why, worstPace: $worst,
         peakPercent: $peak, blocked: $blocked, plan: ($root.planType // null),
-        thoughtful: $thoughtful, simple: $simple, windows: $windows }
+        firstScan: $firstScan, thoughtful: $thoughtful, simple: $simple, windows: $windows }
   '
 }
 
@@ -230,6 +229,7 @@ else
        "codex budget: \(.codex.budget)\n" +
        "  why:        \(.codex.why)\n" +
        "  windows:    \(.codex.windows | wins)\n" +
+       "  first scan: \(.codex.firstScan.model) --effort \(.codex.firstScan.effort)\n" +
        "  thoughtful: \(.codex.thoughtful.model) --effort \(.codex.thoughtful.effort)\n" +
        "  simple:     \(.codex.simple.model) --effort \(.codex.simple.effort)"
      else "codex budget: unavailable — \(.codex.why)" end)

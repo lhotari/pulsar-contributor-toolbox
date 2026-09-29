@@ -74,10 +74,14 @@ necessity**. Two facts shape it:
   price. So "let the main session do it inline" is usually the *cheaper*
   option — a fresh subagent on a smaller model is not automatically cheaper.
 
-**Models.** Claude subagents run on **Sonnet 5** (`sonnet`) and Codex reviewers
-run only on **`gpt-6-astra`**; cost is tuned through effort, never by switching
-model. Very low-intelligence chores (listing, formatting, extraction) may use
-Sonnet 5 at low effort or `gpt-5.6-luna`, never a review or validation pass.
+**Models.** Honor an explicit user model request before these defaults. Claude
+subagents run on **Sonnet 5** (`sonnet`). Codex first scans use **`gpt-6.1-sol`
+at `high` effort** at every tier. Deeper validation uses `gpt-6-astra` at `high`
+effort (`xhigh` with a rich Codex budget); when budget is tight or critical,
+use `gpt-6.1-sol` at `high` for all review judgment. Follow model/effort pairs
+supplied by `pr-review-track`, with its `firstScan` pair for initial scans.
+`gpt-6.1-sol` is the only cheaper Codex default. Lightweight chores (listing,
+formatting, extraction) use it at `low` effort, or Sonnet 5 at low effort.
 Work that once went to Fable runs on Sonnet 5 at `xhigh`. **Fable 5.1**
 (`fable`) is reserved for one short check at `high` effort once every detail is
 on the table — the round 4 check at `full`. Claude subagents that need an effort
@@ -92,7 +96,7 @@ For explicitly requested Claude reviews, use the linked Codex-host procedure
 instead; its Claude usage check and model profile apply to that child review.
 Otherwise, skip the budget script and use tier `codex`. Perform one thorough
 review in the main session. When subagents are available, delegate an independent review to
-one Codex subagent and use the main session to verify and adjudicate its
+one Codex subagent using the first-scan model/effort above and use the main session to verify and adjudicate its
 findings. For a large or high-risk PR, a second Codex subagent may independently
 look for missed bugs or try to refute the candidates; run independent reviewers
 in parallel. Give every subagent the same brief and require read-only work.
@@ -136,8 +140,8 @@ Honour the tier. If the script is missing or errors, use `standard` and note it.
 |---|---|---|---|
 | `full` | Sonnet 5 **and** Codex, independently | **both** validate | 2 Sonnet 5 `xhigh` passes + one short Fable 5.1 `high` check + main session |
 | `standard` | Sonnet 5 **and** Codex, independently | Codex only | 1 Sonnet 5 `xhigh` pass + main session |
-| `lean` | **Codex only**, `--effort xhigh` | Codex, second pass framed to refute | main session inline only |
-| `codex` | **Codex only** | Codex, varied effort as the adversary | main session adjudicates a trimmed brief |
+| `lean` | **Codex only**, Sol `high` first scan | Codex, second pass framed to refute | main session inline only |
+| `codex` | **Codex only** | Codex, independent refutation pass | main session adjudicates a trimmed brief |
 | `solo` | none — one main-session pass inline | none | main session inline only |
 
 `solo` is what `--solo` selects, and the fallback when the required reviewers
@@ -259,39 +263,32 @@ return await agent(`Read ${args.work}/brief.md and review PR #${args.pr}. Repo c
 Pass `args: { work: "<WORK>", pr: <N> }`. The workflow runs in the background and
 its result is the reviewer's findings text.
 
-**Reviewer B — Codex `gpt-6-astra`**, via the Codex plugin's review runtime. Resolve the
-companion script first (the install path is version-stamped):
+**Reviewer B — Codex `gpt-6.1-sol` at `high` effort** by default. An explicit
+user model request takes precedence. Resolve the companion script first (the
+install path is version-stamped):
 
 ```bash
 CODEX_COMPANION="$(ls -1dt "$HOME"/.claude/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs 2>/dev/null | head -1)"
 [ -n "$CODEX_COMPANION" ] || CODEX_COMPANION="$HOME/.claude/plugins/marketplaces/openai-codex/plugins/codex/scripts/codex-companion.mjs"
 ```
 
-With a worktree, use Codex's native reviewer (best quality — it walks the repo itself):
+Use a read-only task so the first scan's effort is explicit. The brief must
+name the pinned base/head refs, worktree (if available), security-gate result,
+and any custom review focus. With a worktree:
 
 ```bash
-node "$CODEX_COMPANION" review --cwd "$WORK/tree" --base "refs/pr-review/<PR_NUMBER>/base" --model gpt-6-astra
+node "$CODEX_COMPANION" task --cwd "$WORK/tree" --model gpt-6.1-sol --effort high --prompt-file "$WORK/brief.md"
 ```
 
-Without a worktree — or when the native reviewer rejects the target — fall back to a
-read-only Codex task over the brief (omitting `--write` keeps the sandbox read-only):
-
-```bash
-node "$CODEX_COMPANION" task --model gpt-6-astra --effort high --prompt-file "$WORK/brief.md"
-```
-
-At `lean` and `codex`, Codex carries the review alone, so raise the effort to
-`--effort xhigh`. Its quota is not the one under pressure — spend it.
+Without a worktree, omit `--cwd "$WORK/tree"` and review the brief under the
+same security restrictions. Omitting `--write` keeps the task read-only.
+Substitute the user's requested model when provided. `lean` and `codex` keep
+this same first-scan pair; a Claude tier does not raise Codex effort.
 
 Run the Codex command with `run_in_background: true`; it can take several minutes on a large
 PR. Do not pass `--background` to the companion — it always runs in the foreground of its own
 process, and Claude Code's background flag is what actually detaches it. Read its stdout when
 it completes.
-
-Notes:
-- `/codex:review` itself is `disable-model-invocation: true`, so invoke the companion script directly.
-- `review` accepts no custom focus text. If `--prompt` was given and you are on the native path,
-  pass the focus to Codex with `adversarial-review --cwd "$WORK/tree" --base "refs/pr-review/<PR_NUMBER>/base" --model gpt-6-astra "<focus>"` instead.
 
 **Degradation** (state it in the output, never silently skip): if the companion script is
 missing or Codex is not set up, the Codex-led tiers have no reviewer — fall back to `solo`
@@ -339,9 +336,10 @@ keeping the reason. Write the result to `$WORK/candidate.md`.
   (the Sonnet validator is another `model: 'sonnet', effort: 'xhigh'` workflow agent).
 - `standard` — Codex only.
 - `lean` / `codex` — Codex only, a second pass explicitly framed to *refute*:
-  `task --model gpt-6-astra --effort high --cwd "$WORK/tree" --prompt-file "$WORK/crossvalidate.md"`.
-  At `codex`, vary that pass (a different effort, never a different model) so it is a
-  genuinely independent look rather than the same reasoning run twice.
+  `task --model <validation-model> --effort <validation-effort> --cwd "$WORK/tree" --prompt-file "$WORK/crossvalidate.md"`.
+  Select the validation pair from the Models rule above, respecting explicit user
+  model requests. Independence comes from the refutation brief and fresh pass;
+  tight budgets keep Sol at `high` for both passes.
 - `solo` — none.
 
 **Skip round 3 entirely when round 2 produced no findings.** There is nothing to
@@ -417,7 +415,7 @@ The full schema lives in `../pr-review-track/references/findings-schema.md`. In 
   "schema": 1, "repo": "apache/pulsar", "pr": 26289, "head": "<sha>",
   "kind": "initial",
   "tier": "standard",
-  "reviewers": ["Claude Sonnet 5", "Codex gpt-6-astra", "<adjudicator>"],
+  "reviewers": ["Claude Sonnet 5", "Codex gpt-6.1-sol", "<actual validator/adjudicator>"],
   "coverage": "full-repo",
   "summary": "<the Summary section, as markdown>",
   "recommendedEvent": "COMMENT",
