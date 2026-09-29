@@ -104,19 +104,31 @@ unverified. Include the source archive link with the draft. Do not send mail.
 ## Authentication
 
 Always try anonymously first, even when credentials exist. Public lists need
-no credentials. The helper reads **APACHE_USER and APACHE_PASSWORD only after
-an anonymous access miss on a private list**, then performs one ASF OAuth login
-and retries. `private@*.apache.org` and `security@*.apache.org` (including
+no credentials. The helper reads credentials **only after an anonymous access
+miss on a private list**, then authenticates once and retries. It uses the first
+of these that is available:
+
+1. `PONYMAIL_COOKIE`: a lists.apache.org session cookie, as `ponymail=<value>`
+   or the bare value.
+2. `~/.ponymail.cookie`: the same, stored in a file. Keep it `chmod 600`; the
+   helper warns when other users can read it.
+3. `APACHE_USER` and `APACHE_PASSWORD`: one ASF OAuth login.
+
+A session cookie is checked before use; if it has expired, the helper says so
+instead of falling back silently. `private@*.apache.org` and `security@*.apache.org` (including
 `security@apache.org`) are recognized as private candidates. For another list,
 use `--private` only when the user or trusted list documentation identifies it
 as private. A 404 or empty search alone does not establish that a list is private.
 Do not use `--private` to fix a typo, a public search with no matches, a timeout,
 or a server error.
 
-If required credentials are missing, ask the user to set them in the environment
-and rerun. Never ask them to paste a password into chat. Never echo credentials,
-pass them as CLI arguments, put them in URLs, or save them in files. The helper
-sends the password only to `https://oauth.apache.org/gateway`; session cookies
+If required credentials are missing, ask the user to provide a session cookie
+in `~/.ponymail.cookie` or `PONYMAIL_COOKIE`, or to set `APACHE_USER` and
+`APACHE_PASSWORD`, and rerun. Never ask them to paste a password or cookie into
+chat. Never echo credentials or cookies, pass them as CLI arguments, put them in
+URLs, or save them in files. The helper
+sends the password only to `https://oauth.apache.org/gateway` and a stored
+session cookie only to `https://lists.apache.org`; session cookies from a login
 remain in memory. An account still needs permission to read the target list.
 
 Private content stays in local output and this conversation; do not put it in

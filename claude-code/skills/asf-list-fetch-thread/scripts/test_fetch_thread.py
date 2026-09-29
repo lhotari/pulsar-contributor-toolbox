@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from fetch_thread import Fetcher, FetchError, SafeRedirect, archive_link, main, save_thread
+from fetch_thread import Fetcher, FetchError, SafeRedirect, archive_link, main, save_thread, session_cookie
 import urllib.request
 
 
@@ -30,7 +30,8 @@ class FetchTests(unittest.TestCase):
         client = Mock()
         fetcher = Fetcher(client, True)
         operation = Mock(side_effect=[None, 'mail'])
-        with patch.dict(os.environ, APACHE_USER='test', APACHE_PASSWORD='dummy'):
+        with patch.dict(os.environ, APACHE_USER='test', APACHE_PASSWORD='dummy', clear=True), \
+                patch('fetch_thread.PONYMAIL_COOKIE_FILE', Path('/nonexistent/.ponymail.cookie')):
             self.assertEqual(fetcher.retrieve(operation), 'mail')
         client.login.assert_called_once_with('test', 'dummy')
         self.assertIsNone(fetcher.retrieve(lambda: None))
@@ -38,9 +39,50 @@ class FetchTests(unittest.TestCase):
 
     def test_missing_password(self):
         client = Mock()
-        with patch.dict(os.environ, {}, clear=True), self.assertRaisesRegex(FetchError, 'APACHE_PASSWORD'):
+        with patch.dict(os.environ, {}, clear=True), \
+                patch('fetch_thread.PONYMAIL_COOKIE_FILE', Path('/nonexistent/.ponymail.cookie')), \
+                self.assertRaisesRegex(FetchError, 'PONYMAIL_COOKIE.*APACHE_PASSWORD'):
             Fetcher(client, True).retrieve(lambda: [])
         client.login.assert_not_called()
+        client.use_session_cookie.assert_not_called()
+
+    def test_cookie_env_is_used_before_password(self):
+        client = Mock()
+        operation = Mock(side_effect=[None, 'mail'])
+        with patch.dict(os.environ, PONYMAIL_COOKIE='ponymail=abc-123', APACHE_USER='test',
+                        APACHE_PASSWORD='dummy', clear=True):
+            self.assertEqual(Fetcher(client, True).retrieve(operation), 'mail')
+        client.use_session_cookie.assert_called_once_with('abc-123', 'PONYMAIL_COOKIE')
+        client.login.assert_not_called()
+
+    def test_cookie_file_is_used_when_env_is_unset(self):
+        client = Mock()
+        with tempfile.TemporaryDirectory() as tmp:
+            cookie_file = Path(tmp) / '.ponymail.cookie'
+            cookie_file.write_text('abc-123\n')
+            cookie_file.chmod(0o600)
+            with patch.dict(os.environ, {}, clear=True), \
+                    patch('fetch_thread.PONYMAIL_COOKIE_FILE', cookie_file):
+                self.assertEqual(Fetcher(client, True).retrieve(Mock(side_effect=[None, 'mail'])), 'mail')
+        client.use_session_cookie.assert_called_once_with('abc-123', str(cookie_file))
+        client.login.assert_not_called()
+
+    def test_cookie_not_read_for_public_or_accessible_lists(self):
+        client = Mock()
+        with patch.dict(os.environ, PONYMAIL_COOKIE='abc-123'):
+            self.assertIsNone(Fetcher(client).retrieve(lambda: None))
+            self.assertEqual(Fetcher(client, True).retrieve(lambda: 'mail'), 'mail')
+        client.use_session_cookie.assert_not_called()
+
+    def test_session_cookie_formats(self):
+        with patch('fetch_thread.PONYMAIL_COOKIE_FILE', Path('/nonexistent/.ponymail.cookie')):
+            for raw in ('abc-123', ' ponymail=abc-123 ', 'Cookie: other=1; ponymail=abc-123; x=2'):
+                with patch.dict(os.environ, PONYMAIL_COOKIE=raw):
+                    self.assertEqual(session_cookie(), ('abc-123', 'PONYMAIL_COOKIE'))
+            with patch.dict(os.environ, PONYMAIL_COOKIE='bad value'), self.assertRaises(FetchError):
+                session_cookie()
+            with patch.dict(os.environ, {}, clear=True):
+                self.assertIsNone(session_cookie())
 
     def test_network_failure_never_logs_in(self):
         client = Mock()

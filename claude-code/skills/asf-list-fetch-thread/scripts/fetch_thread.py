@@ -27,6 +27,7 @@ LISTS_URL = "https://lists.apache.org"
 OAUTH_URL = "https://oauth.apache.org"
 USER_AGENT = "asf-list-fetch-thread/1.0"
 TIMEOUT = 30
+PONYMAIL_COOKIE_FILE = Path.home() / ".ponymail.cookie"
 
 
 class FetchError(Exception):
@@ -60,10 +61,26 @@ class ArchiveClient:
         lists_url, oauth_url = LISTS_URL, OAUTH_URL
         self.lists_url = lists_url.rstrip("/")
         self.oauth_url = oauth_url.rstrip("/")
+        self.cookies = http.cookiejar.CookieJar()
         self.opener = urllib.request.build_opener(
-            SafeRedirect(), urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
+            SafeRedirect(), urllib.request.HTTPCookieProcessor(self.cookies)
         )
         self.opener.addheaders = [("User-Agent", USER_AGENT)]
+
+    def use_session_cookie(self, value, source):
+        """Use an existing Pony Mail session cookie instead of the OAuth login."""
+        host = urllib.parse.urlsplit(self.lists_url).hostname
+        self.cookies.set_cookie(http.cookiejar.Cookie(
+            0, "ponymail", value, None, False, host, False, False, "/", True, True,
+            None, False, None, None, {}))
+        body = self._api("preferences.json", "checking the Pony Mail session")
+        try:
+            credentials = (json.loads(body or "{}").get("login") or {}).get("credentials")
+        except json.JSONDecodeError:
+            credentials = None
+        if not credentials:
+            raise FetchError(f"The Pony Mail session cookie from {source} is not logged in; "
+                             "it may have expired. Log in at https://lists.apache.org and update it.")
 
     def _open(self, request, what, raw=False):
         """Perform a request in this session; return (body_text, final_url).
@@ -226,16 +243,45 @@ class Fetcher:
         if result or not self.private or self.authenticated:
             return result
         # Credentials are read only after an anonymous access miss on a private list.
-        username = os.environ.get('APACHE_USER')
-        password = os.environ.get('APACHE_PASSWORD')
-        missing = [k for k, v in [('APACHE_USER', username),
-                                  ('APACHE_PASSWORD', password)] if not v]
-        if missing:
-            raise FetchError('Private list unavailable anonymously. Set ' +
-                             ', '.join(missing) + ' in the environment and retry.')
-        self.client.login(username, password)
+        cookie = session_cookie()
+        if cookie:
+            self.client.use_session_cookie(*cookie)
+        else:
+            username = os.environ.get('APACHE_USER')
+            password = os.environ.get('APACHE_PASSWORD')
+            missing = [k for k, v in [('APACHE_USER', username),
+                                      ('APACHE_PASSWORD', password)] if not v]
+            if missing:
+                raise FetchError('Private list unavailable anonymously. Set PONYMAIL_COOKIE, store a '
+                                 f'Pony Mail session cookie in {PONYMAIL_COOKIE_FILE}, or set ' +
+                                 ', '.join(missing) + ' in the environment and retry.')
+            self.client.login(username, password)
         self.authenticated = True
         return operation()
+
+
+def session_cookie():
+    """Return (value, source) of a Pony Mail session cookie, or None.
+
+    PONYMAIL_COOKIE takes precedence over the cookie file. Either may hold the bare value or
+    "ponymail=<value>".
+    """
+    raw, source = os.environ.get('PONYMAIL_COOKIE'), 'PONYMAIL_COOKIE'
+    if not raw and PONYMAIL_COOKIE_FILE.is_file():
+        if PONYMAIL_COOKIE_FILE.stat().st_mode & 0o077:
+            print(f'warning: {PONYMAIL_COOKIE_FILE} is readable by other users; '
+                  f'run: chmod 600 {PONYMAIL_COOKIE_FILE}', file=sys.stderr)
+        raw, source = PONYMAIL_COOKIE_FILE.read_text(encoding='utf-8'), str(PONYMAIL_COOKIE_FILE)
+    if not raw:
+        return None
+    value = raw.strip()
+    if value.lower().startswith('cookie:'):
+        value = value[len('cookie:'):].strip()
+    match = re.search(r'(?:^|;\s*)ponymail=([^;\s]+)', value)
+    value = match.group(1) if match else value
+    if not re.fullmatch(r'[A-Za-z0-9._~+/=-]+', value):
+        raise FetchError(f'The Pony Mail session cookie in {source} is not in the expected format.')
+    return value, source
 
 
 def list_address(value):
