@@ -1595,6 +1595,96 @@ function ptbx_cherry_pick_check() {
   )
 }
 
+# Cherry-picks all commits from <upstream>/master that are missing from branch-5.0.
+# In branch-5.0 everything is cherry-picked and the PRs are labeled afterwards with
+# the release label (e.g. release/5.0.1) and cherry-picked/branch-5.0.
+# Commits listed in ~/workspace-pulsar/pulsar-cherry-picks/branch-5.0-skips (one full or
+# abbreviated hash per line, '#' comments allowed) are skipped. This is used for skipping
+# commits such as the master version bump in gradle.properties.
+# Runs in dry-run mode by default, pass --apply to perform the cherry-picks.
+# Usage: ptbx_cherry_pick_branch_5_0 [--apply] [upstream_remote]
+function ptbx_cherry_pick_branch_5_0() {
+  (
+    local APPLY=0
+    if [[ "$1" == "--apply" ]]; then
+      APPLY=1
+      shift
+    fi
+    local UPSTREAM=${1:-origin}
+    local RELEASE_BRANCH=branch-5.0
+    local SKIPS_FILE=${PTBX_CHERRY_PICKS_DIR:-$HOME/workspace-pulsar/pulsar-cherry-picks}/${RELEASE_BRANCH}-skips
+    local CURRENTBRANCH=$(git rev-parse --abbrev-ref --symbolic-full-name HEAD)
+    if [[ "$CURRENTBRANCH" != "$RELEASE_BRANCH" ]]; then
+      echo "Current branch is '$CURRENTBRANCH'. Switch to '$RELEASE_BRANCH' first."
+      return 1
+    fi
+    local RELEASE_NUMBER=$(sed -n 's/^version=//p' gradle.properties | sed 's/-SNAPSHOT//')
+    local SLUG=$(ptbx_gh_slug $UPSTREAM)
+    local SKIP_HASHES=""
+    if [[ -f "$SKIPS_FILE" ]]; then
+      SKIP_HASHES=$(sed 's/#.*//' "$SKIPS_FILE" | gawk 'NF {print $1}' | while read -r SHA; do
+        git rev-parse --verify --quiet "${SHA}^{commit}" || echo "Warning: skip entry '$SHA' not found" >&2
+      done)
+    else
+      echo "Skips file $SKIPS_FILE doesn't exist."
+    fi
+    local CANDIDATES=($(git rev-list --reverse --no-merges --cherry-pick --right-only HEAD...$UPSTREAM/master))
+    local TO_PICK=()
+    local SKIPPED=()
+    local VERSION_BUMPS=()
+    for SHA in "${CANDIDATES[@]}"; do
+      if echo "$SKIP_HASHES" | grep -qxF "$SHA"; then
+        SKIPPED+=("$SHA")
+      else
+        TO_PICK+=("$SHA")
+        if git show --format= -U0 "$SHA" -- gradle.properties | grep -qE '^[-+]version='; then
+          VERSION_BUMPS+=("$SHA")
+        fi
+      fi
+    done
+    if [[ ${#SKIPPED[@]} -gt 0 ]]; then
+      echo -e "\033[34m** Skipped (listed in $SKIPS_FILE) **\033[0m"
+      git log --no-walk=unsorted --oneline "${SKIPPED[@]}"
+    fi
+    if [[ ${#TO_PICK[@]} -eq 0 ]]; then
+      echo "Nothing to cherry-pick from $UPSTREAM/master to $RELEASE_BRANCH."
+      return 0
+    fi
+    echo -e "\033[34m** Commits to cherry-pick from $UPSTREAM/master (${#TO_PICK[@]}) **\033[0m"
+    git log --no-walk=unsorted --color --oneline "${TO_PICK[@]}" \
+      | gawk 'match($0, /\(#([0-9]+)\)/, a) {print $0 " https://github.com/'$SLUG'/pull/" a[1]; next} {print}'
+    if [[ ${#VERSION_BUMPS[@]} -gt 0 ]]; then
+      echo -e "\033[31m** Commits changing the version in gradle.properties that aren't in the skips file **\033[0m"
+      git log --no-walk=unsorted --oneline "${VERSION_BUMPS[@]}"
+      echo "Add them to the skips file if they should be skipped:"
+      for SHA in "${VERSION_BUMPS[@]}"; do
+        echo "mkdir -p $(dirname "$SKIPS_FILE") && echo '$(git log -1 --format='%H %s' "$SHA")' >> $SKIPS_FILE"
+      done
+      if [[ $APPLY -eq 1 ]]; then
+        echo "Refusing to cherry-pick version bump commits."
+        return 1
+      fi
+    fi
+    local PR_NUMBERS=$(git log --no-walk=unsorted --format=%s "${TO_PICK[@]}" | ptbx_parse_gitlog_prnums)
+    if [[ $APPLY -eq 0 ]]; then
+      echo -e "\033[34m** Dry-run, no changes made. Run 'ptbx_cherry_pick_branch_5_0 --apply $UPSTREAM' to cherry-pick. **\033[0m"
+    else
+      if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+        echo "Working tree has uncommitted changes. Commit or stash them first."
+        return 1
+      fi
+      git cherry-pick -x "${TO_PICK[@]}" || {
+        echo -e "\033[31mCherry-pick stopped. Resolve the conflict and run 'git cherry-pick --continue'.\033[0m"
+        return 1
+      }
+    fi
+    if [[ -n "$PR_NUMBERS" ]]; then
+      echo -e "\033[34m** After pushing, label the PRs with release/$RELEASE_NUMBER and cherry-picked/$RELEASE_BRANCH **\033[0m"
+      echo "for PR in $PR_NUMBERS; do gh pr edit \$PR --add-label release/$RELEASE_NUMBER --add-label cherry-picked/$RELEASE_BRANCH --repo $SLUG; done"
+    fi
+  )
+}
+
 function ptbx_cherry_pick_move_to_release() {
   (
     local NEXT_RELEASE=$1
