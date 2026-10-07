@@ -1602,14 +1602,28 @@ function ptbx_cherry_pick_check() {
 # abbreviated hash per line, '#' comments allowed) are skipped. This is used for skipping
 # commits such as the master version bump in gradle.properties.
 # Runs in dry-run mode by default, pass --apply to perform the cherry-picks.
-# Usage: ptbx_cherry_pick_branch_5_0 [--apply] [upstream_remote]
+# With --check-labels, it also checks that the PRs of the commits already in
+# <upstream>/branch-5.0 since the previous v5.0.x release tag (or since the given commit with
+# --check-labels=<commit>) have the release/<version> and cherry-picked/branch-5.0 labels.
+# Missing labels are added only when --apply is passed.
+# Usage: ptbx_cherry_pick_branch_5_0 [--apply] [--check-labels[=<commit>]] [upstream_remote]
 function ptbx_cherry_pick_branch_5_0() {
   (
     local APPLY=0
-    if [[ "$1" == "--apply" ]]; then
-      APPLY=1
+    local CHECK_LABELS=0
+    local CHECK_LABELS_SINCE=""
+    while [[ "$1" == --* ]]; do
+      case "$1" in
+        --apply) APPLY=1 ;;
+        --check-labels) CHECK_LABELS=1 ;;
+        --check-labels=*) CHECK_LABELS=1; CHECK_LABELS_SINCE=${1#*=} ;;
+        *)
+          echo "Usage: ptbx_cherry_pick_branch_5_0 [--apply] [--check-labels[=<commit>]] [upstream_remote]"
+          return 1
+          ;;
+      esac
       shift
-    fi
+    done
     local UPSTREAM=${1:-origin}
     local RELEASE_BRANCH=branch-5.0
     local SKIPS_FILE=${PTBX_CHERRY_PICKS_DIR:-$HOME/workspace-pulsar/pulsar-cherry-picks}/${RELEASE_BRANCH}-skips
@@ -1620,6 +1634,9 @@ function ptbx_cherry_pick_branch_5_0() {
     fi
     local RELEASE_NUMBER=$(sed -n 's/^version=//p' gradle.properties | sed 's/-SNAPSHOT//')
     local SLUG=$(ptbx_gh_slug $UPSTREAM)
+    if [[ $CHECK_LABELS -eq 1 ]]; then
+      _ptbx_cherry_pick_check_labels "$UPSTREAM/$RELEASE_BRANCH" "$RELEASE_BRANCH" "$RELEASE_NUMBER" "$SLUG" $APPLY "$CHECK_LABELS_SINCE" || return 1
+    fi
     local SKIP_HASHES=""
     if [[ -f "$SKIPS_FILE" ]]; then
       SKIP_HASHES=$(sed 's/#.*//' "$SKIPS_FILE" | gawk 'NF {print $1}' | while read -r SHA; do
@@ -1683,6 +1700,54 @@ function ptbx_cherry_pick_branch_5_0() {
       echo "for PR in $PR_NUMBERS; do gh pr edit \$PR --add-label release/$RELEASE_NUMBER --add-label cherry-picked/$RELEASE_BRANCH --repo $SLUG; done"
     fi
   )
+}
+
+# Checks that the PRs of the commits in <branch_ref> since <since> (defaults to the previous
+# release tag v<major>.<minor>.x, candidate tags excluded) have the release/<release_number> and
+# cherry-picked/<release_branch> labels. Adds the missing labels when apply is 1.
+function _ptbx_cherry_pick_check_labels() {
+  local BRANCH_REF=$1 RELEASE_BRANCH=$2 RELEASE_NUMBER=$3 SLUG=$4 APPLY=$5
+  local RELEASE_TAG=${6:-$(git describe --tags --abbrev=0 --match "v${RELEASE_NUMBER%.*}.*" --exclude '*-*' "$BRANCH_REF" 2>/dev/null)}
+  if [[ -z "$RELEASE_TAG" ]]; then
+    echo "Could not find the previous release tag in $BRANCH_REF."
+    return 1
+  fi
+  if ! git rev-parse --verify --quiet "${RELEASE_TAG}^{commit}" >/dev/null; then
+    echo "Commit '$RELEASE_TAG' not found."
+    return 1
+  fi
+  local PICKED_PRS=($(git log --format=%s --reverse "$RELEASE_TAG..$BRANCH_REF" | gawk 'match($0, /\(#([0-9]+)\)/, a) {print a[1]}'))
+  echo -e "\033[34m** Checking labels of ${#PICKED_PRS[@]} PRs in $RELEASE_TAG..$BRANCH_REF **\033[0m"
+  if [[ ${#PICKED_PRS[@]} -eq 0 ]]; then
+    return 0
+  fi
+  # Fetch the labels of the PRs with GraphQL, 50 PRs per request using aliased pullRequest fields.
+  # Prints "<pr number> <missing labels>" for each PR that is missing a required label.
+  local JQ_FILTER='.data.repository[] | [.number, ([.labels.nodes[].name] as $labels
+    | ["release/'$RELEASE_NUMBER'", "cherry-picked/'$RELEASE_BRANCH'"] | map(select(. as $l | $labels | index($l) | not)))]
+    | select(.[1] | length > 0) | "\(.[0]) \(.[1] | join(","))"'
+  local MISSING_LINES=$(printf '%s\n' "${PICKED_PRS[@]}" | xargs -n 50 echo | while read -r BATCH; do
+    local FIELDS=$(echo "$BATCH" | tr ' ' '\n' \
+      | gawk '{printf " pr%s: pullRequest(number: %s) { number labels(first: 100) { nodes { name } } }", $1, $1}')
+    gh api graphql -f owner="${SLUG%%/*}" -f name="${SLUG##*/}" \
+      -f query='query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) {'"$FIELDS"' } }' \
+      --jq "$JQ_FILTER"
+  done)
+  local MISSING=($(echo "$MISSING_LINES" | gawk 'NF {print $1}'))
+  if [[ ${#MISSING[@]} -eq 0 ]]; then
+    echo "All PRs have the release/$RELEASE_NUMBER and cherry-picked/$RELEASE_BRANCH labels."
+    return 0
+  fi
+  echo -e "\033[31m** PRs missing release/$RELEASE_NUMBER or cherry-picked/$RELEASE_BRANCH label (${#MISSING[@]}) **\033[0m"
+  echo "$MISSING_LINES" | gawk 'NF {print "https://github.com/'$SLUG'/pull/" $1 " missing: " $2}'
+  if [[ $APPLY -eq 1 ]]; then
+    for PR_NUMBER in "${MISSING[@]}"; do
+      echo "Editing PR: $PR_NUMBER, adding release/$RELEASE_NUMBER and cherry-picked/$RELEASE_BRANCH labels"
+      gh pr edit "$PR_NUMBER" --add-label "release/$RELEASE_NUMBER" --add-label "cherry-picked/$RELEASE_BRANCH" --repo "$SLUG"
+    done
+  else
+    echo "Pass --apply to add the missing labels."
+  fi
 }
 
 function ptbx_cherry_pick_move_to_release() {
