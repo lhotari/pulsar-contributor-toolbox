@@ -26,9 +26,4 @@ for target_dir in "$HOME/.claude/skills" "$HOME/.agents/skills"; do
         skill="$(basename "$(dirname "$skill_md")")"
         link_skill "$SKILLS_DIR/$skill" "$target_dir/$skill"
     done
-
-    # Expose pr-review-track under the shorter prt alias as well.
-    if [ -f "$SKILLS_DIR/pr-review-track/SKILL.md" ]; then
-        link_skill "$SKILLS_DIR/pr-review-track" "$target_dir/prt"
-    fi
 done
