@@ -1669,7 +1669,7 @@ function ptbx_cherry_pick_branch_5_0() {
     fi
     echo -e "\033[34m** Commits to cherry-pick from $UPSTREAM/master (${#TO_PICK[@]}) **\033[0m"
     git log --no-walk=unsorted --color --oneline "${TO_PICK[@]}" \
-      | gawk 'match($0, /\(#([0-9]+)\)/, a) {print $0 " https://github.com/'$SLUG'/pull/" a[1]; next} {print}'
+      | gawk 'match($0, /.*\(#([0-9]+)\)/, a) {print $0 " https://github.com/'$SLUG'/pull/" a[1]; next} {print}'
     if [[ ${#VERSION_BUMPS[@]} -gt 0 ]]; then
       echo -e "\033[31m** Commits changing the version in gradle.properties that aren't in the skips file **\033[0m"
       git log --no-walk=unsorted --oneline "${VERSION_BUMPS[@]}"
@@ -1716,22 +1716,29 @@ function _ptbx_cherry_pick_check_labels() {
     echo "Commit '$RELEASE_TAG' not found."
     return 1
   fi
-  local PICKED_PRS=($(git log --format=%s --reverse "$RELEASE_TAG..$BRANCH_REF" | gawk 'match($0, /\(#([0-9]+)\)/, a) {print a[1]}'))
+  local PICKED_PRS=($(git log --format=%s --reverse "$RELEASE_TAG..$BRANCH_REF" | gawk 'match($0, /.*\(#([0-9]+)\)/, a) {print a[1]}'))
   echo -e "\033[34m** Checking labels of ${#PICKED_PRS[@]} PRs in $RELEASE_TAG..$BRANCH_REF **\033[0m"
   if [[ ${#PICKED_PRS[@]} -eq 0 ]]; then
     return 0
   fi
   # Fetch the labels of the PRs with GraphQL, 50 PRs per request using aliased pullRequest fields.
   # Prints "<pr number> <missing labels>" for each PR that is missing a required label.
-  local JQ_FILTER='.data.repository[] | [.number, ([.labels.nodes[].name] as $labels
+  # Numbers that don't resolve to a PR (e.g. issue references) come back as null with an error.
+  local JQ_FILTER='.data.repository // {} | .[] | select(. != null) | [.number, ([.labels.nodes[].name] as $labels
     | ["release/'$RELEASE_NUMBER'", "cherry-picked/'$RELEASE_BRANCH'"] | map(select(. as $l | $labels | index($l) | not)))]
     | select(.[1] | length > 0) | "\(.[0]) \(.[1] | join(","))"'
   local MISSING_LINES=$(printf '%s\n' "${PICKED_PRS[@]}" | xargs -n 50 echo | while read -r BATCH; do
     local FIELDS=$(echo "$BATCH" | tr ' ' '\n' \
       | gawk '{printf " pr%s: pullRequest(number: %s) { number labels(first: 100) { nodes { name } } }", $1, $1}')
-    gh api graphql -f owner="${SLUG%%/*}" -f name="${SLUG##*/}" \
-      -f query='query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) {'"$FIELDS"' } }' \
-      --jq "$JQ_FILTER"
+    # gh exits non-zero and ignores --jq when the response contains errors, so filter with jq here
+    local RESPONSE=$(gh api graphql -f owner="${SLUG%%/*}" -f name="${SLUG##*/}" \
+      -f query='query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) {'"$FIELDS"' } }' 2>/dev/null)
+    if [[ -z "$RESPONSE" ]]; then
+      echo "Failed to fetch labels for PRs: $BATCH" >&2
+      continue
+    fi
+    echo "$RESPONSE" | jq -r '.errors[]?.message | "Skipping: \(.)"' >&2
+    echo "$RESPONSE" | jq -r "$JQ_FILTER"
   done)
   local MISSING=($(echo "$MISSING_LINES" | gawk 'NF {print $1}'))
   if [[ ${#MISSING[@]} -eq 0 ]]; then
