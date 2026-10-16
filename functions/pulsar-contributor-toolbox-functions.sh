@@ -1704,9 +1704,11 @@ function ptbx_cherry_pick_branch_5_0() {
 
 # Checks that the PRs of the commits in <branch_ref> since <since> (defaults to the previous
 # release tag v<major>.<minor>.x, candidate tags excluded) have the release/<release_number> and
-# cherry-picked/<release_branch> labels. Adds the missing labels when apply is 1.
+# cherry-picked/<release_branch> labels. Adds the missing labels when apply is 1, otherwise prints
+# <dry_run_hint> (defaults to a hint about --apply).
 function _ptbx_cherry_pick_check_labels() {
   local BRANCH_REF=$1 RELEASE_BRANCH=$2 RELEASE_NUMBER=$3 SLUG=$4 APPLY=$5
+  local DRY_RUN_HINT=${7:-"Pass --apply to add the missing labels."}
   local RELEASE_TAG=${6:-$(git describe --tags --abbrev=0 --match "v${RELEASE_NUMBER%.*}.*" --exclude '*-*' "$BRANCH_REF" 2>/dev/null)}
   if [[ -z "$RELEASE_TAG" ]]; then
     echo "Could not find the previous release tag in $BRANCH_REF."
@@ -1753,8 +1755,64 @@ function _ptbx_cherry_pick_check_labels() {
       gh pr edit "$PR_NUMBER" --add-label "release/$RELEASE_NUMBER" --add-label "cherry-picked/$RELEASE_BRANCH" --repo "$SLUG"
     done
   else
-    echo "Pass --apply to add the missing labels."
+    echo "$DRY_RUN_HINT"
   fi
+}
+
+# Adds the missing release/<version> and cherry-picked/branch-<major>.<minor> labels to the PRs
+# referenced by the commits (last "(#xxx)" in the commit title) between the previous release tag
+# and the release, previous release tag excluded. For example, for 4.2.5 the range is v4.2.4..v4.2.5.
+# Without <version>, the version is taken from gradle.properties or pom.xml with -SNAPSHOT removed
+# and the range ends at HEAD, for example v4.2.5..HEAD for 4.2.6-SNAPSHOT.
+# Works for any maintenance branch, such as branch-4.0 and branch-4.2.
+# Pass --dry-run to only report the missing labels.
+# Usage: ptbx_cherry_pick_add_missing_release_labels [--dry-run] [<x.y.z>] [upstream_remote]
+function ptbx_cherry_pick_add_missing_release_labels() {
+  (
+    local USAGE="Usage: ptbx_cherry_pick_add_missing_release_labels [--dry-run] [<x.y.z>] [upstream_remote]"
+    local APPLY=1
+    if [[ "$1" == "--dry-run" ]]; then
+      APPLY=0
+      shift
+    fi
+    local RELEASE_NUMBER RELEASE_REF
+    if [[ "$1" =~ ^[0-9] ]]; then
+      RELEASE_NUMBER=$1
+      RELEASE_REF="v$RELEASE_NUMBER"
+      shift
+    else
+      if [[ -f gradle.properties ]]; then
+        RELEASE_NUMBER=$(sed -n 's/^version=//p' gradle.properties)
+      else
+        RELEASE_NUMBER=$(ptbx_project_version)
+      fi
+      RELEASE_NUMBER=${RELEASE_NUMBER%-SNAPSHOT}
+      RELEASE_REF=HEAD
+    fi
+    if [[ ! "$RELEASE_NUMBER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      echo "Invalid version '$RELEASE_NUMBER', expected x.y.z."
+      echo "$USAGE"
+      return 1
+    fi
+    local UPSTREAM=${1:-origin}
+    local MAJOR_MINOR=${RELEASE_NUMBER%.*}
+    local PATCH=${RELEASE_NUMBER##*.}
+    if [[ $PATCH -eq 0 ]]; then
+      echo "No previous release tag for $RELEASE_NUMBER in branch-$MAJOR_MINOR."
+      return 1
+    fi
+    local PREV_RELEASE_TAG="v${MAJOR_MINOR}.$((PATCH - 1))"
+    local REF
+    for REF in "$RELEASE_REF" "$PREV_RELEASE_TAG"; do
+      if ! git rev-parse --verify --quiet "${REF}^{commit}" >/dev/null; then
+        echo "'$REF' not found. Run 'git fetch $UPSTREAM --tags' first."
+        return 1
+      fi
+    done
+    local SLUG=$(ptbx_gh_slug $UPSTREAM)
+    _ptbx_cherry_pick_check_labels "$RELEASE_REF" "branch-$MAJOR_MINOR" "$RELEASE_NUMBER" "$SLUG" $APPLY "$PREV_RELEASE_TAG" \
+      "Run without --dry-run to add the missing labels."
+  )
 }
 
 function ptbx_cherry_pick_move_to_release() {
