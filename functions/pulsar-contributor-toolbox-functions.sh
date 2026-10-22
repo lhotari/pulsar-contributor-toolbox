@@ -2177,7 +2177,12 @@ function ptbx_gha_ci_trigger() {
     if [[ "$SLUG" =~ .*/pulsar$ ]]; then
       case "$BRANCH" in
         branch-3.0|branch-3.2|branch-3.3|branch-4.0|branch-4.1|branch-4.2|branch-5.0|master)
-          gh workflow run pulsar-ci.yaml -R $SLUG -r $BRANCH --field collect_coverage=false
+          if [[ "$BRANCH" == "branch-5.0" || "$BRANCH" == "master" ]]; then
+            # pulsar-ci.yaml no longer has the collect_coverage input
+            gh workflow run pulsar-ci.yaml -R $SLUG -r $BRANCH
+          else
+            gh workflow run pulsar-ci.yaml -R $SLUG -r $BRANCH --field collect_coverage=false
+          fi
           gh workflow run pulsar-ci-flaky.yaml -R $SLUG -r $BRANCH --field collect_coverage=false
           gh workflow run ci-go-functions.yaml -R $SLUG -r $BRANCH
           gh workflow run ci-python-functions.yaml -R $SLUG -r $BRANCH
