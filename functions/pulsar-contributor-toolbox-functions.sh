@@ -1560,7 +1560,7 @@ function ptbx_cherry_pick_check() {
       local NEXT_RELEASE_NUMBER=$(pipx run semver bump patch $PROJECT_VERSION 2>/dev/null)
       PR_QUERY="$PR_QUERY,release/$NEXT_RELEASE_NUMBER"
     fi
-    PR_QUERY="$PR_QUERY -label:cherry-picked/$RELEASE_BRANCH -base:$RELEASE_BRANCH"
+    PR_QUERY="$PR_QUERY -label:cherry-picked/$RELEASE_BRANCH -label:skip-cherry-pick -base:$RELEASE_BRANCH"
     local PR_NUMBERS=$(gh pr list -L 100 --search "$PR_QUERY" --json number --jq '["#"+(.[].number|tostring)] | join("|")')
     local SLUG=$(ptbx_gh_slug origin)
     if [[ -z "$PR_NUMBERS" ]]; then
@@ -1601,6 +1601,7 @@ function ptbx_cherry_pick_check() {
 # Commits listed in ~/workspace-pulsar/pulsar-cherry-picks/branch-5.0-skips (one full or
 # abbreviated hash per line, '#' comments allowed) are skipped. This is used for skipping
 # commits such as the master version bump in gradle.properties.
+# Commits of PRs labeled with skip-cherry-pick are also skipped.
 # Runs in dry-run mode by default, pass --apply to perform the cherry-picks.
 # With --check-labels, it also checks that the PRs of the commits already in
 # <upstream>/branch-5.0 since the previous v5.0.x release tag (or since the given commit with
@@ -1645,13 +1646,22 @@ function ptbx_cherry_pick_branch_5_0() {
     else
       echo "Skips file $SKIPS_FILE doesn't exist."
     fi
+    local SKIP_LABEL_PRS
+    SKIP_LABEL_PRS=$(gh pr list -L 1000 --repo "$SLUG" --state merged --search "label:skip-cherry-pick" --json number --jq '.[].number') || {
+      echo "Failed to fetch PRs labeled with skip-cherry-pick."
+      return 1
+    }
     local CANDIDATES=($(git rev-list --reverse --no-merges --cherry-pick --right-only HEAD...$UPSTREAM/master))
     local TO_PICK=()
     local SKIPPED=()
+    local SKIPPED_BY_LABEL=()
     local VERSION_BUMPS=()
     for SHA in "${CANDIDATES[@]}"; do
+      local PR_NUMBER=$(git log -1 --format=%s "$SHA" | gawk 'match($0, /.*\(#([0-9]+)\)/, a) {print a[1]}')
       if echo "$SKIP_HASHES" | grep -qxF "$SHA"; then
         SKIPPED+=("$SHA")
+      elif [[ -n "$PR_NUMBER" ]] && echo "$SKIP_LABEL_PRS" | grep -qxF "$PR_NUMBER"; then
+        SKIPPED_BY_LABEL+=("$SHA")
       else
         TO_PICK+=("$SHA")
         if git show --format= -U0 "$SHA" -- gradle.properties | grep -qE '^[-+]version='; then
@@ -1662,6 +1672,11 @@ function ptbx_cherry_pick_branch_5_0() {
     if [[ ${#SKIPPED[@]} -gt 0 ]]; then
       echo -e "\033[34m** Skipped (listed in $SKIPS_FILE) **\033[0m"
       git log --no-walk=unsorted --oneline "${SKIPPED[@]}"
+    fi
+    if [[ ${#SKIPPED_BY_LABEL[@]} -gt 0 ]]; then
+      echo -e "\033[34m** Skipped (PR labeled with skip-cherry-pick) **\033[0m"
+      git log --no-walk=unsorted --oneline "${SKIPPED_BY_LABEL[@]}" \
+        | gawk 'match($0, /.*\(#([0-9]+)\)/, a) {print $0 " https://github.com/'$SLUG'/pull/" a[1]; next} {print}'
     fi
     if [[ ${#TO_PICK[@]} -eq 0 ]]; then
       echo "Nothing to cherry-pick from $UPSTREAM/master to $RELEASE_BRANCH."
