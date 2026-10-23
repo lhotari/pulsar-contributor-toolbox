@@ -1718,13 +1718,27 @@ function ptbx_cherry_pick_branch_5_0() {
 }
 
 # Checks that the PRs of the commits in <branch_ref> since <since> (defaults to the previous
-# release tag v<major>.<minor>.x, candidate tags excluded) have the release/<release_number> and
+# release tag v<major>.<minor>.<patch-1>, or its latest candidate tag when the release hasn't been
+# tagged yet, falling back to the nearest v<major>.<minor>.x tag) have the release/<release_number> and
 # cherry-picked/<release_branch> labels. Adds the missing labels when apply is 1, otherwise prints
 # <dry_run_hint> (defaults to a hint about --apply).
 function _ptbx_cherry_pick_check_labels() {
   local BRANCH_REF=$1 RELEASE_BRANCH=$2 RELEASE_NUMBER=$3 SLUG=$4 APPLY=$5
   local DRY_RUN_HINT=${7:-"Pass --apply to add the missing labels."}
-  local RELEASE_TAG=${6:-$(git describe --tags --abbrev=0 --match "v${RELEASE_NUMBER%.*}.*" --exclude '*-*' "$BRANCH_REF" 2>/dev/null)}
+  local RELEASE_TAG=$6
+  local PATCH=${RELEASE_NUMBER##*.}
+  if [[ -z "$RELEASE_TAG" && $PATCH -gt 0 ]]; then
+    local PREV_RELEASE_TAG="v${RELEASE_NUMBER%.*}.$((PATCH - 1))"
+    if git rev-parse --verify --quiet "${PREV_RELEASE_TAG}^{commit}" >/dev/null; then
+      RELEASE_TAG=$PREV_RELEASE_TAG
+    else
+      # the previous release hasn't been tagged yet (vote in progress), use its latest candidate tag
+      RELEASE_TAG=$(git describe --tags --abbrev=0 --match "${PREV_RELEASE_TAG}-candidate-*" "$BRANCH_REF" 2>/dev/null)
+    fi
+  fi
+  if [[ -z "$RELEASE_TAG" ]]; then
+    RELEASE_TAG=$(git describe --tags --abbrev=0 --match "v${RELEASE_NUMBER%.*}.*" --exclude '*-*' "$BRANCH_REF" 2>/dev/null)
+  fi
   if [[ -z "$RELEASE_TAG" ]]; then
     echo "Could not find the previous release tag in $BRANCH_REF."
     return 1
