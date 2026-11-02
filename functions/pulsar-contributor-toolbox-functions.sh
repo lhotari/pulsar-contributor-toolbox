@@ -1652,13 +1652,25 @@ function ptbx_cherry_pick_branch_5_0() {
       return 1
     }
     local CANDIDATES=($(git rev-list --reverse --no-merges --cherry-pick --right-only HEAD...$UPSTREAM/master))
+    # --cherry-pick only detects commits with an identical patch. Also detect commits that have
+    # already been cherry-picked with changes (e.g. conflict resolution) by the
+    # "(cherry picked from commit <sha>)" trailer or by the PR number in the commit title.
+    local MERGE_BASE=$(git merge-base HEAD $UPSTREAM/master)
+    local PICKED_SHAS=$(git log --format=%B "$MERGE_BASE..HEAD" \
+      | gawk 'match($0, /\(cherry picked from commit ([0-9a-f]{40})\)/, a) {print a[1]}')
+    local PICKED_PR_NUMBERS=$(git log --format=%s "$MERGE_BASE..HEAD" \
+      | gawk '!/^Revert / && match($0, /.*\(#([0-9]+)\)/, a) {print a[1]}')
     local TO_PICK=()
     local SKIPPED=()
     local SKIPPED_BY_LABEL=()
+    local ALREADY_PICKED=()
     local VERSION_BUMPS=()
     for SHA in "${CANDIDATES[@]}"; do
-      local PR_NUMBER=$(git log -1 --format=%s "$SHA" | gawk 'match($0, /.*\(#([0-9]+)\)/, a) {print a[1]}')
-      if echo "$SKIP_HASHES" | grep -qxF "$SHA"; then
+      local PR_NUMBER=$(git log -1 --format=%s "$SHA" | gawk '!/^Revert / && match($0, /.*\(#([0-9]+)\)/, a) {print a[1]}')
+      if echo "$PICKED_SHAS" | grep -qxF "$SHA" \
+        || { [[ -n "$PR_NUMBER" ]] && echo "$PICKED_PR_NUMBERS" | grep -qxF "$PR_NUMBER"; }; then
+        ALREADY_PICKED+=("$SHA")
+      elif echo "$SKIP_HASHES" | grep -qxF "$SHA"; then
         SKIPPED+=("$SHA")
       elif [[ -n "$PR_NUMBER" ]] && echo "$SKIP_LABEL_PRS" | grep -qxF "$PR_NUMBER"; then
         SKIPPED_BY_LABEL+=("$SHA")
@@ -1669,6 +1681,10 @@ function ptbx_cherry_pick_branch_5_0() {
         fi
       fi
     done
+    if [[ ${#ALREADY_PICKED[@]} -gt 0 ]]; then
+      echo -e "\033[34m** Skipped (already cherry-picked to $RELEASE_BRANCH with changes) **\033[0m"
+      git log --no-walk=unsorted --oneline "${ALREADY_PICKED[@]}"
+    fi
     if [[ ${#SKIPPED[@]} -gt 0 ]]; then
       echo -e "\033[34m** Skipped (listed in $SKIPS_FILE) **\033[0m"
       git log --no-walk=unsorted --oneline "${SKIPPED[@]}"
@@ -1768,9 +1784,23 @@ function _ptbx_cherry_pick_check_labels() {
       echo "Failed to fetch labels for PRs: $BATCH" >&2
       continue
     fi
-    echo "$RESPONSE" | jq -r '.errors[]?.message | "Skipping: \(.)"' >&2
+    # PRs that are hidden (e.g. the author's GitHub account was suspended or deleted) or numbers
+    # that refer to issues come back as NOT_FOUND errors, collect them as "! <number>" lines
+    echo "$RESPONSE" | jq -r '.errors[]? | select(.type == "NOT_FOUND" and (.path[1] // "" | startswith("pr")))
+      | "! \(.path[1] | ltrimstr("pr"))"'
+    echo "$RESPONSE" | jq -r '.errors[]? | select(.type != "NOT_FOUND" or (.path[1] // "" | startswith("pr") | not))
+      | "Error: \(.message)"' >&2
     echo "$RESPONSE" | jq -r "$JQ_FILTER"
   done)
+  local UNRESOLVED=($(echo "$MISSING_LINES" | gawk '$1 == "!" {print $2}'))
+  MISSING_LINES=$(echo "$MISSING_LINES" | gawk '$1 != "!"')
+  if [[ ${#UNRESOLVED[@]} -gt 0 ]]; then
+    echo -e "\033[33m** Skipped ${#UNRESOLVED[@]} PR numbers not found in $SLUG (hidden PRs, e.g. author account suspended or deleted, or issue references) **\033[0m"
+    local PR_NUMBER
+    for PR_NUMBER in "${UNRESOLVED[@]}"; do
+      git log -1 --format="%h %s (author: %an)" -P --grep="\\(#$PR_NUMBER\\)" "$RELEASE_TAG..$BRANCH_REF"
+    done
+  fi
   local MISSING=($(echo "$MISSING_LINES" | gawk 'NF {print $1}'))
   if [[ ${#MISSING[@]} -eq 0 ]]; then
     echo "All PRs have the release/$RELEASE_NUMBER and cherry-picked/$RELEASE_BRANCH labels."
