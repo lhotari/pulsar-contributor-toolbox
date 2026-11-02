@@ -1601,7 +1601,7 @@ function ptbx_cherry_pick_check() {
 # Commits listed in ~/workspace-pulsar/pulsar-cherry-picks/branch-5.0-skips (one full or
 # abbreviated hash per line, '#' comments allowed) are skipped. This is used for skipping
 # commits such as the master version bump in gradle.properties.
-# Commits of PRs labeled with skip-cherry-pick are also skipped.
+# Commits of PRs labeled with skip-cherry-pick and empty commits are also skipped.
 # Runs in dry-run mode by default, pass --apply to perform the cherry-picks.
 # With --check-labels, it also checks that the PRs of the commits already in
 # <upstream>/branch-5.0 since the previous v5.0.x release tag (or since the given commit with
@@ -1664,12 +1664,16 @@ function ptbx_cherry_pick_branch_5_0() {
     local SKIPPED=()
     local SKIPPED_BY_LABEL=()
     local ALREADY_PICKED=()
+    local EMPTY_COMMITS=()
     local VERSION_BUMPS=()
     for SHA in "${CANDIDATES[@]}"; do
       local PR_NUMBER=$(git log -1 --format=%s "$SHA" | gawk '!/^Revert / && match($0, /.*\(#([0-9]+)\)/, a) {print a[1]}')
       if echo "$PICKED_SHAS" | grep -qxF "$SHA" \
         || { [[ -n "$PR_NUMBER" ]] && echo "$PICKED_PR_NUMBERS" | grep -qxF "$PR_NUMBER"; }; then
         ALREADY_PICKED+=("$SHA")
+      elif git diff-tree --quiet "$SHA^" "$SHA"; then
+        # empty commits (e.g. a PR merged without changes) would stop the cherry-pick
+        EMPTY_COMMITS+=("$SHA")
       elif echo "$SKIP_HASHES" | grep -qxF "$SHA"; then
         SKIPPED+=("$SHA")
       elif [[ -n "$PR_NUMBER" ]] && echo "$SKIP_LABEL_PRS" | grep -qxF "$PR_NUMBER"; then
@@ -1681,6 +1685,10 @@ function ptbx_cherry_pick_branch_5_0() {
         fi
       fi
     done
+    if [[ ${#EMPTY_COMMITS[@]} -gt 0 ]]; then
+      echo -e "\033[34m** Skipped (empty commit) **\033[0m"
+      git log --no-walk=unsorted --oneline "${EMPTY_COMMITS[@]}"
+    fi
     if [[ ${#ALREADY_PICKED[@]} -gt 0 ]]; then
       echo -e "\033[34m** Skipped (already cherry-picked to $RELEASE_BRANCH with changes) **\033[0m"
       git log --no-walk=unsorted --oneline "${ALREADY_PICKED[@]}"
