@@ -1714,6 +1714,17 @@ function ptbx_cherry_pick_branch_5_0() {
       fi
     fi
     local PR_NUMBERS=$(git log --no-walk=unsorted --format=%s "${TO_PICK[@]}" | ptbx_parse_gitlog_prnums)
+    if [[ -n "$PR_NUMBERS" ]]; then
+      # PRs that can't be found (hidden PRs, e.g. author account suspended or deleted) are still
+      # cherry-picked, but they are reported and left out of the labeling command since they can't be labeled
+      local NOT_FOUND_PRS=$(echo "$PR_NUMBERS" | tr ' ' '\n' | _ptbx_gh_not_found_prs "$SLUG")
+      if [[ -n "$NOT_FOUND_PRS" ]]; then
+        echo -e "\033[33m** PRs not found in $SLUG (hidden PRs, e.g. author account suspended or deleted), cherry-picking the commits anyway **\033[0m"
+        git log --no-walk=unsorted --format="%h %s (author: %an)" "${TO_PICK[@]}" \
+          | grep -F -f <(echo "$NOT_FOUND_PRS" | gawk '{print "(#" $1 ")"}')
+        PR_NUMBERS=$(echo "$PR_NUMBERS" | tr ' ' '\n' | grep -vxF -f <(echo "$NOT_FOUND_PRS") | tr '\n' ' ' | sed 's/ $//')
+      fi
+    fi
     if [[ $APPLY -eq 0 ]]; then
       echo -e "\033[34m** Dry-run, no changes made. Run 'ptbx_cherry_pick_branch_5_0 --apply $UPSTREAM' to cherry-pick. **\033[0m"
     else
@@ -1731,6 +1742,28 @@ function ptbx_cherry_pick_branch_5_0() {
       echo "for PR in $PR_NUMBERS; do gh pr edit \$PR --add-label release/$RELEASE_NUMBER --add-label cherry-picked/$RELEASE_BRANCH --repo $SLUG; done"
     fi
   )
+}
+
+# Reads PR numbers from stdin (whitespace separated) and prints the ones that don't resolve to a PR
+# in <slug>, one per line. This happens for hidden PRs (e.g. the author's GitHub account was
+# suspended or deleted) and issue numbers.
+# Queries GraphQL with 50 PRs per request using aliased pullRequest fields.
+# Usage: echo <pr_number>... | _ptbx_gh_not_found_prs <slug>
+function _ptbx_gh_not_found_prs() {
+  local SLUG=$1
+  xargs -n 50 echo | while read -r BATCH; do
+    local FIELDS=$(echo "$BATCH" | tr ' ' '\n' \
+      | gawk '{printf " pr%s: pullRequest(number: %s) { number }", $1, $1}')
+    # gh exits non-zero when the response contains errors, so ignore the exit code and check the response
+    local RESPONSE=$(gh api graphql -f owner="${SLUG%%/*}" -f name="${SLUG##*/}" \
+      -f query='query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) {'"$FIELDS"' } }' 2>/dev/null)
+    if [[ -z "$RESPONSE" ]]; then
+      echo "Failed to check whether PRs exist: $BATCH" >&2
+      continue
+    fi
+    echo "$RESPONSE" | jq -r '.errors[]? | select(.type == "NOT_FOUND" and (.path[1] // "" | startswith("pr")))
+      | .path[1] | ltrimstr("pr")'
+  done
 }
 
 # Checks that the PRs of the commits in <branch_ref> since <since> (defaults to the previous
