@@ -17,10 +17,10 @@ function runPlan(t, usage, json = true) {
   return result;
 }
 
-const solHigh = { model: 'gpt-6.1-sol', effort: 'high' };
+const solHigh = { model: 'gpt-6.2-sol', effort: 'high' };
 for (const [percent, budget, thoughtful, reReview] of [
-  [10, 'rich', { model: 'gpt-6-astra', effort: 'xhigh' }, { model: 'gpt-6-astra', effort: 'medium' }],
-  [60, 'normal', { model: 'gpt-6-astra', effort: 'high' }, { model: 'gpt-6.1-sol', effort: 'xhigh' }],
+  [10, 'rich', { model: 'gpt-6.2-astra', effort: 'xhigh' }, { model: 'gpt-6.2-astra', effort: 'medium' }],
+  [60, 'normal', { model: 'gpt-6.2-astra', effort: 'high' }, { model: 'gpt-6.2-sol', effort: 'xhigh' }],
   [80, 'tight', solHigh, solHigh],
   [95, 'critical', solHigh, solHigh],
 ]) {
@@ -34,7 +34,7 @@ for (const [percent, budget, thoughtful, reReview] of [
     assert.deepEqual(plan.firstScan, solHigh);
     assert.deepEqual(plan.thoughtful, thoughtful);
     assert.deepEqual(plan.reReview, reReview);
-    assert.deepEqual(plan.simple, { model: 'gpt-6.1-sol', effort: 'low' });
+    assert.deepEqual(plan.simple, { model: 'gpt-6.2-sol', effort: 'low' });
   });
 }
 
@@ -51,7 +51,7 @@ test('a reached spend control remains blocked despite cheaper defaults', (t) => 
 test('text output exposes the first-scan and re-review pairs', (t) => {
   const result = runPlan(t, {}, false);
   assert.equal(result.status, 0);
-  assert.match(result.stdout, /first scan: gpt-6\.1-sol --effort high/);
-  assert.match(result.stdout, /re-review: +gpt-6-astra --effort medium/);
-  assert.match(result.stdout, /simple: +gpt-6\.1-sol --effort low/);
+  assert.match(result.stdout, /first scan: gpt-6\.2-sol --effort high/);
+  assert.match(result.stdout, /re-review: +gpt-6.2-astra --effort medium/);
+  assert.match(result.stdout, /simple: +gpt-6\.2-sol --effort low/);
 });

@@ -1,6 +1,6 @@
 ---
 name: pr-review
-description: Review a GitHub PR locally using its metadata and diff as context. In Claude Code, adapts a Sonnet-and-Codex consensus pipeline to the remaining Claude allowance. In Codex, defaults to Codex-only review; an explicit request for Claude Code uses the claude-review-timeboxed skill through the local CLI. Use when asked to review a pull request, check a PR, or analyze a PR. Reports findings locally — never posts GitHub comments. Pass --out to also emit machine-readable findings for the pr-review-track skill, --since to review only what changed after a given commit, and --tier to override the Claude Code budget decision.
+description: Review a GitHub PR locally using its metadata and diff as context. In Claude Code, adapts an Opus-and-Codex consensus pipeline to the remaining Claude allowance. In Codex, defaults to Codex-only review; an explicit request for Claude Code uses the claude-review-timeboxed skill through the local CLI. Use when asked to review a pull request, check a PR, or analyze a PR. Reports findings locally — never posts GitHub comments. Pass --out to also emit machine-readable findings for the pr-review-track skill, --since to review only what changed after a given commit, and --tier to override the Claude Code budget decision.
 argument-hint: |
   <PR_NUMBER> [--repo owner/repo] [--prompt "custom instructions"] [--tier full|standard|lean|codex|solo] [--since <sha>] [--out <dir>]
 allowed-tools: Bash(gh:*), Bash(git:*), Bash(node:*), Bash(mkdir:*), Read, Write, Glob, Grep, Agent, Workflow
@@ -23,8 +23,8 @@ Select the pipeline from the host that loaded this skill:
   security gate and shared-context rules here, then use that skill's review
   procedure instead of duplicating rounds 1–3 below. Codex verifies the result
   and preserves the output contract when `--out` was requested.
-- **Running in Claude Code:** use the budget-aware Sonnet/Codex pipeline. The
-  Sonnet ↔ Codex cross-review described here applies only in Claude Code.
+- **Running in Claude Code:** use the budget-aware Opus/Codex pipeline. The
+  Opus ↔ Codex cross-review described here applies only in Claude Code.
 
 Do not identify the host from the repository path or the name of the skill
 directory. The current agent runtime and its available native tools determine
@@ -65,7 +65,11 @@ bypass this gate. Only a later review of a new, demonstrably safe diff may
 produce a new `clear` classification.
 
 The Claude Code pipeline is **multi-model by design and budget-aware by
-necessity**. Two facts shape it:
+necessity**. Reviewers and validators are separate agents because they give
+independent views from fresh context. That is the only reason to delegate here.
+Every handoff returns a lossy summary, so the main session keeps everything that
+depends on what it already holds: briefing, synthesis, adjudication, and the
+final source checks. Two more facts shape it:
 
 - **Codex bills against a separate quota.** When the Claude allowance is under
   pressure, moving work to Codex costs nothing that is scarce.
@@ -75,16 +79,15 @@ necessity**. Two facts shape it:
   option — a fresh subagent on a smaller model is not automatically cheaper.
 
 **Models.** Honor an explicit user model request before these defaults. Claude
-subagents run on **Sonnet 5.5** (`sonnet`). Codex first scans use **`gpt-6.1-sol`
-at `high` effort** at every tier. For initial reviews, deeper validation uses `gpt-6-astra` at `high`
+subagents doing review judgment (reviewers, validators) run on **Opus 5.5**
+(`opus`); quick work runs on **Sonnet 5.5** (`sonnet`). Codex first scans use **`gpt-6.2-sol`
+at `high` effort** at every tier. For initial reviews, deeper validation uses `gpt-6.2-astra` at `high`
 effort (`xhigh` with a rich Codex budget); when budget is tight or critical,
-use `gpt-6.1-sol` at `high` for all review judgment. Follow model/effort pairs
+use `gpt-6.2-sol` at `high` for all review judgment. Follow model/effort pairs
 supplied by `pr-review-track`, with its `firstScan` pair for initial scans.
-`gpt-6.1-sol` is the only cheaper Codex default. Lightweight chores (listing,
+`gpt-6.2-sol` is the only cheaper Codex default. Lightweight chores (listing,
 formatting, extraction) use it at `low` effort, or Sonnet 5.5 at low effort.
-Sonnet 5.5 at `high` or `xhigh` performs about as well as Fable 5.1 on most
-review work, so work that once went to Fable runs on Sonnet 5.5 at `xhigh`.
-**Fable 5.1** (`fable`) is reserved for one short check at `medium` effort once
+**Fable 5.2** (`fable`) is reserved for one short check at `medium` effort once
 every detail is on the table — the round 4 check at `full`. Claude subagents that need an effort
 are launched through the `Workflow` tool, whose `agent()` takes `model` and
 `effort`; the `Agent` tool cannot set effort.
@@ -98,10 +101,10 @@ adjudication instead of the initial-review deeper-validation defaults:
 
 | Codex budget | Re-review follow-up and final adjudication |
 |---|---|
-| `rich` | `gpt-6-astra` at `medium` |
-| `normal` | `gpt-6.1-sol` at `xhigh` |
-| `tight` / `critical` | `gpt-6.1-sol` at `high` |
-| unavailable / not supplied | `gpt-6.1-sol` at `high` |
+| `rich` | `gpt-6.2-astra` at `medium` |
+| `normal` | `gpt-6.2-sol` at `xhigh` |
+| `tight` / `critical` | `gpt-6.2-sol` at `high` |
+| unavailable / not supplied | `gpt-6.2-sol` at `high` |
 
 Use `pr-review-track`'s `reReview` pair when supplied. A `full` tier, complex
 PR, or additional validation round does not raise this ceiling. Skip the Fable
@@ -160,8 +163,8 @@ Honour the tier. If the script is missing or errors, use `standard` and note it.
 
 | tier | Round 1 | Cross-validation | Claude spend |
 |---|---|---|---|
-| `full` | Sonnet 5.5 **and** Codex, independently | **both** validate | 2 Sonnet 5.5 `xhigh` passes + one short Fable 5.1 `medium` check + main session |
-| `standard` | Sonnet 5.5 **and** Codex, independently | Codex only | 1 Sonnet 5.5 `xhigh` pass + main session |
+| `full` | Opus 5.5 **and** Codex, independently | **both** validate | 2 Opus 5.5 `xhigh` passes + one short Fable 5.2 `medium` check + main session |
+| `standard` | Opus 5.5 **and** Codex, independently | Codex only | 1 Opus 5.5 `xhigh` pass + main session |
 | `lean` | **Codex only**, Sol `high` first scan | Codex, second pass framed to refute | main session inline only |
 | `codex` | **Codex only** | Codex, independent refutation pass | main session adjudicates a trimmed brief |
 | `solo` | none — one main-session pass inline | none | main session inline only |
@@ -270,22 +273,22 @@ On a **Claude Code host**, at `full` and `standard`, launch both reviewers in th
 same message so they actually run in parallel. At `lean` and `codex`, run Codex
 alone — skip Reviewer A.
 
-**Reviewer A — Claude Sonnet 5.5 at `xhigh`** (`full` and `standard` only), as a
+**Reviewer A — Claude Opus 5.5 at `xhigh`** (`full` and `standard` only), as a
 one-agent workflow so the effort can be set:
 
 ```javascript
-export const meta = { name: 'pr-review-sonnet', description: 'Sonnet 5.5 xhigh PR review' }
+export const meta = { name: 'pr-review-opus', description: 'Opus 5.5 xhigh PR review' }
 return await agent(`Read ${args.work}/brief.md and review PR #${args.pr}. Repo checkout for context:
   ${args.work}/tree (read it, do not modify it). Review only — never edit files, never post to GitHub.
   Return findings in the exact format specified in the brief, and nothing else:
   no preamble, no restatement of the diff.`,
-  { label: 'sonnet-pr-reviewer', model: 'sonnet', effort: 'xhigh' })
+  { label: 'opus-pr-reviewer', model: 'opus', effort: 'xhigh' })
 ```
 
 Pass `args: { work: "<WORK>", pr: <N> }`. The workflow runs in the background and
 its result is the reviewer's findings text.
 
-**Reviewer B — Codex `gpt-6.1-sol` at `high` effort** by default. An explicit
+**Reviewer B — Codex `gpt-6.2-sol` at `high` effort** by default. An explicit
 user model request takes precedence. Resolve the companion script first (the
 install path is version-stamped):
 
@@ -299,7 +302,7 @@ name the pinned base/head refs, worktree (if available), security-gate result,
 and any custom review focus. With a worktree:
 
 ```bash
-node "$CODEX_COMPANION" task --cwd "$WORK/tree" --model gpt-6.1-sol --effort high --prompt-file "$WORK/brief.md"
+node "$CODEX_COMPANION" task --cwd "$WORK/tree" --model gpt-6.2-sol --effort high --prompt-file "$WORK/brief.md"
 ```
 
 Without a worktree, omit `--cwd "$WORK/tree"` and review the brief under the
@@ -314,7 +317,7 @@ it completes.
 
 **Degradation** (state it in the output, never silently skip): if the companion script is
 missing or Codex is not set up, the Codex-led tiers have no reviewer — fall back to `solo`
-rather than pretending; `standard` continues with Sonnet alone. If subagents are unavailable,
+rather than pretending; `standard` continues with Opus alone. If subagents are unavailable,
 do the single-model review of step 6 directly.
 
 ### 4. Finding format (all reviewers, all rounds)
@@ -355,7 +358,7 @@ keeping the reason. Write the result to `$WORK/candidate.md`.
   Frame the pass to refute the candidates and find material misses. Never use
   Claude models in this pipeline.
 - `full` — both reviewers, concurrently, neither seeing the other's verdict
-  (the Sonnet validator is another `model: 'sonnet', effort: 'xhigh'` workflow agent).
+  (the Opus validator is another `model: 'opus', effort: 'xhigh'` workflow agent).
 - `standard` — Codex only.
 - `lean` / `codex` — Codex only, a second pass explicitly framed to *refute*:
   `task --model <validation-model> --effort <validation-effort> --cwd "$WORK/tree" --prompt-file "$WORK/crossvalidate.md"`.
@@ -390,7 +393,7 @@ Adjudicate in the main session, with the code open:
 With a single validator (`standard` and below) a lone REFUTE is not a majority —
 re-read the code and decide, rather than deferring to it.
 
-**Round 4 — a short Fable 5.1 check (initial reviews at `full` only).** Once adjudication is drafted,
+**Round 4 — a short Fable 5.2 check (initial reviews at `full` only).** Once adjudication is drafted,
 every detail exists: write `$WORK/final.md` with the surviving findings, the dropped
 ones with reasons, and the split verdicts you settled. Then ask one
 `model: 'fable', effort: 'medium'` workflow agent to read it (and the worktree where it
@@ -440,7 +443,7 @@ The full schema lives in `../pr-review-track/references/findings-schema.md`. In 
   "schema": 1, "repo": "apache/pulsar", "pr": 26289, "head": "<sha>",
   "kind": "initial",
   "tier": "standard",
-  "reviewers": ["Claude Sonnet 5.5", "Codex gpt-6.1-sol", "<actual validator/adjudicator>"],
+  "reviewers": ["Claude Opus 5.5", "Codex gpt-6.2-sol", "<actual validator/adjudicator>"],
   "coverage": "full-repo",
   "summary": "<the Summary section, as markdown>",
   "recommendedEvent": "COMMENT",

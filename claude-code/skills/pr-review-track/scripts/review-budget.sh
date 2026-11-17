@@ -15,7 +15,7 @@
 #   Claude side (wraps claude-usage.sh --json) -> a `pr-review` tier, plus a
 #                                                 gate on the short Fable check
 #   Codex side  (wraps codex-usage.sh  --json) -> model/effort pairs for review scans, follow-up, re-reviews,
-#                                                 and gpt-6.1-sol for simple work
+#                                                 and gpt-6.2-sol for simple work
 #
 # Usage:
 #   ./review-budget.sh                # both halves, compact report
@@ -182,17 +182,17 @@ codex_plan() {
        else "rich" end) as $budget
 
     # First scans always use Sol high; constrained budgets keep follow-up there too.
-    | { model: "gpt-6.1-sol", effort: "high" } as $firstScan
+    | { model: "gpt-6.2-sol", effort: "high" } as $firstScan
     | (if $budget == "critical" or $budget == "tight" then $firstScan
-       elif $budget == "normal" then { model: "gpt-6-astra", effort: "high" }
-       else { model: "gpt-6-astra", effort: "xhigh" } end) as $thoughtful
+       elif $budget == "normal" then { model: "gpt-6.2-astra", effort: "high" }
+       else { model: "gpt-6.2-astra", effort: "xhigh" } end) as $thoughtful
 
     # Re-reviews have a separate ceiling, including their final validation.
-    | (if $budget == "rich" then { model: "gpt-6-astra", effort: "medium" }
-       elif $budget == "normal" then { model: "gpt-6.1-sol", effort: "xhigh" }
+    | (if $budget == "rich" then { model: "gpt-6.2-astra", effort: "medium" }
+       elif $budget == "normal" then { model: "gpt-6.2-sol", effort: "xhigh" }
        else $firstScan end) as $reReview
 
-    | { model: "gpt-6.1-sol", effort: "low" } as $simple
+    | { model: "gpt-6.2-sol", effort: "low" } as $simple
 
     | (if $blocked then "rate limit or spend control already reached — Codex cannot carry the batch either"
        elif $windows | length == 0 then "no rate limit windows reported\(if ($root.planType // null) then " for a \($root.planType) plan" else "" end)"

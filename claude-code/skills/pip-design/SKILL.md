@@ -1,7 +1,7 @@
 ---
 name: pip-design
 description: Design or refine an Apache Pulsar PIP (Pulsar Improvement Proposal) from a draft into a votable, minimal, 5-year-durable proposal. Runs multi-model multi-viewpoint reviews, an iterative minimalism-refinement loop to a fixpoint, and (when the PIP has a reference implementation) the full design-doc + code + CI pipeline. Use when asked to design a PIP, review/harden a PIP draft, or drive a proposal to "nothing left to take away."
-argument-hint: "<path-to-pip-draft.md> [--impl <impl-branch-or-worktree>] [--reviewers sonnet,codex,fable]"
+argument-hint: "<path-to-pip-draft.md> [--impl <impl-branch-or-worktree>] [--reviewers opus,codex,fable]"
 allowed-tools: Bash(*), Read, Write, Edit, Glob, Grep, Agent, Skill, SendMessage
 ---
 
@@ -32,15 +32,27 @@ Read the PIP end to end. If it has (or claims) a reference implementation, **ver
 Run **independent reviews from different models, each with a distinct lens.** Convergence across models = highest confidence; a lone finding is a hypothesis to verify.
 
 Suggested panel (adapt to what's available):
-- **Sonnet 5.5 (xhigh)** — design coherence + subtractive minimalism (smallest sufficient type set; does each element pull its weight in the whole shape?).
-- **Sonnet 5.5 (xhigh)** — durability + implementability (which decisions are safe 5-year bets vs churn-risk; premature generalization; missing invariants that force a later break; third-party-implementer traps).
-- **Codex (`gpt-6.1-sol`, high reasoning for the first scan)** — adversarial ("argue the design is bigger than it needs to be"; security; backward-compat).
+- **Opus 5.5 (xhigh)** — design coherence + subtractive minimalism (smallest sufficient type set; does each element pull its weight in the whole shape?).
+- **Opus 5.5 (xhigh)** — durability + implementability (which decisions are safe 5-year bets vs churn-risk; premature generalization; missing invariants that force a later break; third-party-implementer traps).
+- **Codex (`gpt-6.2-sol`, high reasoning for the first scan)** — adversarial ("argue the design is bigger than it needs to be"; security; backward-compat).
 
-Give each reviewer the SAME lens questions + a shared list of seed candidates, but let each bring its angle. Have them return structured verdicts: **CUT / RESHAPE / KEEP** per element, with rationale, an additive add-back path, and the tradeoff. (Run the Sonnet reviewers as parallel `Workflow` agents with `model: 'sonnet', effort: 'xhigh'`; Codex via `codex exec -m gpt-6.1-sol -c model_reasoning_effort="high"`.) Honor explicit user model requests before these defaults. Codex first scans use `gpt-6.1-sol` at `high` effort; deeper validation may use `gpt-6-astra` at `high` when budget allows. Under tight or critical budgets, all Codex review judgment uses `gpt-6.1-sol` at `high`. It is the only cheaper Codex default. Very low-intelligence chores (collecting call sites, formatting tables) may run on Sonnet 5.5 at low effort or `gpt-6.1-sol` at `low` effort.
+Give each reviewer the SAME lens questions + a shared list of seed candidates, but let each bring its angle. Have them return structured verdicts: **CUT / RESHAPE / KEEP** per element, with rationale, an additive add-back path, and the tradeoff. (Run the Opus reviewers as parallel `Workflow` agents with `model: 'opus', effort: 'xhigh'`; Codex via `codex exec -m gpt-6.2-sol -c model_reasoning_effort="high"`.) Honor explicit user model requests before these defaults. Codex first scans use `gpt-6.2-sol` at `high` effort; deeper validation may use `gpt-6.2-astra` at `high` when budget allows. Under tight or critical budgets, all Codex review judgment uses `gpt-6.2-sol` at `high`. It is the only cheaper Codex default. Very low-intelligence chores (collecting call sites, formatting tables) may run on Sonnet 5.5 at low effort or `gpt-6.2-sol` at `low` effort.
 
-**Fable 5.1 (medium), once per round, after you decide.** When the round's verdicts, your decisions and their decision records are all written down, ask one `model: 'fable', effort: 'medium'` agent for a short review of that package (`effort: 'high'` only when the package is well defined: a few decisions with clear evidence and stated invariants): a decision that does not follow from the evidence, a cut that breaks a stated invariant, a keep that is really speculative. At most ten lines; it reads the decisions, not the whole draft from scratch. Verify what it raises before acting.
+**Fable 5.2 (medium), once per round, after you decide.** When the round's verdicts, your decisions and their decision records are all written down, ask one `model: 'fable', effort: 'medium'` agent for a short review of that package (`effort: 'high'` only when the package is well defined: a few decisions with clear evidence and stated invariants): a decision that does not follow from the evidence, a cut that breaks a stated invariant, a keep that is really speculative. At most ten lines; it reads the decisions, not the whole draft from scratch. Verify what it raises before acting.
 
 Run the reviewers READ-ONLY. They analyze; you decide.
+
+**What stays in the main loop.** The reviewers are separate agents for one
+reason: they give independent views from fresh context. Everything else stays
+with you. Step 1's claim checks, the decisions, the edits and the verification
+all need the context you have built up, and a subagent's summary of them would
+lose detail. Do mechanical chores yourself with `rg`/`ast-grep` rather than
+spawning an agent for them, unless their output is too large to read inline.
+That includes collecting call sites and checking what values callers actually
+pass. Give each reviewer the draft path, the worktree and its lens, not pasted
+code. Accept a verdict table only in the CUT / RESHAPE / KEEP shape. A
+reviewer's verdict is a claim: check its evidence against the code before you
+act on it.
 
 ### 3. Decide — the minimalism judgment
 For every public type / method / field / enum value / resolved decision, ask:

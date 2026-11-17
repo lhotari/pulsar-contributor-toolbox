@@ -100,19 +100,19 @@ Exit codes: **3** the Claude tier is `codex`, **4** the Codex budget is
 
 | `claude tier:` | the batch |
 |---|---|
-| `full` | comfortably under. Sonnet 5.5 (`xhigh`) **and** Codex review; both cross-validate; one short Fable 5.1 check at `medium`. |
-| `standard` | on schedule. One Sonnet 5.5 `xhigh` pass, Codex validates. |
+| `full` | comfortably under. Opus 5.5 (`xhigh`) **and** Codex review; both cross-validate; one short Fable 5.2 check at `medium`. |
+| `standard` | on schedule. One Opus 5.5 `xhigh` pass, Codex validates. |
 | `lean` | ahead of pace. **Codex reviews alone**; the main session only adjudicates. |
 | `codex` | the allowance will not carry a Claude-led batch. Everything that can go to Codex goes to Codex; the main session adjudicates a trimmed brief. |
 
 `lean` and `codex` move review work to Codex. First scans still use
-`gpt-6.1-sol` at `high`; the Codex budget selects the deeper-validation pair.
+`gpt-6.2-sol` at `high`; the Codex budget selects the deeper-validation pair.
 Pass those pairs in worker instructions alongside `--tier`, which controls
 review depth rather than Codex model selection. Explicit user model requests
 supersede these defaults.
 
 **The `fable:` line is a second gate on the same reading** — `ok`, `sparing`,
-`avoid`. Fable 5.1 appears only as `full`'s short check once the review is
+`avoid`. Fable 5.2 appears only as `full`'s short check once the review is
 adjudicated; it is metered on its own weekly limit *and* against the shared one,
 so it is the first thing to give up when either is tight.
 
@@ -141,13 +141,13 @@ Codex call may spend — which the script prints ready to paste:
 
 | `codex budget:` | first scan | initial-review follow-up / validation | re-review follow-up / final validation | simple work |
 |---|---|---|---|---|
-| `rich` | `gpt-6.1-sol --effort high` | `gpt-6-astra --effort xhigh` | `gpt-6-astra --effort medium` | `gpt-6.1-sol --effort low` |
-| `normal` | `gpt-6.1-sol --effort high` | `gpt-6-astra --effort high` | `gpt-6.1-sol --effort xhigh` | `gpt-6.1-sol --effort low` |
-| `tight` | `gpt-6.1-sol --effort high` | `gpt-6.1-sol --effort high` | `gpt-6.1-sol --effort high` | `gpt-6.1-sol --effort low` |
-| `critical` | `gpt-6.1-sol --effort high` | `gpt-6.1-sol --effort high` | `gpt-6.1-sol --effort high` | `gpt-6.1-sol --effort low` |
+| `rich` | `gpt-6.2-sol --effort high` | `gpt-6.2-astra --effort xhigh` | `gpt-6.2-astra --effort medium` | `gpt-6.2-sol --effort low` |
+| `normal` | `gpt-6.2-sol --effort high` | `gpt-6.2-astra --effort high` | `gpt-6.2-sol --effort xhigh` | `gpt-6.2-sol --effort low` |
+| `tight` | `gpt-6.2-sol --effort high` | `gpt-6.2-sol --effort high` | `gpt-6.2-sol --effort high` | `gpt-6.2-sol --effort low` |
+| `critical` | `gpt-6.2-sol --effort high` | `gpt-6.2-sol --effort high` | `gpt-6.2-sol --effort high` | `gpt-6.2-sol --effort low` |
 
 **An explicit user model request takes precedence over these defaults.**
-`gpt-6.1-sol` is the only cheaper Codex default: `high` for first scans and all
+`gpt-6.2-sol` is the only cheaper Codex default: `high` for first scans and all
 review judgment under tight or critical budgets, `low` for lightweight work.
 Use the script's `firstScan` pair for the first scan of each review task,
 including re-reviews. Use `thoughtful` only for initial-review follow-up and
@@ -215,15 +215,15 @@ that kind of work may spend*.
 | a `re-review` worker — reading the delta, deciding whether each thread was addressed, drafting the replies | harness on `sonnet`, first scan handed to Codex at **firstScan**, follow-up at **reReview** | **firstScan**, then **reReview** |
 | an initial `review` worker | `/pr-review <N> --tier <tier>` with the Codex pairs in worker instructions | `/pr-review <N> --tier codex` with the same pairs |
 | a `revise` worker — applying wording instructions to prose that already exists | `sonnet`, or Codex at the **simple** pair | the **simple** pair |
-| answering a `prt:ask` note | main session inline when it is short; `sonnet` when it needs the diff re-read; re-review judgment uses **reReview** | **reReview** during re-review; otherwise **thoughtful** |
+| answering a `prt:ask` note | main session inline when it is short; `opus` when it needs the diff re-read; re-review judgment uses **reReview** | **reReview** during re-review; otherwise **thoughtful** |
 | drafting a `nudge`, a cleanup summary, an archive triage | `sonnet` at low effort, or the **simple** pair | the **simple** pair |
-| a mechanical sweep — every draft has a `prt:pr-actions` block, tallying anchors, listing files | `sonnet` at low effort, or plain shell | the **simple** pair |
+| a mechanical sweep — every draft has a `prt:pr-actions` block, tallying anchors, listing files | plain shell in the main session; `sonnet` at low effort only when the output is too large to read inline | the **simple** pair |
 | final adjudication — which findings survive, the recommended resolution, what reaches the human | main session; re-review judgment uses **reReview** | **thoughtful** for initial reviews; **reReview** for re-reviews |
 
-Claude subagents run on Sonnet 5.5 (`sonnet`) everywhere; the effort is the knob,
-and the two low-intelligence rows run it low.
-Fable and Opus are not used by this skill; Fable 5.1 appears only inside
-`pr-review`'s `full` tier for initial reviews.
+Claude subagents run on Sonnet 5.5 (`sonnet`) for quick work (harness workers,
+bookkeeping, prose edits, the two low-intelligence rows at low effort) and on
+Opus 5.5 (`opus`) for thoughtful work (review judgment, disputed findings).
+Fable 5.2 appears only inside `pr-review`'s `full` tier for initial reviews.
 
 Three rules the table is shorthand for:
 
@@ -241,7 +241,7 @@ Three rules the table is shorthand for:
    question you can already answer.
 3. **Never spend more effort than the work needs.** Formatting, extraction,
    mechanical edits, and summarising output you have already read are low-effort
-   Sonnet 5.5 / `gpt-6.1-sol` work at every tier. At
+   Sonnet 5.5 / `gpt-6.2-sol` work at every tier. At
    `lean` and `codex` that stops being an economy and becomes the rule: Claude
    adjudicates and does nothing else.
 
@@ -258,7 +258,7 @@ node "$CODEX_COMPANION" task --model <model> --effort <effort> --prompt-file <fi
 work, unless the user explicitly requested a model or effort.
 
 If the companion is missing or Codex is not set up, say so once and do the work
-on Claude — Sonnet 5.5, at low effort for the low-intelligence rows — never silently, because a
+on Claude — Opus 5.5 for review judgment, Sonnet 5.5 at low effort for the low-intelligence rows — never silently, because a
 batch that was meant to run on Codex and ran on Claude instead is the thing this
 whole section exists to prevent.
 

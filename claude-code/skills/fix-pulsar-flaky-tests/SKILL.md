@@ -165,11 +165,29 @@ If there's an existing GitHub issue, include `Fixes #<number>` in the first line
 
 ## Phase 6: Parallel Execution
 
-When fixing multiple unrelated flaky tests, use Agent teams for parallelism:
-- Launch up to 4 agents in separate worktrees (use `isolation: worktree`)
-- Group related tests (same class/module) into the same agent
-- Each agent: analyze, fix, verify, commit, create PR
-- After agents complete, review each fix for correctness
+Work in the main session by default. One flaky test, or several in the same
+class or module, is one loop: the root-cause analysis for one often explains
+the next, and a subagent would only get a summary of it.
+
+Use subagents only when both of these hold:
+- the failures are **independent**: different classes, no shared fixture,
+  base class or production code path. Tests that chain on each other's
+  analysis or touch the same code stay together in one loop.
+- each fix needs a **long verification run** (`invocationCount` builds) whose
+  logs would bloat the main context and can be thrown away afterwards.
+
+When they hold:
+- Launch at most 4 `Agent` calls in one message with `isolation: worktree`, one
+  group of related tests per agent.
+- Make each brief self-contained: the failing test, the Develocity build scan
+  links and stack traces you already have, the Phase 2–4 rules, and the module
+  build command. Do not make the agent rediscover what you already know.
+- Ask for a compact result in a fixed shape: branch, root cause (2–3 sentences
+  with `file:line`), fix summary, the verification command and its pass count,
+  the PR URL (or "not created" and why). No log dumps.
+- An agent's report is a claim. Before you report success, read each branch's
+  diff yourself and check it against the Phase 3 rules (test intent kept, no
+  added sleeps, `invocationCount` removed).
 
 ## Module and Test Execution Reference
 

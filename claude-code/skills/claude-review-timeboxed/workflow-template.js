@@ -12,13 +12,13 @@ export const meta = {
   phases: [
     { title: 'Find', detail: 'independent lenses with models from the profile' },
     { title: 'Verify', detail: 'the profile\'s verify model refutes medium-or-higher findings, high severity first' },
-    { title: 'Check', detail: 'one short Fable 5.1 check of the verified result', model: 'fable' },
+    { title: 'Check', detail: 'one short Fable 5.2 check of the verified result', model: 'fable' },
   ],
 }
 
 // Switches.
 const PROFILE = 'normal'              // 'normal' | 'high' | 'tight', see SKILL.md "Model policy"
-const FABLE_CHECK = PROFILE !== 'tight' // one short Fable 5.1 check once every detail is in; false to skip
+const FABLE_CHECK = PROFILE !== 'tight' // one short Fable 5.2 check once every detail is in; false to skip
 const FABLE_EFFORT = 'medium'         // 'high' only when the context is well defined: narrow target, few verified findings
 const HAS_PREVIOUS_REVIEW = true      // false for a first review: the checklist lens checks stated claims instead
 const WT = 'WORKTREE_PATH'            // the WORKTREE line printed by scripts/freeze-and-path.sh
@@ -113,33 +113,33 @@ const VERDICT_SCHEMA = {
 
 // Model profile (SKILL.md "Model policy"). Roles: lookup (very trivial), task (focused review), taskHard (difficult
 // focused review), brain (concurrency, disputed premises, contrarian), core (the core-change lens), verify.
-// Sonnet 5.5 ('sonnet') everywhere; the effort is the cost knob.
+// Sonnet 5.5 ('sonnet') for quick work (lookup, task); Opus 5.5 ('opus') for thoughtful work; effort tunes cost.
 const PROFILES = {
   normal: {
     lookup:   { model: 'sonnet', effort: 'medium' },
     task:     { model: 'sonnet', effort: 'medium' },
-    taskHard: { model: 'sonnet', effort: 'high' },
-    brain:    { model: 'sonnet', effort: 'xhigh' },
-    core:     { model: 'sonnet', effort: 'xhigh' },
-    verify:   { model: 'sonnet', effort: 'xhigh' },
+    taskHard: { model: 'opus', effort: 'high' },
+    brain:    { model: 'opus', effort: 'xhigh' },
+    core:     { model: 'opus', effort: 'xhigh' },
+    verify:   { model: 'opus', effort: 'xhigh' },
     verifyCap: 8,
   },
   high: {
     lookup:   { model: 'sonnet', effort: 'high' },
     task:     { model: 'sonnet', effort: 'xhigh' },
-    taskHard: { model: 'sonnet', effort: 'xhigh' },
-    brain:    { model: 'sonnet', effort: 'xhigh' },
-    core:     { model: 'sonnet', effort: 'xhigh' },
-    verify:   { model: 'sonnet', effort: 'xhigh' },
+    taskHard: { model: 'opus', effort: 'xhigh' },
+    brain:    { model: 'opus', effort: 'xhigh' },
+    core:     { model: 'opus', effort: 'xhigh' },
+    verify:   { model: 'opus', effort: 'xhigh' },
     verifyCap: 8,
   },
   tight: {
     lookup:   { model: 'sonnet', effort: 'low' },
     task:     { model: 'sonnet', effort: 'medium' },
-    taskHard: { model: 'sonnet', effort: 'high' },
-    brain:    { model: 'sonnet', effort: 'high' },
-    core:     { model: 'sonnet', effort: 'xhigh' },
-    verify:   { model: 'sonnet', effort: 'high' },
+    taskHard: { model: 'opus', effort: 'high' },
+    brain:    { model: 'opus', effort: 'high' },
+    core:     { model: 'opus', effort: 'xhigh' },
+    verify:   { model: 'opus', effort: 'high' },
     verifyCap: 4,
   },
 }
@@ -245,7 +245,7 @@ const verified = await parallel(capped.map(f => () => {
 }))
 const verifiedIds = new Set(capped.map(f => f.id + f.lens))
 
-// A short Fable 5.1 check at FABLE_EFFORT, now that every detail is in: it reads the verified result, not the target.
+// A short Fable 5.2 check at FABLE_EFFORT, now that every detail is in: it reads the verified result, not the target.
 let fableCheck = null
 const kept = verified.filter(Boolean).filter(f => f.verdict.verdict !== 'refuted')
 if (FABLE_CHECK && kept.length && !verifySkipped) {

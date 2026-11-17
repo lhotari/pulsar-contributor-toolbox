@@ -10,7 +10,7 @@ Line numbers are `file:line` at `REVISION`.
 
 Method: profile PROFILE from usage reading USAGE_READING (or "unknown or stale"); one time-boxed workflow of N agents
 (M minutes): LENS_LIST with model and effort per lens; K findings re-checked by VERIFIER_MODEL verifiers at
-VERIFIER_EFFORT; Fable 5.1 check: FABLE_CHECK_NOTE (what it raised and how it was resolved, or "not run");
+VERIFIER_EFFORT; Fable 5.2 check: FABLE_CHECK_NOTE (what it raised and how it was resolved, or "not run");
 deadline handling: DEADLINE_NOTES (none needed, cap reduced, or verification skipped, with which lenses reported
 truncation). I confirmed the items in the summary myself.
 

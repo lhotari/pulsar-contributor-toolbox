@@ -11,7 +11,7 @@ allowed-tools: Bash(git:*), Bash(bash:*), Bash(date:*), Bash(ls:*), Bash(cat:*),
 
 Freeze the target, fan out independent lenses with models chosen from the request, the time box and the
 remaining allowance, refute the medium-or-higher findings at the highest effort the profile allows (high
-severity first), let Fable 5.1 give the verified result one short look, re-check the summary claims yourself, and
+severity first), let Fable 5.2 give the verified result one short look, re-check the summary claims yourself, and
 write one source-cited review file. The box is met by sizing and by wall-clock deadlines the agents can see, and
 the review says what the clock cut.
 
@@ -40,7 +40,7 @@ output overrides. Do not substitute Codex agents and call them Claude reviewers.
   BookKeeper, the site. The procedure does not depend on the language; the lens prompts take the repository's
   source and test patterns and its own style and test rules (from its CLAUDE.md, CONTRIBUTING or coding guide).
 - Not for posting to GitHub, running builds or tests, or editing code: this skill is read-only and produces a
-  file. Use `pr-review` when the terminal-only Sonnet-and-Codex consensus pipeline is wanted instead.
+  file. Use `pr-review` when the terminal-only Opus-and-Codex consensus pipeline is wanted instead.
 
 ## Inputs and defaults
 
@@ -73,20 +73,19 @@ If the reading is 95% or more, do not launch the workflow; report the reading an
 
 An explicit request wins over the reading; say in the Method line when the two disagree.
 
-Claude agents run on **Sonnet 5.5** (`sonnet`); the effort is the cost knob. Sonnet 5.5 at `high` or `xhigh`
-performs about as well as Fable 5.1 on most review work, so work that used to go to Fable runs on Sonnet 5.5 at
-`xhigh`. **Fable 5.1** (`fable`) is used once, after verification: a short check of the verified findings, when every
+Quick work (the `lookup` and `task` roles) runs on **Sonnet 5.5** (`sonnet`); thoughtful work (`taskHard`,
+`brain`, `core`, `verify`) runs on **Opus 5.5** (`opus`). The effort is the cost knob within each. **Fable 5.2** (`fable`) is used once, after verification: a short check of the verified findings, when every
 detail is in (the template's `Check` phase, on by default outside the tight profile). It runs at `medium` effort;
 raise it to `high` (`FABLE_EFFORT`) only when the context is well defined: a narrow target and a small set of
 verified, source-cited findings. No other Claude model is used.
 
-| Profile | When | Very trivial: lookups, doc and config consistency, checklists | Tasks: focused code or test review with a stated question list | Brains: concurrency and interleavings, disputed premises, contrarian, verifiers | Fable 5.1 check |
+| Profile | When | Very trivial: lookups, doc and config consistency, checklists | Tasks: focused code or test review with a stated question list | Brains: concurrency and interleavings, disputed premises, contrarian, verifiers | Fable 5.2 check |
 |---|---|---|---|---|---|
-| normal | reading at most 75% and no override | Sonnet 5.5, medium | Sonnet 5.5; medium or high by task difficulty | Sonnet 5.5, xhigh | yes, medium |
-| high | user asks for high effort or a thorough review | Sonnet 5.5, high | Sonnet 5.5, xhigh | Sonnet 5.5, xhigh | yes, medium; high when the context is well defined |
-| tight | reading above 75% and no override, or user asks for cheap | Sonnet 5.5, low | Sonnet 5.5; medium, high for the single hardest task | Sonnet 5.5, xhigh for the core-change lens; high for contrarian and verifiers; verify cap halved | no |
+| normal | reading at most 75% and no override | Sonnet 5.5, medium | Sonnet 5.5, medium; Opus 5.5, high for hard tasks | Opus 5.5, xhigh | yes, medium |
+| high | user asks for high effort or a thorough review | Sonnet 5.5, high | Sonnet 5.5, xhigh; Opus 5.5, xhigh for hard tasks | Opus 5.5, xhigh | yes, medium; high when the context is well defined |
+| tight | reading above 75% and no override, or user asks for cheap | Sonnet 5.5, low | Sonnet 5.5, medium; Opus 5.5, high for the single hardest task | Opus 5.5, xhigh for the core-change lens; high for contrarian and verifiers; verify cap halved | no |
 
-Task difficulty for the Sonnet 5.5 effort: medium for one file with a known question list, high for cross-file
+Task difficulty picks the role: `task` (Sonnet 5.5) for one file with a known question list, `taskHard` (Opus 5.5) for cross-file
 control flow, test-fixture judgement, or ownership, lifecycle or recovery logic that is not the core change.
 Verifiers of high-severity findings always run at xhigh. Set `FABLE_CHECK = false` when the user asks to save
 allowance or the Fable weekly limit is tight. The template's roles are `lookup`, `task`, `taskHard`, `brain`,
@@ -137,6 +136,12 @@ allowance or the Fable weekly limit is tight. The template's roles are `lookup`,
 
 Add lenses for the change's own risk areas (compatibility of persisted or wire formats, configuration defaults,
 performance claims) up to the sizing table.
+
+Split lenses by context, not by topic. Each lens should answer its questions from its own reading of the
+worktree, needing little from the other lenses, and return only its schema. When two candidate lenses would
+read the same files to answer chained questions, where one lens's answer is the other's premise, merge them into
+one lens. Each extra handoff loses detail. Scouting, first-hand checks and synthesis stay in the main session
+(steps 2, 5 and 6). They need the context you already hold, and an agent would only hand back a summary of it.
 
 ## Sizing
 
