@@ -38,6 +38,25 @@ a `prt` symlink alias for `pr-review-track` in both directories.
 ./link-skills-to-agents.sh
 ```
 
+### Backporting to release branches
+
+Two skills share one engine (`skills/pulsar-backport/scripts/bpt.mjs`, Node 24, no dependencies) and a SQLite
+database in `~/workspace-pulsar/pulsar-cherry-picking/database/`:
+
+* [`pulsar-backport-plan`](skills/pulsar-backport-plan/) — finds master PRs merged after a given PR that are missing
+  from the release branches, dry-runs them, finds dependency hints, triages them with evaluator subagents
+  (verdict, value for users, risk) and pre-fills decisions with recommendations.
+* [`pulsar-backport`](skills/pulsar-backport/) — cherry-picks the decided PRs in master order, stops on dependencies
+  that planning missed, opens a test PR on apache/pulsar and takes CI to green with Claude Code workers, reuses the
+  tested picks for the next branch, and fast-forwards the real branches only when you click Finalize.
+
+```shell
+node ~/.claude/skills/pulsar-backport/scripts/bpt.mjs serve --open   # local web UI for decisions and progress
+```
+
+Judgement work runs as headless `claude -p` workers on your Claude Code login (no API key), or in your interactive
+session (`bpt job claim`). Design notes: [references/design.md](skills/pulsar-backport/references/design.md).
+
 ### Reviewing pull requests
 
 Two skills that work together:

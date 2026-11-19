@@ -1,0 +1,570 @@
+// Planning: discover master PRs, pre-filter, dry-run, dependency hints, verdict import, decisions, report.
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import * as db from './db.mjs';
+import * as g from './git.mjs';
+import * as gh from './gh.mjs';
+
+export const DEFAULT_REPO = process.env.BPT_PULSAR_REPO || path.join(os.homedir(), 'workspace-pulsar', 'pulsar');
+export const sessionDir = (sid) => path.join(db.BPT_HOME, 'sessions', sid);
+
+export function remote(cfg) { return cfg.remote || g.remoteFor(cfg.repo, gh.REPO); }
+export const remoteRef = (cfg, branch) => `${remote(cfg)}/${branch}`;
+
+/** Branch spec "branch-4.2:4.2.6,branch-4.0:4.0.15<branch-4.2" (the "<" names the lane to reuse). */
+export function parseBranches(spec) {
+  return spec.split(',').map((s, i) => {
+    const m = s.trim().match(/^([^:<]+)(?::([^<]+))?(?:<(.+))?$/);
+    if (!m) throw new Error(`bad branch spec ${s}`);
+    return { branch: m[1], release: m[2] || null, reuseFrom: m[3] || null, seq: i + 1 };
+  });
+}
+
+export function createSession({ id, title, repo = DEFAULT_REPO, branches, sincePr, sinceSha, source = 'master', remote: remoteName = null }) {
+  if (!/^[a-z0-9][a-z0-9._-]{2,60}$/.test(id)) throw new Error('session id: lowercase letters, digits, . _ -');
+  if (db.get('SELECT 1 FROM sessions WHERE id = ?', id)) throw new Error(`session ${id} exists`);
+  const cfg = { repo, remote: remoteName, source, branches, sincePr: sincePr || null, sinceSha: sinceSha || null, round: 0,
+    runner: 'headless', autopilot: false, autoPushTest: true, maxClaudeWorkers: 1, maxReruns: 3,
+    permissionMode: 'auto', model: null, testBranchPattern: '{branch}-backports-{id}' };
+  const r = remote(cfg);
+  g.fetch(repo, r, [source]);
+  if (!cfg.sinceSha) {
+    if (!sincePr) throw new Error('need --since-pr or --since-sha');
+    const sha = g.git(repo, ['log', '--first-parent', '--format=%H', `--grep=(#${sincePr})$`, `${r}/${source}`]).split('\n')[0];
+    if (!sha) throw new Error(`#${sincePr} not found on ${r}/${source}`);
+    cfg.sinceSha = sha;
+  }
+  const ts = db.now();
+  db.tx(() => {
+    db.run('INSERT INTO sessions (id, title, status, config, created_at, updated_at) VALUES (?,?,?,?,?,?)',
+      id, title || id, 'planning', db.S(cfg), ts, ts);
+    for (const b of branches) {
+      db.run('INSERT INTO lanes (session_id, branch, release, seq, reuse_from, updated_at) VALUES (?,?,?,?,?,?)',
+        id, b.branch, b.release, b.seq, b.reuseFrom, ts);
+    }
+  });
+  db.event(id, `Session created: ${branches.map((b) => b.branch).join(', ')}, PRs merged after ${g.short(cfg.sinceSha)}`);
+  return db.session(id);
+}
+
+export function saveConfig(sid, patch) {
+  const s = db.session(sid);
+  const cfg = { ...s.config, ...patch };
+  db.run('UPDATE sessions SET config = ?, updated_at = ? WHERE id = ?', db.S(cfg), db.now(), sid);
+  return cfg;
+}
+
+// --- pre-filter: what gets evaluated at all ---
+const TYPE_RE = /^\s*\[([a-z]+)\]\s*\[([a-z0-9-]+)\]/i;
+export function classify(title) {
+  const m = title.match(TYPE_RE);
+  const type = m?.[1]?.toLowerCase(); const comp = m?.[2]?.toLowerCase();
+  if (!type) return { excluded: 'no [type][component] prefix', kind: 'code', comp: '' };
+  const kind = comp === 'test' ? 'flaky' : 'code';
+  if (type === 'fix') {
+    if (comp === 'ci' || comp === 'build') return { excluded: `[fix][${comp}]`, kind, comp };
+    return { excluded: null, kind, comp };
+  }
+  if (type === 'improve') {
+    if (['test', 'ci', 'build', 'pip', 'doc'].includes(comp)) return { excluded: `[improve][${comp}]`, kind, comp };
+    return { excluded: null, kind, comp };
+  }
+  return { excluded: `[${type}]`, kind, comp };
+}
+
+/**
+ * Refresh the session's PR list from master. Keeps decisions and verdicts; records new PRs with a new round number,
+ * updates branch presence, labels and dry runs, and computes blame-based dependency hints.
+ */
+export function discover(sid, { log = console.log, blame = true } = {}) {
+  const s = db.session(sid); const cfg = s.config; const repo = cfg.repo; const r = remote(cfg);
+  const branches = db.all('SELECT * FROM lanes WHERE session_id = ? ORDER BY seq', sid).map((l) => l.branch);
+  log(`fetching ${r}: ${cfg.source} ${branches.join(' ')}`);
+  g.fetch(repo, r, [cfg.source, ...branches]);
+  const masterRef = `${r}/${cfg.source}`;
+  const commits = g.firstParentCommits(repo, cfg.sinceSha, masterRef).filter((c) => c.pr);
+  const onBranch = Object.fromEntries(branches.map((b) => [b, g.pickedOnBranch(repo, `${r}/${b}`, masterRef)]));
+  const known = new Map(db.all('SELECT pr, round FROM items WHERE session_id = ?', sid).map((x) => [x.pr, x.round]));
+  const round = (cfg.round || 0) + 1;
+  log(`${commits.length} PRs on ${cfg.source} after ${g.short(cfg.sinceSha)}; fetching labels and descriptions`);
+  const meta = gh.prMeta(commits.map((c) => c.pr));
+  const bodies = path.join(sessionDir(sid), 'prbody');
+  fs.mkdirSync(bodies, { recursive: true });
+  const heads = Object.fromEntries(branches.map((b) => [b, g.rev(repo, `${r}/${b}`)]));
+  const order = new Map(commits.map((c, i) => [c.pr, i]));
+  log('matching branch-specific commits (patch-id, references, titles, upgrades, labels)');
+  const equivs = Object.fromEntries(branches.map((b) => [b, findEquivalents(cfg, `${r}/${b}`, masterRef, commits, meta, onBranch[b], b)]));
+  const shaToPr = new Map(commits.map((c) => [c.sha, c.pr]));
+  let added = 0; let dry = 0;
+  const newlyPicked = [];
+  for (const [i, c] of commits.entries()) {
+    const m = meta.get(c.pr) || { labels: [], body: '' };
+    if (m.body) fs.writeFileSync(path.join(bodies, `${c.pr}.md`), m.body);
+    const cls = classify(c.title);
+    const isNew = !known.has(c.pr);
+    const stats = g.commitFiles(repo, c.sha);
+    db.run(`INSERT INTO items (session_id, pr, sha, master_order, title, merged_at, kind, excluded, labels, stats, round)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT (session_id, pr) DO UPDATE SET sha = excluded.sha, master_order = excluded.master_order,
+              title = excluded.title, labels = excluded.labels, merged_at = excluded.merged_at, kind = excluded.kind,
+              stats = json_patch(items.stats, excluded.stats),
+              excluded = CASE json_extract(items.stats, '$.include') WHEN 1 THEN NULL WHEN 0 THEN 'manual exclude' ELSE excluded.excluded END`,
+      sid, c.pr, c.sha, i, c.title, m.mergedAt || c.date, cls.kind, cls.excluded, db.S(m.labels),
+      db.S({ comp: cls.comp, files: stats.files.length, main: stats.main.length, add: stats.add, del: stats.del }),
+      isNew ? round : known.get(c.pr));
+    if (isNew) added++;
+    for (const b of branches) {
+      let on = onBranch[b].prs.has(c.pr) || onBranch[b].shas.has(c.sha) ? 1 : 0;
+      const prev = db.get('SELECT on_branch, dryrun, equiv FROM targets WHERE session_id = ? AND pr = ? AND branch = ?', sid, c.pr, b);
+      let equiv = null;
+      const e = !on && equivs[b].get(c.pr);
+      if (e) {
+        const was = db.J(prev?.equiv);
+        if (was?.rejected && was.commit === e.commit) equiv = was; // the user said it is not the same change
+        else { equiv = e; on = 2; }
+      }
+      if (prev && !prev.on_branch && on) newlyPicked.push(`#${c.pr} → ${b}${on === 2 ? ' (equivalent)' : ''}`);
+      let dryrun = prev?.dryrun ?? null;
+      const item = db.get('SELECT excluded FROM items WHERE session_id = ? AND pr = ?', sid, c.pr);
+      if (!on && !item.excluded) {
+        const d = g.dryPick(repo, heads[b], c.sha);
+        dryrun = db.S({ state: g.dryState(d), head: g.short(heads[b]), conflicts: d.conflicts.map((x) => ({ file: x.file.split('/').pop(), path: x.file, test: x.test, hunks: x.hunks })) });
+        dry++;
+      }
+      db.run(`INSERT INTO targets (session_id, pr, branch, on_branch, dryrun, equiv) VALUES (?,?,?,?,?,?)
+              ON CONFLICT (session_id, pr, branch) DO UPDATE SET on_branch = excluded.on_branch, dryrun = excluded.dryrun, equiv = excluded.equiv`,
+        sid, c.pr, b, on, dryrun, equiv ? db.S(equiv) : null);
+    }
+    if (blame && !cls.excluded && branches.some((b) => !(onBranch[b].prs.has(c.pr) || onBranch[b].shas.has(c.sha)))) {
+      const st = db.J(db.get('SELECT stats FROM items WHERE session_id = ? AND pr = ?', sid, c.pr).stats, {});
+      if (!st.blamed) {
+        blameDeps(sid, repo, c, { shaToPr, order, onBranch, branches });
+        db.run(`UPDATE items SET stats = json_set(stats, '$.blamed', 1) WHERE session_id = ? AND pr = ?`, sid, c.pr);
+      }
+    }
+    if (i % 50 === 49) log(`  ${i + 1}/${commits.length}`);
+  }
+  saveConfig(sid, { round, lastDiscover: db.now(), masterHead: g.short(g.rev(repo, masterRef)),
+    heads: Object.fromEntries(branches.map((b) => [b, g.short(heads[b])])) });
+  const summary = { round, total: commits.length, added, dryRuns: dry, newlyPicked };
+  db.event(sid, `Discover round ${round}: ${commits.length} PRs, ${added} new, ${newlyPicked.length} newly on a branch`, { data: summary });
+  return summary;
+}
+
+/**
+ * Branch commits that carry a master PR's change under another PR (branch-specific PRs such as
+ * "[improve][meta][branch-4.2] Upgrade Oxia Java client to 0.10.4 (#27227)"). Strongest signal first:
+ * identical patch-id, an explicit reference to the master PR or commit, the same normalized title,
+ * a newer upgrade of the same dependency, or a cherry-picked/<branch> label on the master PR.
+ * Returns Map<masterPr, {via, commit, subject, branchPr, detail}>.
+ */
+export function findEquivalents(cfg, branchRef, masterRef, commits, meta, onB, branch) {
+  const repo = cfg.repo;
+  const out = new Map();
+  const todo = commits.filter((c) => !(onB.prs.has(c.pr) || onB.shas.has(c.sha)));
+  if (!todo.length) return out;
+  const mb = onB.mergeBase;
+  const masterPrs = new Set(commits.map((c) => c.pr));
+  const bcommits = g.commitsWithBodies(repo, `${mb}..${branchRef}`)
+    .filter((b) => !b.pr || !masterPrs.has(b.pr) || /\[branch-/.test(b.subject));
+  const hit = (pr, via, b, detail) => { if (!out.has(pr)) out.set(pr, { via, commit: b.sha, subject: b.subject, branchPr: b.pr, detail }); };
+  // 1. patch-id
+  const mPid = new Map([...g.patchIds(repo, `${cfg.sinceSha}..${masterRef}`, { firstParent: true })].map(([pid, sha]) => [sha, pid]));
+  const bPid = g.patchIds(repo, `${mb}..${branchRef}`);
+  for (const c of todo) { const pid = mPid.get(c.sha); const bsha = pid && bPid.get(pid); const b = bsha && bcommits.find((x) => x.sha === bsha);
+    if (b) hit(c.pr, 'patch-id', b, 'identical diff'); }
+  // 2. explicit references in branch commit messages and in the branch PRs' descriptions
+  const cutoff = Date.parse(g.git(repo, ['log', '-1', '--format=%cI', cfg.sinceSha])) - 45 * 864e5;
+  const recent = bcommits.filter((b) => Date.parse(b.date) >= cutoff);
+  const branchPrBodies = gh.prMeta([...new Set(recent.map((b) => b.pr).filter((p) => p && !masterPrs.has(p)))]);
+  for (const b of recent) {
+    const text = `${b.body}
+${branchPrBodies.get(b.pr)?.body || ''}`;
+    for (const c of todo) {
+      if (out.has(c.pr)) continue;
+      const re = new RegExp(`(#|pull/)${c.pr}(?!\\d)|${c.sha.slice(0, 10)}`);
+      if (re.test(text)) hit(c.pr, 'reference', b, `the branch commit or its PR mentions #${c.pr}`);
+    }
+  }
+  // 3. same title
+  const byTitle = new Map(); for (const b of bcommits) { const t = g.normalizeTitle(b.subject); if (t.length >= 12 && !byTitle.has(t)) byTitle.set(t, b); }
+  for (const c of todo) { const b = byTitle.get(g.normalizeTitle(c.title)); if (b) hit(c.pr, 'title', b, 'same title'); }
+  // 4. a newer upgrade of the same dependency
+  const ups = bcommits.map((b) => ({ b, u: g.parseUpgrade(b.subject) })).filter((x) => x.u);
+  for (const c of todo) {
+    const u = g.parseUpgrade(c.title); if (!u) continue;
+    const newer = ups.filter((x) => x.u.name === u.name && g.cmpVersion(x.u.version, u.version) >= 0)
+      .sort((x, y) => g.cmpVersion(y.u.version, x.u.version))[0];
+    if (newer) hit(c.pr, 'upgrade', newer.b, `${u.name} is at ${newer.u.version.join('.')} on the branch (master PR: ${u.version.join('.')})`);
+  }
+  // 5. label set by whoever cherry-picked it
+  for (const c of todo) {
+    if ((meta.get(c.pr)?.labels || []).includes(`cherry-picked/${branch}`)) {
+      hit(c.pr, 'label', { sha: null, subject: null, pr: null }, `labelled cherry-picked/${branch}, but no matching commit was found`);
+    }
+  }
+  return out;
+}
+
+/** The user says a detected equivalent is not the same change (or takes that back). */
+export function rejectEquivalent(sid, pr, branch, rejected = true) {
+  const t = db.get('SELECT equiv FROM targets WHERE session_id = ? AND pr = ? AND branch = ?', sid, pr, branch);
+  const e = db.J(t?.equiv); if (!e) throw new Error(`#${pr} has no detected equivalent on ${branch}`);
+  db.run('UPDATE targets SET equiv = ?, on_branch = ? WHERE session_id = ? AND pr = ? AND branch = ?', db.S({ ...e, rejected }), rejected ? 0 : 2, sid, pr, branch);
+  db.event(sid, `#${pr}: ${rejected ? 'not' : 'confirmed as'} the same change as ${e.subject || e.via} on ${branch}`, { branch });
+}
+
+/** Record in-range master commits that a PR's changed lines were written on top of. */
+export function blameDeps(sid, repo, c, { shaToPr, order, onBranch, branches }, phase = 'plan') {
+  const hits = g.blameDependencies(repo, c.sha);
+  const found = [];
+  for (const h of hits) {
+    const dep = shaToPr.get(h.sha);
+    if (!dep || dep === c.pr || order.get(dep) >= order.get(c.pr)) continue;
+    for (const b of branches) {
+      if (onBranch[b].prs.has(dep) || onBranch[b].shas.has(h.sha)) continue;
+      const detail = `${h.lines} changed line(s) in ${[...h.files].map((f) => f.split('/').pop()).join(', ')} were last changed by #${dep}`;
+      const r = db.run(`INSERT OR IGNORE INTO deps (session_id, pr, depends_on, branch, source, detail, phase, created_at)
+                        VALUES (?,?,?,?,?,?,?,?)`, sid, c.pr, dep, b, 'blame', detail, phase, db.now());
+      if (r.changes) found.push({ dep, branch: b, detail });
+    }
+  }
+  return found;
+}
+
+// --- verdicts from triage ---
+
+const depCache = new Map();
+/** A dependency is met on a branch if its PR is on the branch, whether or not it is in the session's range. */
+export function depOnBranch(sid, branch, dep) {
+  const t = db.get('SELECT on_branch FROM targets WHERE session_id = ? AND pr = ? AND branch = ?', sid, dep, branch);
+  if (t) return !!t.on_branch;
+  const key = `${sid}|${branch}|${dep}`;
+  if (!depCache.has(key)) {
+    const cfg = db.session(sid).config; const r = remote(cfg);
+    depCache.set(key, g.prOnBranch(cfg.repo, `${r}/${branch}`, `${r}/${cfg.source}`, dep));
+  }
+  return depCache.get(key);
+}
+
+const LEGACY = { 42: 'branch-4.2', 40: 'branch-4.0', 41: 'branch-4.1', 50: 'branch-5.0', 30: 'branch-3.0' };
+/** Accepts the triage brief's format ({branches:{name:{verdict,...}}}) and the older verdict42/verdict40 keys. */
+export function importVerdicts(sid, file) {
+  const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const list = Array.isArray(raw) ? raw : Object.values(raw);
+  const lanes = new Set(db.all('SELECT branch FROM lanes WHERE session_id = ?', sid).map((l) => l.branch));
+  let n = 0; const unknown = [];
+  db.tx(() => {
+    for (const v of list) {
+      const pr = Number(v.pr);
+      if (!db.get('SELECT 1 FROM items WHERE session_id = ? AND pr = ?', sid, pr)) { unknown.push(pr); continue; }
+      const per = { ...(v.branches || {}) };
+      for (const [suffix, branch] of Object.entries(LEGACY)) {
+        if (v[`verdict${suffix}`]) {
+          per[branch] = { verdict: v[`verdict${suffix}`], bug: v[`bug${suffix}`], evidence: v[`evidence${suffix}`], adapt: v[`adapt${suffix}`], ...(per[branch] || {}) };
+        }
+      }
+      const prev = db.J(db.get('SELECT assessment FROM items WHERE session_id = ? AND pr = ?', sid, pr).assessment, {}) || {};
+      const userValue = prev.valueSource === 'user';
+      // Merge: a partial file (e.g. values only) keeps the other fields.
+      const assessment = { impact: v.impact ?? prev.impact, severity: v.severity ?? prev.severity, risk: v.risk ?? prev.risk,
+        riskNote: v.riskNote ?? prev.riskNote, reason: v.reason ?? prev.reason,
+        dependsOn: v.dependsOn ?? prev.dependsOn ?? [], followUps: v.followUps ?? prev.followUps ?? [], lean: v.lean ?? prev.lean ?? null,
+        // Value for Pulsar users/operators of having the fix on the branch; a user-set value is kept.
+        value: userValue ? prev.value : (v.value || prev.value || null),
+        valueNote: userValue ? prev.valueNote : (v.valueNote || prev.valueNote || null),
+        valueSource: userValue ? 'user' : (v.value ? 'evaluator' : prev.valueSource || null) };
+      db.run('UPDATE items SET assessment = ? WHERE session_id = ? AND pr = ?', db.S(assessment), sid, pr);
+      for (const [branch, t] of Object.entries(per)) {
+        if (!lanes.has(branch)) continue;
+        const lean = t.lean ?? v.lean ?? null;
+        const rec = recommend(t.verdict, lean);
+        db.run(`UPDATE targets SET verdict = ?, bug = ?, evidence = ?, adapt = ?, note = COALESCE(?, note), lean = COALESCE(?, lean),
+                  recommendation = ?,
+                  decision = CASE WHEN decision_source = 'user' OR on_branch = 1 THEN decision ELSE ? END,
+                  decision_source = CASE WHEN decision_source = 'user' OR on_branch = 1 THEN decision_source ELSE 'recommended' END
+                WHERE session_id = ? AND pr = ? AND branch = ?`,
+          t.verdict, t.bug ?? null, t.evidence ?? null, t.adapt ?? null, t.note ?? v.note ?? null, lean, rec, rec, sid, pr, branch);
+        // A follow-up that fixes or adjusts this PR goes with it.
+        for (const fu of v.followUps || []) {
+          if (!db.get('SELECT 1 FROM items WHERE session_id = ? AND pr = ?', sid, Number(fu))) continue;
+          db.run(`INSERT OR IGNORE INTO deps (session_id, pr, depends_on, branch, source, detail, created_at)
+                  VALUES (?,?,?,?,?,?,?)`, sid, Number(fu), pr, branch, 'followup', `follow-up of #${pr} named by the evaluator`, db.now());
+        }
+        for (const dep of v.dependsOn || []) {
+          if (depOnBranch(sid, branch, Number(dep))) continue;
+          db.run(`INSERT OR IGNORE INTO deps (session_id, pr, depends_on, branch, source, detail, created_at)
+                  VALUES (?,?,?,?,?,?,?)`, sid, pr, Number(dep), branch, 'evaluator', 'named by the evaluator', db.now());
+        }
+      }
+      n++;
+    }
+  });
+  db.event(sid, `Imported ${n} verdicts from ${path.basename(file)}${unknown.length ? `; ${unknown.length} unknown PRs ignored` : ''}`);
+  return { imported: n, unknown };
+}
+
+/** Write triage batches (PRs without a verdict) and the brief for the evaluator subagents. */
+export function exportTriage(sid, { size = 25, all = false, briefTemplate } = {}) {
+  const dir = path.join(sessionDir(sid), 'triage', `round-${db.session(sid).config.round}`);
+  fs.mkdirSync(path.join(dir, 'verdicts'), { recursive: true });
+  const lanes = db.all('SELECT branch FROM lanes WHERE session_id = ? ORDER BY seq', sid).map((l) => l.branch);
+  const items = db.all(`SELECT * FROM items i WHERE session_id = ? AND excluded IS NULL
+     AND EXISTS (SELECT 1 FROM targets t WHERE t.session_id = i.session_id AND t.pr = i.pr AND t.on_branch = 0 ${all ? '' : 'AND t.verdict IS NULL'})
+     ORDER BY master_order`, sid);
+  const groups = {};
+  for (const it of items) {
+    const st = db.J(it.stats, {});
+    const key = it.kind === 'flaky' ? 'flaky' : ['broker'].includes(st.comp) ? 'broker'
+      : ['client', 'admin', 'cli', 'proxy', 'sec', 'txn', 'misc', 'common', 'websocket'].includes(st.comp) ? 'client' : 'other';
+    (groups[key] ||= []).push(it);
+  }
+  const batches = [];
+  for (const [key, list] of Object.entries(groups)) {
+    for (let i = 0; i < list.length; i += size) {
+      const name = `${key}${Math.floor(i / size) + 1}`;
+      const lines = list.slice(i, i + size).map((it) => {
+        const st = db.J(it.stats, {});
+        const t = Object.fromEntries(db.all('SELECT branch, dryrun FROM targets WHERE session_id = ? AND pr = ?', sid, it.pr).map((x) => [x.branch, db.J(x.dryrun, {})]));
+        const conf = lanes.map((b) => { const d = t[b] || {}; return `${b}=${d.state || '-'}${d.state === 'main' ? `(${d.conflicts.filter((c) => !c.test).map((c) => c.file).join(',')})` : ''}`; }).join(' ');
+        const labels = db.J(it.labels, []).filter((l) => /^(release|cherry-picked)\//.test(l)).join(',') || '-';
+        return [it.pr, g.short(it.sha), `+${st.add}-${st.del}`, st.main, conf, labels, it.title].join('\t');
+      });
+      const f = path.join(dir, `batch_${name}.txt`);
+      fs.writeFileSync(f, lines.join('\n') + '\n');
+      batches.push({ name, file: f, out: path.join(dir, 'verdicts', `${name}.json`), count: lines.length });
+    }
+  }
+  if (briefTemplate) {
+    const s = db.session(sid);
+    const brief = fs.readFileSync(briefTemplate, 'utf8')
+      .replaceAll('{{REPO}}', s.config.repo).replaceAll('{{REMOTE}}', remote(s.config))
+      .replaceAll('{{SOURCE}}', s.config.source).replaceAll('{{SINCE}}', s.config.sinceSha)
+      .replaceAll('{{BRANCHES}}', lanes.join(', ')).replaceAll('{{PRBODY}}', path.join(sessionDir(sid), 'prbody'))
+      .replaceAll('{{BRANCH_KEYS}}', lanes.map((b) => `"${b}":{"bug":"yes|no|partial|n/a","evidence":"...","adapt":"...","verdict":"pick|maybe|skip|already"}`).join(','));
+    fs.writeFileSync(path.join(dir, 'BRIEF.md'), brief);
+  }
+  return { dir, brief: path.join(dir, 'BRIEF.md'), batches, total: items.length };
+}
+
+// --- decisions ---
+
+export const DECISIONS = ['undecided', 'backport', 'skip', 'defer'];
+
+/** The decision a verdict and lean suggest. */
+export function recommend(verdict, lean) {
+  if (verdict === 'pick') return 'backport';
+  if (verdict === 'skip' || verdict === 'already') return 'skip';
+  if (verdict === 'maybe') {
+    const l = (lean || '').toLowerCase();
+    if (l.startsWith('take')) return 'backport';
+    if (l.startsWith('your call')) return 'undecided';
+    return 'skip';
+  }
+  return 'undecided';
+}
+
+/**
+ * Dependency groups per branch: PRs joined by evaluator, follow-up, manual or conflict dependencies, or by accepted
+ * blame hints (open blame hints are too noisy to group by). Dismissed edges and PRs already on the branch don't join.
+ * Returns Map<branch, Map<pr, Set<pr>>> where every member maps to the same set.
+ */
+export function dependencyGroups(sid) {
+  const out = new Map();
+  const lanes = db.all('SELECT branch FROM lanes WHERE session_id = ?', sid).map((l) => l.branch);
+  const live = new Map(lanes.map((b) => [b, new Set(db.all('SELECT pr FROM targets WHERE session_id = ? AND branch = ? AND on_branch = 0', sid, b).map((t) => t.pr))]));
+  const edges = db.all(`SELECT pr, depends_on, branch FROM deps WHERE session_id = ? AND status != 'dismissed'
+                        AND (source != 'blame' OR status = 'accepted')`, sid);
+  for (const b of lanes) {
+    const parent = new Map();
+    const find = (x) => { while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x))); x = parent.get(x); } return x; };
+    const add = (x) => { if (!parent.has(x)) parent.set(x, x); };
+    for (const e of edges) {
+      if (e.branch && e.branch !== b) continue;
+      if (!live.get(b).has(e.pr) || !live.get(b).has(e.depends_on)) continue;
+      add(e.pr); add(e.depends_on); parent.set(find(e.pr), find(e.depends_on));
+    }
+    const sets = new Map(); const m = new Map();
+    for (const x of parent.keys()) { const r = find(x); if (!sets.has(r)) sets.set(r, new Set()); sets.get(r).add(x); }
+    for (const set of sets.values()) for (const x of set) m.set(x, set);
+    out.set(b, m);
+  }
+  return out;
+}
+
+/**
+ * Set decisions made by the user. With group (the default), the whole dependency group of each PR on that branch
+ * gets the same decision. Returns the [{pr, branch}] that changed, including group members.
+ */
+export function setDecisions(sid, list, { group = true } = {}) {
+  const groups = group ? dependencyGroups(sid) : null;
+  const changed = [];
+  db.tx(() => {
+    for (const d of list) {
+      if (!DECISIONS.includes(d.decision)) throw new Error(`decision must be one of ${DECISIONS.join(', ')}`);
+      const members = groups?.get(d.branch)?.get(Number(d.pr)) || new Set([Number(d.pr)]);
+      for (const pr of members) {
+        const note = pr === Number(d.pr) ? (d.note ?? null) : `set with its dependency group (via #${d.pr})`;
+        const r = db.run(`UPDATE targets SET decision = ?, decision_source = 'user', decision_note = COALESCE(?, decision_note), decided_at = ?
+                          WHERE session_id = ? AND pr = ? AND branch = ? AND on_branch = 0`, d.decision, note, db.now(), sid, pr, d.branch);
+        if (!r.changes && pr === Number(d.pr)) throw new Error(`no target #${pr} ${d.branch} (or it is already on the branch)`);
+        if (r.changes) changed.push({ pr, branch: d.branch, decision: d.decision, viaGroup: pr !== Number(d.pr) });
+      }
+    }
+  });
+  const extra = changed.filter((c) => c.viaGroup);
+  if (extra.length) db.event(sid, `Group decision: ${extra.map((c) => `#${c.pr}`).join(', ')} set to ${extra[0].decision} with ${[...new Set(list.map((d) => `#${d.pr}`))].join(', ')}`, { branch: extra[0].branch });
+  db.touchSession(sid);
+  return changed;
+}
+export function setDecision(sid, pr, branch, decision, note, opts) { return setDecisions(sid, [{ pr, branch, decision, note }], opts); }
+
+export const VALUES = ['high', 'medium', 'low'];
+/** Set a PR's value for users/operators by hand. */
+export function setValue(sid, pr, value, note) {
+  if (value && !VALUES.includes(value)) throw new Error(`value must be one of ${VALUES.join(', ')}`);
+  const row = db.get('SELECT assessment FROM items WHERE session_id = ? AND pr = ?', sid, pr);
+  if (!row) throw new Error(`no PR #${pr} in ${sid}`);
+  const a = db.J(row.assessment, {}) || {};
+  Object.assign(a, { value: value || null, valueSource: 'user' }); if (note !== undefined) a.valueNote = note;
+  db.run('UPDATE items SET assessment = ? WHERE session_id = ? AND pr = ?', db.S(a), sid, pr);
+}
+
+/** Groups for the plan list: the union of every branch's dependency groups. Map<pr, number[]> (members sorted). */
+export function displayGroups(sid, groups = dependencyGroups(sid)) {
+  const parent = new Map();
+  const find = (x) => { while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x))); x = parent.get(x); } return x; };
+  for (const m of groups.values()) for (const [pr, set] of m) {
+    if (!parent.has(pr)) parent.set(pr, pr);
+    for (const o of set) { if (!parent.has(o)) parent.set(o, o); parent.set(find(pr), find(o)); }
+  }
+  const sets = new Map();
+  for (const x of parent.keys()) { const r = find(x); (sets.get(r) || sets.set(r, []).get(r)).push(x); }
+  const out = new Map();
+  for (const list of sets.values()) { list.sort((a, b) => a - b); for (const x of list) out.set(x, list); }
+  return out;
+}
+
+/**
+ * Mark rows reviewed: the current decisions become the user's (a recommendation is accepted as is) and the rows
+ * leave the review list. A dependency group is always reviewed as one. reviewed=false puts them back.
+ */
+export function setReviewed(sid, prs, reviewed = true) {
+  const groups = displayGroups(sid);
+  const all = new Set(); for (const p of prs) for (const x of groups.get(Number(p)) || [Number(p)]) all.add(x);
+  db.tx(() => {
+    for (const pr of all) {
+      db.run('UPDATE items SET reviewed_at = ? WHERE session_id = ? AND pr = ?', reviewed ? db.now() : null, sid, pr);
+      if (reviewed) db.run(`UPDATE targets SET decision_source = 'user', decided_at = COALESCE(decided_at, ?)
+                            WHERE session_id = ? AND pr = ? AND on_branch = 0`, db.now(), sid, pr);
+    }
+  });
+  db.event(sid, `${reviewed ? 'Reviewed' : 'Back in review'}: ${[...all].map((p) => `#${p}`).join(', ')}`);
+  return [...all];
+}
+
+/** Put decisions back to the recommendation; your own decisions stay unless all is set. */
+export function applyRecommendations(sid, { branch = null, all = false } = {}) {
+  const r = db.run(`UPDATE targets SET decision = IFNULL(recommendation, 'undecided'), decision_source = 'recommended', decided_at = NULL
+     WHERE session_id = ? AND on_branch = 0 ${all ? '' : "AND decision_source != 'user'"} ${branch ? 'AND branch = ?' : ''}`,
+  ...[sid, ...(branch ? [branch] : [])]);
+  db.event(sid, `Recommendations applied to ${r.changes} PR/branch decisions${all ? ' (including your own)' : ''}`);
+  return { changed: r.changes };
+}
+
+/** The full plan as plain objects, for the UI and the report. */
+export function planView(sid) {
+  const lanes = db.all('SELECT branch, release FROM lanes WHERE session_id = ? ORDER BY seq', sid);
+  const items = db.all('SELECT * FROM items WHERE session_id = ? ORDER BY master_order', sid);
+  const targets = db.all('SELECT * FROM targets WHERE session_id = ?', sid);
+  const deps = db.all('SELECT * FROM deps WHERE session_id = ? ORDER BY id', sid);
+  const tmap = new Map(); for (const t of targets) tmap.set(`${t.pr}|${t.branch}`, { ...t, dryrun: db.J(t.dryrun), equiv: db.J(t.equiv) });
+  const dmap = new Map(); for (const d of deps) (dmap.get(d.pr) || dmap.set(d.pr, []).get(d.pr)).push(d);
+  const groups = dependencyGroups(sid);
+  const shown = displayGroups(sid, groups);
+  return {
+    lanes,
+    items: items.map((it) => ({
+      ...it, labels: db.J(it.labels, []), stats: db.J(it.stats, {}), assessment: db.J(it.assessment),
+      targets: Object.fromEntries(lanes.map((l) => [l.branch, tmap.get(`${it.pr}|${l.branch}`) || null])),
+      deps: dmap.get(it.pr) || [],
+      groups: Object.fromEntries(lanes.map((l) => [l.branch, [...(groups.get(l.branch)?.get(it.pr) || [])].sort((a, b) => a - b)])),
+      group: shown.get(it.pr) || null,
+    })),
+  };
+}
+
+/** Release-label changes implied by the decisions. */
+export function labelPlan(sid) {
+  const { lanes, items } = planView(sid);
+  const add = []; const remove = [];
+  for (const it of items) {
+    for (const l of lanes) {
+      if (!l.release) continue;
+      const t = it.targets[l.branch]; if (!t || t.on_branch) continue;
+      const label = `release/${l.release}`; const has = it.labels.includes(label);
+      if (t.decision === 'backport' && !has) add.push({ pr: it.pr, label });
+      if (t.decision === 'skip' && has) remove.push({ pr: it.pr, label });
+    }
+  }
+  return { add, remove };
+}
+
+export function applyLabels(sid, { removals = false } = {}) {
+  const { add, remove } = labelPlan(sid);
+  const by = new Map();
+  for (const a of add) (by.get(a.pr) || by.set(a.pr, { add: [], remove: [] }).get(a.pr)).add.push(a.label);
+  if (removals) for (const r of remove) (by.get(r.pr) || by.set(r.pr, { add: [], remove: [] }).get(r.pr)).remove.push(r.label);
+  for (const [pr, ch] of by) {
+    gh.editLabels(pr, ch);
+    const it = db.get('SELECT labels FROM items WHERE session_id = ? AND pr = ?', sid, pr);
+    const labels = new Set(db.J(it.labels, [])); ch.add.forEach((l) => labels.add(l)); ch.remove.forEach((l) => labels.delete(l));
+    db.run('UPDATE items SET labels = ? WHERE session_id = ? AND pr = ?', db.S([...labels]), sid, pr);
+  }
+  db.event(sid, `Labels applied: ${add.length} added${removals ? `, ${remove.length} removed` : ''}`);
+  return { added: add.length, removed: removals ? remove.length : 0 };
+}
+
+// --- markdown report ---
+const esc = (s) => String(s ?? '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
+const link = (p) => `[#${p}](https://github.com/${gh.REPO}/pull/${p})`;
+const strip = (t) => t.replace(/^(\[[^\]]*\]\s*)+/, '');
+export function report(sid) {
+  const s = db.session(sid); const { lanes, items } = planView(sid);
+  const scoped = items.filter((it) => !it.excluded && lanes.some((l) => it.targets[l.branch] && !it.targets[l.branch].on_branch));
+  const w = []; const cols = lanes.map((l) => l.branch);
+  w.push(`# ${s.title}\n`);
+  w.push(`PRs merged to \`${s.config.source}\` after \`${g.short(s.config.sinceSha)}\`${s.config.masterHead ? ` up to \`${s.config.masterHead}\`` : ''}. Branch heads: ${cols.map((b) => `\`${b}\` ${s.config.heads?.[b] || ''}`).join(', ')}. Generated ${db.now().slice(0, 10)} from session \`${sid}\`.\n`);
+  for (const l of lanes) {
+    const c = (d) => scoped.filter((it) => it.targets[l.branch]?.decision === d).length;
+    const v = (d) => scoped.filter((it) => it.targets[l.branch]?.verdict === d).length;
+    w.push(`- **${l.branch}${l.release ? ` (${l.release})` : ''}:** verdicts ${v('pick')} pick, ${v('maybe')} maybe, ${v('skip')} skip; decisions ${c('backport')} backport, ${c('skip')} skip, ${c('defer')} defer, ${c('undecided')} undecided.`);
+  }
+  const sev = { high: 0, medium: 1, low: 2 };
+  const section = (title, filter) => {
+    const rows = scoped.filter(filter).sort((a, b) => (sev[a.assessment?.severity] ?? 3) - (sev[b.assessment?.severity] ?? 3) || a.master_order - b.master_order);
+    if (!rows.length) return;
+    w.push(`\n## ${title}\n`);
+    w.push(`| PR | Value | Sev | Risk | What it fixes | ${cols.map((b) => `${b} verdict / dry run / decision`).join(' | ')} | Notes |`);
+    w.push(`|---|---|---|---|---|${cols.map(() => '---').join('|')}|---|`);
+    for (const it of rows) {
+      const a = it.assessment || {};
+      const per = cols.map((b) => { const t = it.targets[b]; if (!t) return '-'; if (t.on_branch) return 'on branch'; return `${t.verdict || '?'} / ${t.dryrun?.state || '-'} / **${t.decision}**`; });
+      const notes = [...new Set(cols.map((b) => it.targets[b]?.note).filter(Boolean))].join(' ')
+        + it.deps.filter((d) => d.status !== 'dismissed').map((d) => ` Depends on #${d.depends_on} (${d.source}${d.branch ? `, ${d.branch}` : ''}).`).join('');
+      w.push(`| ${link(it.pr)} ${esc(strip(it.title))} | ${a.value || ''}${a.valueNote ? `: ${esc(a.valueNote)}` : ''} | ${a.severity || ''} | ${a.risk || ''} | ${esc(a.impact)} | ${per.join(' | ')} | ${esc(notes)} |`);
+    }
+  };
+  const anyV = (it, vs) => cols.some((b) => vs.includes(it.targets[b]?.verdict));
+  section('Recommended picks', (it) => it.kind === 'code' && anyV(it, ['pick']));
+  section('Recommended flaky-test fixes', (it) => it.kind === 'flaky' && anyV(it, ['pick']));
+  section('Needs a decision', (it) => !anyV(it, ['pick']) && anyV(it, ['maybe']));
+  section('Not yet triaged', (it) => cols.every((b) => !it.targets[b] || it.targets[b].on_branch || !it.targets[b].verdict));
+  w.push('\n## Skipped\n');
+  w.push('| PR | Why |'); w.push('|---|---|');
+  for (const it of scoped.filter((x) => cols.every((b) => ['skip', 'already', undefined].includes(x.targets[b]?.verdict) && x.targets[b]?.verdict))) {
+    w.push(`| ${link(it.pr)} ${esc(strip(it.title))} | ${esc(it.assessment?.reason)} |`);
+  }
+  return w.join('\n') + '\n';
+}

@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pulsar backports</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">Pulsar backports</div>
+  <select id="sessionPick" aria-label="Session"></select>
+  <button id="newSession" class="ghost">New session</button>
+  <span class="grow"></span>
+  <span id="conn" class="muted"></span>
+</header>
+
+<dialog id="newDialog">
+  <form method="dialog" id="newForm">
+    <h2>New backport session</h2>
+    <label>Session id <input name="id" required pattern="[a-z0-9][a-z0-9._-]{2,60}" placeholder="2026-11-backports"></label>
+    <label>Title <input name="title" placeholder="Backports for 4.2.6 and 4.0.15"></label>
+    <label>PRs merged after PR # <input name="sincePr" type="number" placeholder="21767"></label>
+    <label>or after commit <input name="sinceSha" placeholder="sha (optional)"></label>
+    <label>Branches <input name="branches" required value="branch-4.2:4.2.6,branch-4.0:4.0.15<branch-4.2"></label>
+    <p class="muted small">Format: <code>branch:release</code>, comma separated. <code>&lt;branch-4.2</code> makes a lane reuse that lane's tested cherry-picks.</p>
+    <menu><button value="cancel" class="ghost">Cancel</button><button value="ok" class="primary">Create and discover</button></menu>
+  </form>
+</dialog>
+
+<main id="main">
+  <section id="empty" class="empty" hidden>
+    <h1>No sessions yet</h1>
+    <p>Create one here, or with <code>bpt session create</code> from Claude Code.</p>
+  </section>
+
+  <section id="session" hidden>
+    <div class="sessionHead">
+      <div>
+        <h1 id="sTitle"></h1>
+        <div id="sMeta" class="muted small"></div>
+      </div>
+      <div class="controls">
+        <label class="toggle" title="Run the next step automatically. Finalizing a real branch always needs your click."><input type="checkbox" id="autopilot"> Autopilot</label>
+        <label class="small">Claude jobs
+          <select id="runner"><option value="headless">headless claude -p</option><option value="interactive">my Claude Code session</option></select>
+        </label>
+        <label class="toggle"><input type="checkbox" id="autoPushTest"> Push test branches automatically</label>
+      </div>
+    </div>
+
+    <div class="actions" id="sessionActions"></div>
+    <div id="lanes" class="lanes"></div>
+
+    <nav class="tabs" id="tabs"></nav>
+    <div id="tabBody"></div>
+  </section>
+</main>
+
+<dialog id="logDialog" class="wide">
+  <div class="logHead"><h2 id="logTitle"></h2><span class="grow"></span><button id="logClose" class="ghost">Close</button></div>
+  <div id="logMeta" class="small muted"></div>
+  <pre id="logBody" class="log"></pre>
+  <form id="replyForm" hidden><textarea name="text" rows="3" placeholder="Answer the worker's question; its Claude Code session resumes with this text"></textarea><button class="primary">Send reply</button></form>
+</dialog>
+
+<div id="toast" class="toast" hidden></div>
+<script src="app.js" type="module"></script>
+</body>
+</html>
