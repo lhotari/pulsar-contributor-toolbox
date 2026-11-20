@@ -46,9 +46,10 @@ async function api(path, { method = 'GET', body } = {}) {
 }
 const action = (name, args = {}) => api('action', { method: 'POST', body: { action: name, ...args } });
 let toastTimer;
-function toast(msg, err = false) {
-  const t = $('#toast'); t.textContent = msg; t.className = `toast${err ? ' err' : ''}`; t.hidden = false;
-  clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true; }, err ? 9000 : 3500);
+function toast(msg, err = false, href = null) {
+  const t = $('#toast'); t.textContent = msg; t.className = `toast${err ? ' err' : ''}${href ? ' link' : ''}`; t.hidden = false;
+  t.onclick = href ? () => { t.hidden = true; location.hash = href; } : null;
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true; }, err ? (href ? 15000 : 9000) : 3500);
 }
 async function run(label, fn) {
   try { const r = await fn(); if (label) toast(label); return r; } catch (e) { toast(e.message, true); throw e; }
@@ -97,7 +98,16 @@ function md(text) {
 
 // --- app state ---
 const S = { sort: { key: 'score', dir: 'desc' }, state: null, repo: storage('prd-repo') || '', lane: storage('prd-lane') || 'check', filter: '', pr: null, diff: null, tab: 'review',
-  editing: new Set(), sel: null, newAt: null, openReasons: new Set() };
+  editing: new Set(), sel: null, newAt: null, openReasons: new Set(), submitting: new Map() };
+// Submissions run in the background (staging, GitHub's submit, replies, a re-read): the UI goes straight back to
+// the lane and shows them here, on the row and on the PR page until they finish.
+const subKey = (repo, number) => `${repo}#${number}`;
+function showSubmitting() {
+  const c = $('#submitChip'); const n = S.submitting.size;
+  c.hidden = !n;
+  c.textContent = n ? `Submitting ${[...S.submitting.keys()].map((k) => `#${k.split('#')[1]}`).join(', ')}…` : '';
+  c.title = n ? 'Staging, submitting and posting replies on GitHub' : '';
+}
 const LANE_INTRO = {
   backlog: 'Open PRs you have not engaged with, best first. The score reasons explain the order (committers, review requests and fixes rank up). "AI review" queues a Claude Code review; nothing is posted.',
   queued: 'AI reviews waiting for a Claude Code worker.',
@@ -350,7 +360,8 @@ function renderRows() {
         h('td', {}, chip(gate, gate, it.scan), it.scanLevel === 'surface' ? h('div', { class: 'muted small', title: it.scan }, 'build/CI touched') : null),
         h('td', { class: 'hideS small' }, it.myLast ? [chip(it.myLast.state.toLowerCase().replace('_', ' '), it.myLast.state), h('div', { class: 'muted' }, ago(it.myLast.at))] : '',
           it.followUp?.length ? h('ul', { class: 'why' }, it.followUp.map((r) => h('li', {}, r))) : null),
-        h('td', { class: 'small' }, it.job ? chip(`${it.job.type} ${it.job.status}`, it.job.status) : null,
+        h('td', { class: 'small' }, S.submitting.has(key) ? h('div', {}, chip('submitting…', 'running')) : null,
+          it.job ? chip(`${it.job.type} ${it.job.status}`, it.job.status) : null,
           it.review ? h('div', {}, chip(`${{ 're-review': 're-review', manual: 'your review', initial: 'first review' }[it.review.kind] || it.review.kind} ${it.review.status}`, it.review.status),
             it.review.stale ? [' ', chip('out of date', 'warn', 'The draft was written for an older head')] : null,
             h('div', { class: 'muted' }, `${it.review.comments} comment(s)`)) : null),
@@ -611,6 +622,9 @@ function footbar() {
   if (!review || review.status === 'submitted') {
     return review ? h('div', { class: 'footbar' }, chip('submitted', 'ok'), review.event ? ` as ${review.event}` : '', review.gh_url ? ext(review.gh_url, ' View on GitHub ↗') : '') : null;
   }
+  if (S.submitting.has(subKey(pr.repo, pr.number))) {
+    return h('div', { class: 'footbar' }, chip('submitting…', 'running'), h('span', { class: 'small muted' }, ' Being submitted to GitHub; this page updates when it is done.'));
+  }
   const inc = review.comments.filter((c) => c.include && c.state !== 'removed' && !c.anchor_error);
   const staged = inc.filter((c) => c.state === 'staged').length;
   const local = inc.filter((c) => c.state !== 'staged' && c.kind !== 'issue').length;
@@ -676,18 +690,24 @@ function openSubmit() {
         if (acks.some((a) => !a.checked)) throw new Error('acknowledge the lint findings, or edit the text');
         await action('ack', { review: review.id, labels: acks.map((a) => a.value) });
       }
-      const r = await action('submit', { review: review.id, event: f.event.value, body: f.body.value,
-        ci: { approveRuns: !!ciOpts.approveRuns?.checked, updateBranch: !!ciOpts.updateBranch?.checked } });
-      toast(r.submittedOnGitHub ? `#${pr.number} had already been submitted on GitHub`
-        : `#${pr.number}: review submitted (${r.event.toLowerCase().replace('_', ' ')})${r.ci?.updateBranch === 'requested' ? '; branch update requested, new runs get approved as they start' : ''}${r.ci?.approved?.length ? `; approved ${r.ci.approved.length} workflow run(s)` : ''}${r.errors?.length ? ` with follow-up errors: ${r.errors.join('; ')}` : ''}`, !!r.errors?.length);
-      // Back to the lane the PR was opened from, unless the user has already gone somewhere else meanwhile.
-      const back = onPrRoute(pr.repo, pr.number);
-      await refreshState();
-      if (back && onPrRoute(pr.repo, pr.number)) location.hash = `#/lane/${S.lane}`;
-    } catch (e) {
-      toast(e.message, true);
-      if (e.code === 'STALE') reloadPr();
-    }
+    } catch (e) { toast(e.message, true); return; }
+    // Straight back to the lane; the submission carries on in the background.
+    const key = subKey(pr.repo, pr.number); const prHref = `#/pr/${pr.repo}/${pr.number}`;
+    S.submitting.set(key, { at: Date.now() }); showSubmitting();
+    toast(`Submitting #${pr.number} to GitHub…`);
+    if (onPrRoute(pr.repo, pr.number)) location.hash = `#/lane/${S.lane}`;
+    action('submit', { review: review.id, event: f.event.value, body: f.body.value,
+      ci: { approveRuns: !!ciOpts.approveRuns?.checked, updateBranch: !!ciOpts.updateBranch?.checked } })
+      .then((r) => toast(r.submittedOnGitHub ? `#${pr.number} had already been submitted on GitHub`
+        : `#${pr.number}: review submitted (${r.event.toLowerCase().replace('_', ' ')})${r.ci?.updateBranch === 'requested' ? '; branch update requested, new runs get approved as they start' : ''}${r.ci?.approved?.length ? `; approved ${r.ci.approved.length} workflow run(s)` : ''}${r.errors?.length ? ` with follow-up errors: ${r.errors.join('; ')}` : ''}`,
+      !!r.errors?.length, r.errors?.length ? prHref : null))
+      .catch((e) => toast(`#${pr.number}: not submitted — ${e.message} (click to open)`, true, prHref))
+      .finally(async () => {
+        S.submitting.delete(key); showSubmitting();
+        await refreshState();
+        if ($('#rows')) { boardSig = ''; refreshBoard(); }
+        if (onPrRoute(pr.repo, pr.number)) reloadPr();
+      });
   };
   d.showModal();
 }

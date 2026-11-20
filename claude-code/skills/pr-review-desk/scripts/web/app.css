@@ -170,3 +170,6 @@ pre.effective { max-height: 520px; margin: 3px 0 0; }
 .ciBox { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; margin: 8px 0; font-size: 13px; }
 .ciBox label { display: flex; gap: 6px; align-items: flex-start; margin: 4px 0; }
 .ciBox .why { color: var(--muted); margin-left: 22px; font-size: 12px; }
+.toast.link { cursor: pointer; text-decoration: underline; }
+#submitChip::before { content: ''; display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; vertical-align: -1px; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
