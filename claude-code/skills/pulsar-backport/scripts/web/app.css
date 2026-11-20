@@ -52,6 +52,9 @@ main { padding: 18px 20px 60px; max-width: 1500px; margin: 0 auto; }
 .need:first-of-type { border-top: none; }
 .need .needText { white-space: pre-wrap; margin-top: 3px; }
 .need .laneButtons { margin-top: 7px; }
+/* Paths, test lists (Class#m1+m2+...) and SHAs have no spaces: let them break instead of widening the page. */
+.pickRow td, .filters .small, .need .needText, .attention, .feed .ev span { overflow-wrap: anywhere; }
+.pickRow pre.check { white-space: pre-wrap; overflow-wrap: anywhere; }
 .laneButtons { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 12px; }
 .tabs button { border: none; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 7px 14px; color: var(--muted); }

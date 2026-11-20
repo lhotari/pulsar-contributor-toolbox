@@ -509,7 +509,7 @@ export function markResolved(sid, branch, pr, { tests = null, result = null } = 
   // Leftover slog, conflict markers, unguarded debug or Gradle files on a Maven branch are not a resolution yet.
   if (!check.ok) throw new Error(`check-pick.sh still reports findings for #${pr}; fix them (pulsar-cherry-pick skill: slog → slf4j, Gradle → Maven, guards) and amend, then run this again:\n${(check.output || '').slice(-1500)}`);
   // What validated the resolution: the tests the resolver ran and their outcome (none for a hand resolution without them).
-  const validation = tests ? { tests: String(tests).split(/[,\s]+/).filter(Boolean), result: result || 'not reported', at: db.now() } : null;
+  const validation = tests ? { tests: String(tests).split(',').map((x) => x.trim()).filter(Boolean), result: result || 'not reported', at: db.now() } : null;
   const detail = { ...p.detail, check, resolvedAt: db.now(), validation };
   setPick(sid, branch, pr, { status: 'picked', picked_sha: own || st.head, detail });
   db.updateLane(sid, branch, { head_sha: st.head, phase: 'picking', attention: null });

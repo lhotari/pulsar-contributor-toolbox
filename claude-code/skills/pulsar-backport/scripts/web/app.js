@@ -486,7 +486,7 @@ function renderPicks(branch) {
     if (det.warnings?.length) extra.push(h('div', { class: 'small muted' }, det.warnings.join('; ')));
     if (det.reason) extra.push(h('div', { class: 'small muted' }, `${det.dropped ? 'Dropped' : 'Skipped'}: ${det.reason}`));
     if (det.replay && p.status === 'pending') extra.push(h('div', { class: 'small muted' }, `Re-applied from the lane's earlier commit ${short(p.source_sha)}${det.extras?.length ? ` with ${det.extras.length} fixup(s)` : ''}`));
-    if (det.validation) extra.push(h('div', { class: 'small muted' }, `Resolved; validated with ${det.validation.tests.join(', ')}: ${det.validation.result}`));
+    if (det.validation) extra.push(h('div', { class: 'small muted' }, `Resolved; validated with ${det.validation.tests.join(', ').replaceAll('+', '+\u200b')}: ${det.validation.result}`));
     else if (det.resolvedAt) extra.push(h('div', { class: 'small muted' }, 'Resolved without reported tests'));
     if (det.outOfOrder) extra.push(h('div', { class: 'small muted' }, `Out of master order: ${det.outOfOrder}`));
     if (det.check && !det.check.ok) extra.push(h('pre', { class: 'check' }, det.check.output));
