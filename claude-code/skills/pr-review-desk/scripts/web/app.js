@@ -121,8 +121,12 @@ async function refreshState() {
     return;
   }
   const pick = $('#repoPick'); const cur = S.repo;
-  pick.replaceChildren(h('option', { value: '' }, 'All repositories'), ...S.state.repos.map((r) => h('option', { value: r.slug }, r.slug)));
-  pick.value = S.state.repos.some((r) => r.slug === cur) ? cur : '';
+  const slugs = S.state.repos.map((r) => r.slug).join(',');
+  if (pick.dataset.slugs !== slugs) {
+    pick.dataset.slugs = slugs;
+    pick.replaceChildren(h('option', { value: '' }, 'All repositories'), ...S.state.repos.map((r) => h('option', { value: r.slug }, r.slug)));
+    pick.value = S.state.repos.some((r) => r.slug === cur) ? cur : '';
+  }
   const r = repoObj();
   $('#autoWrap').hidden = !r; $('#autopilot').checked = !!r?.autopilot;
   $('#syncBtn').textContent = S.state.repos.some((x) => x.syncing) ? 'Syncing…' : 'Sync';
@@ -165,6 +169,35 @@ $('#syncBtn').addEventListener('click', () => {
 
 // --- board ---
 let boardItems = [];
+function laneNav(counts = laneCounts()) {
+  return h('nav', { class: 'lanes', id: 'laneNav' }, S.state.lanes.flatMap((l) => [
+    ['follow-up', 'security'].includes(l.id) ? h('div', { class: 'sep' }) : null,
+    h('button', { class: `${l.id === S.lane ? 'on' : ''} ${l.id}`, onclick: () => { location.hash = `#/lane/${l.id}`; } },
+      h('span', {}, l.title), h('span', { class: 'n' }, counts[l.id] || 0)),
+  ]));
+}
+
+const itemsUrl = () => `items?lane=${S.lane}${S.repo ? `&repo=${encodeURIComponent(S.repo)}` : ''}`;
+let boardSig = '';
+
+/**
+ * Background refresh of the board: no rebuild, no flash. The lane counts are swapped in place, and the rows are
+ * re-rendered only when the data changed, keeping the scroll position and anything open in the table.
+ */
+async function refreshBoard() {
+  const nav = $('#laneNav'); const rows = $('#rows');
+  if (!nav || !rows) return showBoard();
+  nav.replaceWith(laneNav());
+  const fresh = await api(itemsUrl()).catch(() => null);
+  if (!fresh) return;
+  const sig = JSON.stringify(fresh);
+  if (sig === boardSig) return;
+  boardSig = sig; boardItems = fresh;
+  const y = window.scrollY;
+  renderRows();
+  window.scrollTo(0, y);
+}
+
 async function showBoard() {
   const main = $('#main');
   if (!S.state?.repos.length) {
@@ -174,11 +207,7 @@ async function showBoard() {
   }
   const counts = laneCounts();
   if (!S.laneChosen && !counts[S.lane]) S.lane = ['security', 'check', 'staged', 'follow-up', 'backlog'].find((l) => counts[l]) || 'backlog';
-  const lanes = h('nav', { class: 'lanes' }, S.state.lanes.flatMap((l, i) => [
-    ['follow-up', 'security'].includes(l.id) ? h('div', { class: 'sep' }) : null,
-    h('button', { class: `${l.id === S.lane ? 'on' : ''} ${l.id}`, onclick: () => { location.hash = `#/lane/${l.id}`; } },
-      h('span', {}, l.title), h('span', { class: 'n' }, counts[l.id] || 0)),
-  ]));
+  const lanes = laneNav(counts);
   const body = h('section', {}, h('p', { class: 'laneIntro muted small' }, LANE_INTRO[S.lane] || ''));
   const search = h('input', { type: 'search', id: 'boardSearch', placeholder: 'Filter: title, #, author:login, label…', value: S.filter,
     oninput: (e) => setFilter(e.target.value, { fromInput: true }), onkeydown: (e) => { if (e.key === 'Escape') setFilter(''); } });
@@ -196,7 +225,8 @@ async function showBoard() {
   }
   body.append(filters, h('div', { id: 'laneNote' }), h('div', { id: 'rows' }));
   main.replaceChildren(h('div', { class: 'board' }, lanes, body));
-  boardItems = await api(`items?lane=${S.lane}${S.repo ? `&repo=${encodeURIComponent(S.repo)}` : ''}`).catch((e) => { toast(e.message, true); return []; });
+  boardItems = await api(itemsUrl()).catch((e) => { toast(e.message, true); return []; });
+  boardSig = JSON.stringify(boardItems);
   renderRows();
   if (S.lane === 'follow-up') {
     const drafts = (await api(`items?lane=check${S.repo ? `&repo=${encodeURIComponent(S.repo)}` : ''}`).catch(() => [])).filter((it) => it.review?.kind === 're-review');
@@ -213,7 +243,7 @@ async function previewRules() {
 function rowActions(it) {
   const a = [];
   const go = (label, fn, cls = 'small') => h('button', { class: cls, onclick: (e) => { e.stopPropagation(); fn(); } }, label);
-  const refresh = () => refreshState().then(showBoard);
+  const refresh = () => refreshState().then(refreshBoard);
   const isSec = ['flagged', 'suspicious'].includes(it.gate) && it.gateCurrent;
   if (['backlog', 'follow-up', 'waiting', 'approved'].includes(it.lane) && !isSec) {
     a.push(go(it.myLast ? 'Re-review' : 'AI review', () => run('Queued', () => action('review', { repo: it.repo, number: it.number })).then(refresh), 'small primary'));
@@ -237,7 +267,7 @@ async function bulkReReview(n) {
     try { await action('review', { repo: it.repo, number: it.number }); ok++; } catch (e) { toast(`#${it.number}: ${e.message}`, true); }
   }
   toast(`Queued ${ok} re-review(s)`);
-  refreshState().then(showBoard);
+  refreshState().then(refreshBoard);
 }
 
 /** `author:login` matches the author exactly; every other word must appear in the PR's number, title, author, category or labels. */
@@ -806,5 +836,5 @@ route();
 setInterval(async () => {
   await refreshState();
   const onBoard = !location.hash.replace(/^#\/?/, '') || location.hash.startsWith('#/lane');
-  if (onBoard && document.activeElement?.tagName !== 'INPUT') showBoard();
+  if (onBoard && !['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement?.tagName)) refreshBoard();
 }, 15000);
