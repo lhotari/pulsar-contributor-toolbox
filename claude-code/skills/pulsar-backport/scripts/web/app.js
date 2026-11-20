@@ -302,7 +302,25 @@ function groupHead(members, lanes, mode) {
           review(members.map((m) => m.pr));
         } }, `✓ Accept group (${members.length})`))));
 }
+// One search box for the life of the page: re-renders (typing, the periodic refresh) reuse it, so the text being
+// typed is never reset, and focus and the caret come back after the filter bar is rebuilt.
+let searchEl = null;
+function searchBox(f) {
+  if (!searchEl) {
+    searchEl = h('input', { type: 'search', placeholder: 'Search PR, title, impact', value: f.q,
+      oninput: (e) => { clearTimeout(searchBox.t); searchBox.t = setTimeout(() => { if (f.q !== e.target.value) { f.q = e.target.value; renderPlan(); } }, 400); } });
+  }
+  return searchEl;
+}
+
 function renderPlan() {
+  const typing = searchEl && document.activeElement === searchEl ? [searchEl.selectionStart, searchEl.selectionEnd] : null;
+  try { renderPlanBody(); } finally {
+    if (typing && searchEl.isConnected && document.activeElement !== searchEl) { searchEl.focus({ preventScroll: true }); searchEl.setSelectionRange(...typing); }
+  }
+}
+
+function renderPlanBody() {
   const body = $('#tabBody');
   if (!S.plan) { body.replaceChildren(h('p', { class: 'muted' }, 'Loading plan…')); return; }
   const mode = S.tab === 'all' ? 'all' : 'review';
@@ -327,7 +345,7 @@ function renderPlan() {
   const sel = (key, opts) => h('select', { onchange: (e) => { f[key] = e.target.value === '' ? null : e.target.value; renderPlan(); } }, opts.map(([v, l]) => h('option', { value: v ?? '', selected: (f[key] ?? '') === (v ?? '') }, l)));
   const rv = S.summary.review || {};
   const filters = h('div', { class: 'filters' },
-    h('input', { type: 'search', placeholder: 'Search PR, title, impact', value: f.q, oninput: (e) => { f.q = e.target.value; clearTimeout(renderPlan.t); renderPlan.t = setTimeout(renderPlan, 150); } }),
+    searchBox(f),
     sel('show', [['actionable', 'Not on branch, in scope'], ['new', 'New this round'], ['deps', 'Open dependency hints'], ['equivalent', 'On branch via another PR'], ['excluded', 'Excluded by pre-filter'], ['all', 'Everything']]),
     sel('kind', [['all', 'Code + flaky'], ['code', 'Code fixes'], ['flaky', 'Flaky-test fixes']]),
     sel('branch', [[null, 'Any branch'], ...lanes.map((l) => [l.branch, l.branch])]),
