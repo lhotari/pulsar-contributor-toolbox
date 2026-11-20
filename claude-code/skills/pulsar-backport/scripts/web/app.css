@@ -34,7 +34,7 @@ main { padding: 18px 20px 60px; max-width: 1500px; margin: 0 auto; }
 .controls { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; }
 .toggle { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0; }
-.lanes { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 14px; margin-bottom: 18px; }
+.lanes { display: grid; gap: 14px; margin-bottom: 18px; }
 .lane { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
 .laneHead { display: flex; gap: 10px; align-items: baseline; }
 .laneHead b { font-size: 15px; }
@@ -73,7 +73,7 @@ th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line
 th { font-size: 12px; color: var(--muted); font-weight: 600; background: var(--soft); position: sticky; top: 49px; z-index: 1; }
 tr.row { cursor: pointer; } tr.row:hover td { background: var(--soft); }
 tr.detail td { background: var(--soft); }
-td.title { max-width: 520px; }
+td.title { max-width: 520px; overflow-wrap: anywhere; } /* test names like FooTest.testSomethingLong have no spaces */
 .chip { display: inline-block; font-size: 11.5px; padding: 1px 7px; border-radius: 10px; background: var(--soft); color: var(--muted); white-space: nowrap; }
 .chip.pick, .chip.clean, .chip.picked, .chip.backport, .chip.success, .chip.done { background: var(--ok-bg); color: var(--ok); }
 .chip.maybe, .chip.tests, .chip.pending, .chip.defer, .chip.empty { background: var(--warn-bg); color: var(--warn); }
@@ -102,7 +102,49 @@ menu { display: flex; justify-content: flex-end; gap: 8px; padding: 0; margin: 1
 .toast.err { background: var(--bad); color: #fff; }
 .pickRow td:first-child { width: 60px; }
 pre.check { font: 11.5px/1.4 var(--mono); white-space: pre-wrap; margin: 6px 0 0; max-height: 220px; overflow: auto; }
-@media (max-width: 700px) { main { padding: 12px 16px 40px; } .lanes { grid-template-columns: 1fr; } .ev { grid-template-columns: 1fr; } th { position: static; } }
+/* ---------- phones ---------- */
+.lanes { grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); }
+@media (max-width: 700px) {
+  body { font-size: 15px; }
+  .top { flex-wrap: wrap; padding: 8px 16px; gap: 8px; position: static; }
+  .top select { flex: 1 1 100%; min-width: 0; max-width: 100%; order: 3; }
+  main { padding: 12px 16px 40px; }
+  h1 { font-size: 18px; }
+  /* What needs the user comes first; the session actions follow the lanes. */
+  #session:not([hidden]) { display: flex; flex-direction: column; }
+  #session > .sessionHead { order: 0; } #session > #needed { order: 1; margin-top: 12px; } #session > #lanes { order: 2; }
+  #session > .actions { order: 3; margin-top: 0; } #session > .tabs { order: 4; } #session > #tabBody { order: 5; }
+  .actions button { font-size: 14px; padding: 6px 10px; }
+  .lanes { grid-template-columns: 1fr; }
+  .lane, .needed { padding: 12px; }
+  .laneHead { flex-wrap: wrap; row-gap: 4px; } .laneHead b { white-space: nowrap; }
+  .ev { grid-template-columns: 1fr; gap: 2px; }
+  button { padding: 8px 12px; min-height: 38px; white-space: normal; }
+  button.small { min-height: 32px; }
+  button.copy { min-height: 0; padding: 6px; }
+  .tabs { overflow-x: auto; scrollbar-width: none; }
+  .tabs button { white-space: nowrap; min-height: 0; }
+  .filters input[type=search] { width: 100%; }
+  .controls { gap: 10px; }
+  .needHead { flex-wrap: wrap; }
+  .step { font-size: 10px; padding: 4px 1px; }
+  .grid2 { grid-template-columns: 1fr; }
+  select, input, textarea { max-width: 100%; font-size: 16px; } /* 16px: iOS does not zoom into the field */
+  /* Tables become one card per row; app.js copies each column heading into data-label. */
+  table, thead, tbody, tr, th, td { display: block; }
+  table { border: none; background: none; }
+  thead { display: none; }
+  tbody tr { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; margin-bottom: 10px; padding: 6px 10px; }
+  td { border: none; padding: 4px 0; max-width: none !important; width: auto !important; overflow-wrap: anywhere; min-width: 0; }
+  td[data-label]:not([data-label=""])::before { content: attr(data-label); display: block; font-size: 11.5px; color: var(--muted); font-weight: 600; }
+  tr.detail { margin-top: -10px; border-top: none; border-radius: 0 0 8px 8px; }
+  tbody tr.inGroup > td:first-child { border-left: none; } tbody tr.inGroup { border-left: 3px solid var(--accent); }
+  tr.groupHead { border-top: 2px solid var(--accent); }
+  .dep { flex-wrap: wrap; }
+  dialog, dialog.wide { width: 100vw; max-width: 100vw; max-height: 100dvh; margin: 0; border-radius: 0; padding: 14px 16px; }
+  .log { max-height: 70dvh; }
+  .toast { max-width: calc(100vw - 32px); }
+}
 
 select.dec.backport { border-color: var(--ok); color: var(--ok); } select.dec.skip { color: var(--muted); }
 select.dec.defer { border-color: var(--warn); color: var(--warn); }

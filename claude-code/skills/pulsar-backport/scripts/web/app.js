@@ -620,3 +620,21 @@ async function refresh(force = false) {
   setInterval(() => refresh(false), 4000);
   setInterval(() => { if (S.tab === 'plan' || S.tab === 'all') refresh(true); }, 30000);
 })();
+
+// Phones show each table row as a card (app.css): label every cell with its column heading
+// (not the PR number and title, which speak for themselves).
+const NO_LABEL = new Set(['#', 'PR', 'Title']);
+function labelCells(root = document) {
+  for (const t of root.querySelectorAll('table')) {
+    const heads = [...(t.tHead?.rows[0]?.cells || [])].map((c) => c.textContent.replace(/[▲▼]/g, '').trim());
+    if (!heads.length) continue;
+    for (const tr of t.tBodies[0]?.rows || []) for (const td of tr.cells) {
+      const head = heads[td.cellIndex] || '';
+      const label = td.colSpan > 1 || NO_LABEL.has(head) ? '' : head;
+      if (td.dataset.label !== label) td.dataset.label = label;
+    }
+  }
+}
+let labelQueued = false;
+new MutationObserver(() => { if (!labelQueued) { labelQueued = true; queueMicrotask(() => { labelQueued = false; labelCells(); }); } })
+  .observe(document.body, { childList: true, subtree: true });
