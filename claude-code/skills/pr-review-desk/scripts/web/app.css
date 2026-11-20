@@ -167,3 +167,6 @@ pre.effective { max-height: 520px; margin: 3px 0 0; }
   .ev { grid-template-columns: 1fr; } td.hideS, th.hideS { display: none; } .filters input[type=search] { width: 100%; }
   .diff .inlineCards { padding-left: 12px; }
 }
+.ciBox { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; margin: 8px 0; font-size: 13px; }
+.ciBox label { display: flex; gap: 6px; align-items: flex-start; margin: 4px 0; }
+.ciBox .why { color: var(--muted); margin-left: 22px; font-size: 12px; }

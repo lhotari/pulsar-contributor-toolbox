@@ -13,6 +13,7 @@ import * as triage from './triage.mjs';
 import * as review from './review.mjs';
 import * as jobs from './jobs.mjs';
 import * as autopilot from './autopilot.mjs';
+import * as ci from './ci.mjs';
 import { scanSummary } from './scan.mjs';
 import { followUpReasons, draftStaleness } from './triage.mjs';
 
@@ -111,7 +112,39 @@ const ACTIONS = {
   discard: async (a) => { await review.discard(Number(a.review)); return {}; },
   stage: async (a) => review.stage(Number(a.review)),
   'sync-staged': async (a) => review.syncStaged(Number(a.review)),
-  submit: async (a) => review.submit(Number(a.review), { event: a.event, body: a.body }),
+  submit: async (a) => {
+    const rid = Number(a.review);
+    const want = a.event === 'APPROVE' ? { approveRuns: !!a.ci?.approveRuns, updateBranch: !!a.ci?.updateBranch } : {};
+    const rv = db.review(rid);
+    if (want.approveRuns || want.updateBranch) {
+      const it = db.item(rv.repo, rv.number); const pr = db.pr(rv.repo, rv.number);
+      if (['flagged', 'suspicious'].includes(it.gate) && it.gate_sha === pr.head_sha) throw new Error(`the security gate is "${it.gate}": refusing to approve workflow runs or update the branch`);
+    }
+    const r = await review.submit(rid, { event: a.event, body: a.body });
+    if (r.submittedOnGitHub || !(want.approveRuns || want.updateBranch)) return r;
+    const head = db.pr(rv.repo, rv.number).head_sha; r.ci = {};
+    if (want.updateBranch) {
+      try {
+        await ci.updateBranch(rv.repo, rv.number, head);
+        r.ci.updateBranch = 'requested';
+        db.event(rv.repo, rv.number, `#${rv.number}: requested "Update branch"; workflow runs on the new head will be approved as they appear`);
+        ci.followUp(rv.repo, rv.number, head, { onDone: () => triage.track(rv.repo, rv.number).catch(() => {}) })
+          .catch((e) => db.event(rv.repo, rv.number, `#${rv.number}: branch-update follow-up failed: ${e.message}`, { level: 'warn' }));
+      } catch (e) {
+        r.ci.updateBranch = `failed: ${e.message.split('\n')[0]}`;
+        db.event(rv.repo, rv.number, `#${rv.number}: "Update branch" failed: ${e.message.split('\n')[0]}`, { level: 'warn' });
+        r.errors = [...(r.errors || []), `update branch: ${e.message.split('\n')[0]}`];
+      }
+    }
+    // Runs on the reviewed head still need approval when the branch is not updated (or the update failed).
+    if (want.approveRuns && r.ci.updateBranch !== 'requested') {
+      const ap = await ci.approveRuns(rv.repo, head).catch((e) => ({ approved: [], errors: [e.message] }));
+      r.ci.approved = ap.approved;
+      if (ap.approved.length) db.event(rv.repo, rv.number, `#${rv.number}: approved ${ap.approved.length} workflow run(s): ${ap.approved.join(', ')}`);
+      if (ap.errors.length) r.errors = [...(r.errors || []), ...ap.errors.map((x) => `approve run ${x}`)];
+    }
+    return r;
+  },
   body: (a) => { review.setBody(Number(a.review), a.body); return {}; },
   ack: (a) => { review.ackLints(Number(a.review), a.labels || []); return review.outgoing(Number(a.review)); },
   'comment-add': async (a) => ({ id: await review.addComment(Number(a.review), a) }),
@@ -164,6 +197,7 @@ export function serve({ port = DEFAULT_PORT, open = false } = {}) {
         if (ep === 'state') return send(200, state());
         if (ep === 'items') return send(200, items(q.repo || null, q.lane || null));
         if (ep === 'pr') return send(200, prView(q.repo, Number(q.number)));
+        if (ep === 'ci') return send(200, await ci.status(q.repo, Number(q.number)));
         if (ep === 'diff') return send(200, await review.diffView(q.repo, Number(q.number), q.sha || null));
         if (ep === 'rules') return send(200, autopilot.ruleCandidates(q.repo));
         if (ep === 'events') return send(200, db.all(`SELECT * FROM events WHERE (? IS NULL OR repo = ?) AND id > ? ORDER BY id DESC LIMIT 300`, q.repo || null, q.repo || null, Number(q.after || 0)));

@@ -31,6 +31,7 @@ const triage = await import('../scripts/lib/triage.mjs');
 const review = await import('../scripts/lib/review.mjs');
 const jobs = await import('../scripts/lib/jobs.mjs');
 const autopilot = await import('../scripts/lib/autopilot.mjs');
+const ci = await import('../scripts/lib/ci.mjs');
 db.meta('budget', JSON.stringify({ available: false, at: new Date().toISOString() }));
 
 test('sync scores committers up and red-flags the malicious PR', async () => {
@@ -138,4 +139,34 @@ test('a draft the PR has moved past cannot be submitted until it is revisited', 
   assert.equal(db.review(r1.review).status, 'discarded');
   assert.equal(db.item('o/r', 3).lane, 'check');
   assert.deepEqual(triage.draftStaleness(db.review(r2.review), db.pr('o/r', 3)), []);
+});
+
+test('approving: held workflow runs, and "Update branch" when the PR has been quiet for a week', async () => {
+  const old = new Date(Date.now() - 10 * 86400000).toISOString();
+  const g = gh(); const p = g.prs[1];
+  p.commitDate = old; p.behind = 4; p.fork = true; p.canModify = true;
+  p.runs = [{ id: 700, name: 'CI', status: 'completed', conclusion: 'action_required', created_at: old, head_sha: p.head }];
+  fs.writeFileSync(STATE, JSON.stringify(g));
+  const s = await ci.status('o/r', 1);
+  assert.equal(s.pending.length, 1); assert.equal(s.behindBy, 4); assert.equal(s.quiet, true);
+  assert.deepEqual(s.defaults, { approveRuns: true, updateBranch: true });
+  // Recent activity turns the branch update off by default; a fork without maintainer edits cannot be updated.
+  const g2 = gh(); g2.prs[1].commitDate = new Date().toISOString(); fs.writeFileSync(STATE, JSON.stringify(g2));
+  assert.equal((await ci.status('o/r', 1)).defaults.updateBranch, false);
+  const g3 = gh(); g3.prs[1].commitDate = old; g3.prs[1].canModify = false; fs.writeFileSync(STATE, JSON.stringify(g3));
+  assert.equal((await ci.status('o/r', 1)).canUpdate, false);
+  const g4 = gh(); g4.prs[1].canModify = true; fs.writeFileSync(STATE, JSON.stringify(g4));
+  // A flagged head refuses both.
+  assert.equal((await ci.status('o/r', 2)).gateBlocks, true);
+
+  const ap = await ci.approveRuns('o/r', 'a'.repeat(40));
+  assert.deepEqual(ap.approved, ['CI']); assert.deepEqual(gh().approved, [700]);
+  // Update branch: the merge commit is mine, so the approved PR does not drop into "Changed since your review".
+  await ci.updateBranch('o/r', 1, 'a'.repeat(40));
+  await ci.followUp('o/r', 1, 'a'.repeat(40), { sleep: async () => {}, polls: 5 });
+  assert.equal(gh().prs[1].head, 'e'.repeat(40));
+  assert.deepEqual(gh().approved, [700, 801]);
+  assert.ok(ci.updatedByMe('o/r', 1, 'a'.repeat(40), 'e'.repeat(40)));
+  assert.ok(!ci.updatedByMe('o/r', 1, 'a'.repeat(40), 'f'.repeat(40)));
+  await assert.rejects(ci.updateBranch('o/r', 1, 'a'.repeat(40)), /expected_head_sha/);
 });

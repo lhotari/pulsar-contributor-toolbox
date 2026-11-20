@@ -69,6 +69,29 @@ if (args[0] === 'api') {
   }
   if (/pulls\/\d+\/reviews\?/.test(path)) ok([st.review ? [{ id: 500, node_id: 'R500', state: st.review.state, user: { login: 'me' } }] : []]);
   if (/issues\/\d+\/comments$/.test(path) && method === 'POST') { st.issueComments = [...(st.issueComments || []), body.body]; ok({ id: 77, html_url: 'u77' }); }
+  // Actions and branch state, per PR: p.runs [{id,name,status,conclusion,created_at,head_sha}], p.commitDate, p.behind, p.fork.
+  const byHead = (sha) => Object.values(st.prs).find((p) => p.head === sha);
+  let m;
+  if ((m = /pulls\/(\d+)$/.exec(path)) && method === 'GET') {
+    const p = pr(Number(m[1]));
+    ok({ number: p.number, head: { sha: p.head, repo: { full_name: p.fork ? 'f/r' : 'o/r' } }, base: { ref: 'main', repo: { full_name: 'o/r' } }, maintainer_can_modify: !!p.canModify });
+  }
+  if ((m = /pulls\/(\d+)\/update-branch$/.exec(path)) && method === 'PUT') {
+    const p = pr(Number(m[1]));
+    if (body.expected_head_sha !== p.head) fail('HTTP 422: expected_head_sha does not match');
+    p.head = 'e'.repeat(40); p.behind = 0; p.commitDate = new Date().toISOString();
+    p.runs = [...(p.runs || []), { id: 801, name: 'CI', status: 'completed', conclusion: 'action_required', created_at: new Date().toISOString(), head_sha: p.head }];
+    ok({ message: 'Updating pull request branch.' });
+  }
+  if ((m = /actions\/runs\?head_sha=([0-9a-f]+)/.exec(path))) {
+    const p = byHead(m[1]); ok({ workflow_runs: (p?.runs || []).filter((r) => r.head_sha === m[1]) });
+  }
+  if ((m = /actions\/runs\/(\d+)\/approve$/.exec(path)) && method === 'POST') {
+    for (const p of Object.values(st.prs)) for (const r of p.runs || []) if (r.id === Number(m[1])) { r.status = 'queued'; r.conclusion = null; }
+    st.approved = [...(st.approved || []), Number(m[1])]; ok({});
+  }
+  if ((m = /commits\/([0-9a-f]{40})$/.exec(path))) ok({ commit: { committer: { date: byHead(m[1])?.commitDate || '2026-11-01T00:00:00Z' } } });
+  if ((m = /compare\/main\.\.\.([0-9a-f]{40})/.exec(path))) ok({ behind_by: byHead(m[1])?.behind ?? 0 });
   fail(`fake-gh: unknown api ${method} ${path}`);
 }
 fail(`fake-gh: unknown command ${args.join(' ')}`);

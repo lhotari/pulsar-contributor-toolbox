@@ -637,13 +637,38 @@ function openSubmit() {
   f.event.value = rec === 'APPROVE' ? 'COMMENT' : rec;
   f.body.value = review.body;
   const inc = review.comments.filter((c) => c.include && c.state !== 'removed' && !c.anchor_error);
-  $('#submitSummary').replaceChildren(h('p', {}, `${inc.length} comment(s): ${inc.filter((c) => c.kind === 'inline' || c.kind === 'file').length} on code, ${inc.filter((c) => c.kind === 'reply').length} thread replies, ${inc.filter((c) => c.kind === 'issue').length} conversation replies.`,
+  $('#submitSummary').replaceChildren(...[h('p', {}, `${inc.length} comment(s): ${inc.filter((c) => c.kind === 'inline' || c.kind === 'file').length} on code, ${inc.filter((c) => c.kind === 'reply').length} thread replies, ${inc.filter((c) => c.kind === 'issue').length} conversation replies.`,
     review.status === 'staged' ? ' Comments added on GitHub to the pending review are included.' : ' They are staged and submitted in one go.'),
-  rec === 'APPROVE' ? h('p', { class: 'warnings' }, 'The draft recommends approving. Choose Approve yourself if you agree.') : null);
+  rec === 'APPROVE' ? h('p', { class: 'warnings' }, 'The draft recommends approving. Choose Approve yourself if you agree.') : null].filter(Boolean));
   const lint = review.lints; const box = $('#submitLints'); box.replaceChildren();
   const acks = [];
   if (lint?.security?.length) { const cb = h('input', { type: 'checkbox', value: 'security' }); acks.push(cb); box.append(h('div', { class: 'lintBox' }, `The text mentions ${lint.security.join(', ')}. Never disclose a vulnerability on a public PR.`, h('label', {}, cb, 'This is not a disclosure'))); }
   for (const t of lint?.tooling || []) { const cb = h('input', { type: 'checkbox', value: t.label }); acks.push(cb); box.append(h('div', { class: 'lintBox' }, `The text describes how the review was run (${t.label}, in ${t.where.join(', ')}).`, h('label', {}, cb, 'Intended; post it'))); }
+  // CI on approval: approve held workflow runs; update the branch from its base when the PR has been quiet.
+  const ciBox = $('#submitCi'); const ciOpts = { approveRuns: null, updateBranch: null };
+  const showCi = () => { ciBox.hidden = f.event.value !== 'APPROVE'; };
+  for (const r of f.querySelectorAll('input[name=event]')) r.onchange = showCi;
+  ciBox.replaceChildren(h('div', { class: 'muted' }, 'Checking workflow runs and the branch…')); showCi();
+  const ciReq = S.pr.pr;
+  api(`ci?repo=${encodeURIComponent(ciReq.repo)}&number=${ciReq.number}`).then((c) => {
+    if (!d.open) return;
+    const day = (t) => (t ? t.slice(0, 10) : 'never');
+    const ap = h('input', { type: 'checkbox', checked: c.defaults.approveRuns, disabled: c.gateBlocks });
+    const up = h('input', { type: 'checkbox', checked: c.defaults.updateBranch, disabled: c.gateBlocks || !c.canUpdate || c.behindBy === 0 });
+    ciOpts.approveRuns = ap; ciOpts.updateBranch = up;
+    ciBox.replaceChildren(...[
+      c.gateBlocks ? h('div', { class: 'lintBox' }, `Security gate is "${c.gate}": workflow runs and branch updates are disabled.`) : null,
+      h('label', {}, ap, h('span', {}, 'Approve workflow runs waiting for approval')),
+      h('div', { class: 'why' }, c.pending.length ? `${c.pending.length} run(s) waiting: ${c.pending.map((r) => r.name).join(', ')}` : `None waiting right now on ${c.head.slice(0, 7)} (${c.runs} run(s) in total). Runs started by a branch update are approved too.`),
+      h('label', {}, up, h('span', {}, `Update the branch from ${c.base} and approve the new runs`)),
+      h('div', { class: 'why' }, [
+        c.behindBy === 0 ? `Already up to date with ${c.base}.` : c.behindBy != null ? `${c.behindBy} commit(s) behind ${c.base}.` : '',
+        !c.canUpdate ? 'Not possible: the fork does not allow maintainer edits.' : '',
+        `Last commit ${day(c.lastCommitAt)}, last workflow run ${day(c.lastRunAt)}.`,
+        c.quiet ? `No activity in ${c.quietDays} days: on by default so CI passes on the latest changes before merging.` : `Recent activity: off by default.`,
+      ].filter(Boolean).join(' ')),
+    ].filter(Boolean));
+  }).catch((e) => { if (d.open) ciBox.replaceChildren(h('div', { class: 'lintBox' }, `Could not check workflow runs: ${e.message}`)); });
   d.onclose = async () => {
     if (d.returnValue !== 'ok') return;
     try {
@@ -651,9 +676,10 @@ function openSubmit() {
         if (acks.some((a) => !a.checked)) throw new Error('acknowledge the lint findings, or edit the text');
         await action('ack', { review: review.id, labels: acks.map((a) => a.value) });
       }
-      const r = await action('submit', { review: review.id, event: f.event.value, body: f.body.value });
+      const r = await action('submit', { review: review.id, event: f.event.value, body: f.body.value,
+        ci: { approveRuns: !!ciOpts.approveRuns?.checked, updateBranch: !!ciOpts.updateBranch?.checked } });
       toast(r.submittedOnGitHub ? `#${pr.number} had already been submitted on GitHub`
-        : `#${pr.number}: review submitted (${r.event.toLowerCase().replace('_', ' ')})${r.errors?.length ? ` with follow-up errors: ${r.errors.join('; ')}` : ''}`, !!r.errors?.length);
+        : `#${pr.number}: review submitted (${r.event.toLowerCase().replace('_', ' ')})${r.ci?.updateBranch === 'requested' ? '; branch update requested, new runs get approved as they start' : ''}${r.ci?.approved?.length ? `; approved ${r.ci.approved.length} workflow run(s)` : ''}${r.errors?.length ? ` with follow-up errors: ${r.errors.join('; ')}` : ''}`, !!r.errors?.length);
       // Back to the lane the PR was opened from, unless the user has already gone somewhere else meanwhile.
       const back = onPrRoute(pr.repo, pr.number);
       await refreshState();

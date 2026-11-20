@@ -6,6 +6,7 @@ import * as db from './db.mjs';
 import * as cfgm from './config.mjs';
 import * as P from './prt.mjs';
 import { scanDiff } from './scan.mjs';
+import { updatedByMe } from './ci.mjs';
 
 const DAY = 86400000;
 export const LANES = ['backlog', 'queued', 'reviewing', 'check', 'staged', 'follow-up', 'waiting', 'approved', 'security', 'parked', 'done'];
@@ -156,6 +157,8 @@ function scoreItem(repo, cfg, pr, raw, me, engagedReasons) {
 
 function upsertPr(repo, raw, me) {
   const analysis = { ...P.analyzePr(raw, me), authorActivity: authorActivity(raw) };
+  // A merge from the base that I made with "Update branch" when approving is not new work from the author.
+  if (analysis.headMoved && updatedByMe(repo, raw.number, analysis.myLastReview?.oid, raw.headRefOid)) { analysis.headMoved = false; analysis.headUpdatedByMe = true; }
   const labels = (raw.labels?.nodes || []).map((l) => l.name);
   const state = raw.merged ? 'MERGED' : raw.state;
   db.run(`INSERT INTO prs (repo, number, node_id, title, url, author, association, state, draft, head_sha, base_ref, additions, deletions, changed_files,
