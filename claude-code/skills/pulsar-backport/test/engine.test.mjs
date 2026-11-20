@@ -135,9 +135,14 @@ test('a dependency found while backporting blocks the pick until decided', () =>
   db.run(`UPDATE deps SET status = 'dismissed' WHERE session_id = ?`, SID); // pretend planning dismissed the hint
   db.run(`DELETE FROM deps WHERE session_id = ?`, SID); // and that it was never found
   db.run(`UPDATE sessions SET status = 'backporting' WHERE id = ?`, SID);
+  // A hint pointing at a PR that merged later and is a pick later in this batch does not block: it follows in master order.
+  db.run(`INSERT INTO deps (session_id, pr, depends_on, branch, source, detail, status, phase, created_at) VALUES (?,?,?,?,?,?,?,?,?)`,
+    SID, 101, 103, 'branch-4.2', 'followup', 'follow-up named the wrong way round', 'accepted', 'plan', db.now());
   lane.startLane(SID, 'branch-4.2', { log: () => {} });
   const r = lane.pickAll(SID, 'branch-4.2', { log: () => {} });
   assert.equal(r.results[0].status, 'picked');
+  assert.match(db.get(`SELECT detail FROM picks WHERE session_id = ? AND branch = 'branch-4.2' AND pr = 101`, SID).detail, /#103 .*follows later in this batch/);
+  db.run(`DELETE FROM deps WHERE session_id = ? AND source = 'followup'`, SID);
   assert.equal(r.last.status, 'blocked');
   assert.equal(r.last.pr, 103);
   const dep = db.get(`SELECT * FROM deps WHERE session_id = ? AND pr = 103 AND depends_on = 102 AND branch = 'branch-4.2'`, SID);

@@ -113,7 +113,23 @@ export function unmetDeps(sid, branch, pick) {
   const rows = db.all(`SELECT d.*, t.on_branch, t.decision FROM deps d
        LEFT JOIN targets t ON t.session_id = d.session_id AND t.pr = d.depends_on AND t.branch = ?
        WHERE d.session_id = ? AND d.pr = ? AND (d.branch IS NULL OR d.branch = ?) AND d.status != 'dismissed'`, branch, sid, pick.pr, branch);
-  return rows.filter((d) => !earlier.has(d.depends_on) && !(d.on_branch ?? depOnBranch(sid, branch, d.depends_on)));
+  // A dependency that merged after this PR on master and is a pick later in this batch is a follow-up, whichever way
+  // the hint points: it goes in after this pick, in master order, and does not block it.
+  const later = new Map(picks(sid, branch).filter((p) => ['pending', 'blocked', 'conflict'].includes(p.status) && p.seq > pick.seq).map((p) => [p.pr, p]));
+  return rows.filter((d) => !earlier.has(d.depends_on) && !(d.on_branch ?? depOnBranch(sid, branch, d.depends_on)))
+    .map((d) => (later.has(d.depends_on) ? { ...d, later: true } : d));
+}
+
+/** A blocked pick whose dependencies were since picked, or turned out to follow later in the batch, goes again. */
+export function releaseBlocked(sid, branch) {
+  const out = [];
+  for (const p of picks(sid, branch).filter((x) => x.status === 'blocked')) {
+    if (!unmetDeps(sid, branch, p).every((d) => d.later)) continue;
+    setPick(sid, branch, p.pr, { status: 'pending', detail: { ...p.detail, unmet: undefined } });
+    db.event(sid, `#${p.pr} is no longer blocked: its dependencies are picked or follow it in master order`, { branch });
+    out.push(p.pr);
+  }
+  return out;
 }
 
 /** Pick the next pending commit. Returns {status, pr, ...}. */
@@ -135,6 +151,7 @@ export function pickNext(sid, branch) {
   const st = g.state(dir);
   if (st.cherryPicking || st.rebasing) return { status: 'in-progress', head: st.head };
   if (st.dirty) { attention(sid, branch, 'The lane worktree has uncommitted changes; commit or discard them before picking continues'); return { status: 'dirty' }; }
+  releaseBlocked(sid, branch);
   list = picks(sid, branch);
   const stuck = list.find((p) => ['conflict', 'needs-fix', 'blocked'].includes(p.status));
   if (stuck) { db.updateLane(sid, branch, { phase: 'needs-attention' }); return { status: stuck.status, pr: stuck.pr }; }
@@ -159,7 +176,7 @@ export function pickNext(sid, branch) {
   }
   const unmet = unmetDeps(sid, branch, next);
   const dry = g.dryPick(dir, 'HEAD', next.source_sha, `${next.source_sha}^`);
-  const hard = unmet.filter((d) => d.source !== 'blame' || !dry.clean);
+  const hard = unmet.filter((d) => !d.later && (d.source !== 'blame' || !dry.clean));
   if (hard.length) {
     detail.unmet = hard.map((d) => ({ depends_on: d.depends_on, source: d.source, detail: d.detail, decision: d.decision }));
     setPick(sid, branch, next.pr, { status: 'blocked', detail });
@@ -167,7 +184,8 @@ export function pickNext(sid, branch) {
     attention(sid, branch, `#${next.pr} depends on ${hard.map((d) => `#${d.depends_on}`).join(', ')}, which ${hard.length > 1 ? 'are' : 'is'} not on ${branch} or earlier in this batch. Decide in the plan: add the dependency, or dismiss it`);
     return { status: 'blocked', pr: next.pr, unmet: detail.unmet };
   }
-  if (unmet.length) detail.warnings = unmet.map((d) => `applies cleanly although it builds on #${d.depends_on} (${d.detail})`);
+  if (unmet.length) detail.warnings = unmet.map((d) => (d.later ? `#${d.depends_on} (${d.detail}) merged after it on master and follows later in this batch`
+    : `applies cleanly although it builds on #${d.depends_on} (${d.detail})`));
   // A replayed pick is the lane's earlier commit (resolution included) followed by its fixups.
   const res = g.cherryPick(dir, [next.source_sha, ...(detail.extras || [])], { trailer: !detail.reused && !detail.replay });
   if (res.empty) {
@@ -804,6 +822,11 @@ export function acceptDeps(sid, branch, ids) {
   for (const id of ids) setDep(sid, id, 'accepted');
   const pulled = pullInDependencies(sid);
   if (pulled.added.length) syncPicks(sid, branch);
+  // The picks waiting on these dependencies go back to pending, so the next pick looks at them again.
+  for (const id of ids) {
+    const d = db.get('SELECT pr FROM deps WHERE id = ?', id);
+    if (d) unblock(sid, branch, d.pr);
+  }
   const l = db.lane(sid, branch);
   return { pulledIn: pulled.added, rebuilt: POST_PICK.includes(l.phase) ? placeInOrder(sid, branch) : null };
 }

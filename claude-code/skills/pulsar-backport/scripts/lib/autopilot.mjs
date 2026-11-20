@@ -40,6 +40,7 @@ export function advance(sid, { force = false } = {}) {
       case 'needs-attention': {
         const p = lane.lanePicks(sid, b).find((x) => ['conflict', 'needs-fix'].includes(x.status));
         if (!p) {
+          if (lane.releaseBlocked(sid, b).length) { lane.setPhase(sid, b, 'picking'); jobs.enqueue(sid, b, 'pick-all'); say('pick'); break; }
           const blocked = lane.lanePicks(sid, b).find((x) => x.status === 'blocked');
           say(blocked ? `#${blocked.pr} waits for a dependency decision` : (l.attention || 'waits for the user'));
           if (!blocked && !l.attention) { lane.setPhase(sid, b, 'picking'); }
