@@ -19,7 +19,7 @@ const core = (p) => ({ id: `PR_${p.number}`, number: p.number, title: p.title, u
   createdAt: '2026-11-01T00:00:00Z', updatedAt: p.updatedAt, additions: 3, deletions: 0, changedFiles: 1, headRefOid: p.head, baseRefName: 'main',
   authorAssociation: p.association, reviewDecision: null, author: { login: p.author }, labels: { nodes: [] },
   commits: { nodes: [{ commit: { oid: p.head, statusCheckRollup: { state: 'SUCCESS' } } }] }, reviews: { nodes: [] }, latestOpinionatedReviews: { nodes: [] },
-  reviewThreads: { nodes: [] }, comments: { nodes: [] }, body: 'body' });
+  reviewThreads: { nodes: [] }, comments: { nodes: (p.comments || []).map((c) => ({ author: { login: c.author }, createdAt: c.at, url: c.url || 'u', body: c.body || '' })) }, body: 'body' });
 let nextId = () => (st.seq = (st.seq || 1000) + 1);
 
 if (args[0] === 'auth') ok('logged in');

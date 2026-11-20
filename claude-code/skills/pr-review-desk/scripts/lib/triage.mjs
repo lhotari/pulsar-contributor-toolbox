@@ -10,8 +10,8 @@ import { scanDiff } from './scan.mjs';
 const DAY = 86400000;
 export const LANES = ['backlog', 'queued', 'reviewing', 'check', 'staged', 'follow-up', 'waiting', 'approved', 'security', 'parked', 'done'];
 export const LANE_TITLES = {
-  backlog: 'Backlog', queued: 'Queued for AI review', reviewing: 'AI reviewing', check: 'Your check', staged: 'Staged on GitHub',
-  'follow-up': 'Follow-up', waiting: 'Waiting for author', approved: 'Approved', security: 'Security hold', parked: 'Parked', done: 'Closed / merged',
+  backlog: 'Backlog', queued: 'Queued for AI review', reviewing: 'AI reviewing', check: 'Drafts to check', staged: 'Staged on GitHub',
+  'follow-up': 'Changed since your review', waiting: 'Waiting for author', approved: 'Approved', security: 'Security hold', parked: 'Parked', done: 'Closed / merged',
 };
 
 export async function login() {
@@ -63,9 +63,38 @@ function ignoredBy(cfg, pr) {
   return hit ? `label ${hit}` : null;
 }
 
-function followUpReasons(a, author) {
-  if (!a?.myLastReview) return [];
+/** The author's own activity on the PR (conversation comments, thread replies, reviews), newest first. */
+export function authorActivity(raw) {
+  const author = raw.author?.login; const out = [];
+  if (!author) return out;
+  for (const c of raw.comments?.nodes || []) if (c.author?.login === author) out.push({ kind: 'comment', at: c.createdAt, url: c.url });
+  for (const t of raw.reviewThreads?.nodes || []) {
+    for (const c of t.comments?.nodes || []) if (c.author?.login === author) out.push({ kind: 'thread reply', at: c.createdAt, url: c.url, path: t.path });
+  }
+  for (const r of raw.reviews?.nodes || []) if (r.author?.login === author && r.submittedAt) out.push({ kind: 'review', at: r.submittedAt, url: r.url });
+  return out.sort((x, y) => String(y.at).localeCompare(String(x.at))).slice(0, 30);
+}
+
+/**
+ * Why an unsubmitted round no longer reflects the PR: new commits after the head it read, or the author
+ * answering after it was written. A stale round cannot be submitted; it has to be revisited first.
+ */
+export function draftStaleness(rv, pr) {
+  if (!rv || !pr || !['draft', 'staged'].includes(rv.status)) return [];
   const r = [];
+  if (rv.head_sha && pr.head_sha && rv.head_sha !== pr.head_sha) r.push(`new commits: the PR head is ${pr.head_sha.slice(0, 7)}, the draft read ${rv.head_sha.slice(0, 7)}`);
+  const basis = rv.meta?.basisAt || rv.created_at;
+  const after = (pr.analysis?.authorActivity || []).filter((x) => x.at > basis);
+  if (after.length) {
+    r.push(`the author replied after the draft was written: ${after.length} ${[...new Set(after.map((x) => x.kind))].join(' / ')}, latest ${after[0].at.slice(0, 16).replace('T', ' ')}`);
+  }
+  return r;
+}
+
+/** Why a PR needs another look: what changed since my last review, and whether a draft fell behind. */
+export function followUpReasons(a, author, { draft = null, pr = null } = {}) {
+  const r = draftStaleness(draft, pr).map((x) => `your draft is out of date — ${x}`);
+  if (!a?.myLastReview) return r;
   const c = a.threadCounts || {};
   if (a.headMoved) r.push('new commits since my review');
   if (c['awaiting-my-reply']) r.push(`${c['awaiting-my-reply']} thread(s) waiting on my reply`);
@@ -82,7 +111,8 @@ export function laneOf({ pr, item, review, job }) {
   if (item.hold === 'snoozed' && item.hold_until && Date.parse(item.hold_until) > Date.now()) return 'parked';
   if (['flagged', 'suspicious'].includes(item.gate) && item.gate_sha === pr.head_sha) return 'security';
   if (job) return job.status === 'queued' ? 'queued' : job.status === 'waiting' ? 'check' : 'reviewing';
-  if (review?.status === 'draft') return 'check';
+  // A draft written for an older head needs a new round, not a check of comments about code that changed.
+  if (review?.status === 'draft') return draftStaleness(review, pr).length ? 'follow-up' : 'check';
   if (review?.status === 'staged') return 'staged';
   const a = pr.analysis;
   if (a?.myLastReview) {
@@ -116,6 +146,8 @@ function scoreItem(repo, cfg, pr, raw, me, engagedReasons) {
     const re = new RegExp(w.pattern);
     if (paths.some((p) => re.test(p))) add(w.weight, w.why || `touches ${w.pattern}`);
   }
+  const draft = db.currentReview(repo, pr.number);
+  if (draft?.status === 'draft' && draftStaleness(draft, pr).length) add(120, 'your draft is out of date (new commits or author replies)');
   for (const r of followUpReasons(pr.analysis, pr.author)) reasons.push(`follow-up: ${r}`);
   const ign = ignoredBy(cfg, pr);
   if (ign) { flags.push('rule-ignored'); reasons.push(`ignored: ${ign}`); }
@@ -123,7 +155,7 @@ function scoreItem(repo, cfg, pr, raw, me, engagedReasons) {
 }
 
 function upsertPr(repo, raw, me) {
-  const analysis = P.analyzePr(raw, me);
+  const analysis = { ...P.analyzePr(raw, me), authorActivity: authorActivity(raw) };
   const labels = (raw.labels?.nodes || []).map((l) => l.name);
   const state = raw.merged ? 'MERGED' : raw.state;
   db.run(`INSERT INTO prs (repo, number, node_id, title, url, author, association, state, draft, head_sha, base_ref, additions, deletions, changed_files,

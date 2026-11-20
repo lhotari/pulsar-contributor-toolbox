@@ -102,9 +102,9 @@ const LANE_INTRO = {
   backlog: 'Open PRs you have not engaged with, best first. The score reasons explain the order (committers, review requests and fixes rank up). "AI review" queues a Claude Code review; nothing is posted.',
   queued: 'AI reviews waiting for a Claude Code worker.',
   reviewing: 'AI reviews running now. Open the log to follow along.',
-  check: 'Drafts ready for your check: read each comment next to its code, edit or drop it, add your own, then stage it on GitHub or submit.',
+  check: 'Review drafts written for the PR\'s current head, waiting for you: first reviews and re-reviews of new commits (filter with kind:re-review or kind:initial). Read each comment next to its code, edit or drop it, add your own, then stage it on GitHub or submit.',
   staged: 'Pending reviews on GitHub, visible only to you. Add more comments on GitHub, then submit here (or with GitHub\'s "Finish your review").',
-  'follow-up': 'PRs you reviewed that moved: new commits, replies to your threads, or threads resolved without a code change. A re-review drafts the replies.',
+  'follow-up': 'PRs that changed since your review: new commits, replies waiting on you, threads resolved without a code change, or a draft of yours that fell behind the head. Highest priority first. "Re-review" drafts a new round: it checks each of your threads against the new code, reviews the new commits and drafts your replies; the draft then waits in Drafts to check.',
   waiting: 'You reviewed these and nothing has happened since.',
   approved: 'You approved these and the head has not moved.',
   security: 'Red-flagged by the security scan or a reviewer. Nothing from these PRs runs on this machine. Read the evidence and decide.',
@@ -189,10 +189,20 @@ async function showBoard() {
     h('button', { class: 'small ghost', title: 'Sort by last update, newest first', onclick: () => { S.sort = { key: 'updated', dir: 'desc' }; renderRows(); } }, 'Newest activity'),
     h('button', { class: 'small ghost', title: 'Back to the default order', onclick: () => { S.sort = { key: 'score', dir: 'desc' }; renderRows(); } }, 'Reset sort'));
   if (S.lane === 'backlog' && S.repo) filters.append(h('button', { class: 'ghost small', onclick: previewRules }, 'What would Autopilot queue?'));
-  body.append(filters, h('div', { id: 'rows' }));
+  if (S.lane === 'follow-up') {
+    const n = h('select', { class: 'small', title: 'How many of the PRs shown (in the current order) to queue' },
+      ...[3, 5, 10, 20].map((v) => h('option', { value: v, selected: v === 5 ? true : null }, String(v))));
+    filters.append(h('span', { class: 'bulk' }, h('button', { class: 'small primary', onclick: () => bulkReReview(Number(n.value)) }, 'Re-review top'), n));
+  }
+  body.append(filters, h('div', { id: 'laneNote' }), h('div', { id: 'rows' }));
   main.replaceChildren(h('div', { class: 'board' }, lanes, body));
   boardItems = await api(`items?lane=${S.lane}${S.repo ? `&repo=${encodeURIComponent(S.repo)}` : ''}`).catch((e) => { toast(e.message, true); return []; });
   renderRows();
+  if (S.lane === 'follow-up') {
+    const drafts = (await api(`items?lane=check${S.repo ? `&repo=${encodeURIComponent(S.repo)}` : ''}`).catch(() => [])).filter((it) => it.review?.kind === 're-review');
+    if (drafts.length) $('#laneNote')?.replaceChildren(h('p', { class: 'small' }, `${drafts.length} PR(s) with new commits already have a re-review draft for the current head: `,
+      h('a', { href: '#/lane/check', onclick: () => { S.filter = 'kind:re-review'; } }, 'check them in Drafts to check'), '.'));
+  }
 }
 
 async function previewRules() {
@@ -217,11 +227,25 @@ function rowActions(it) {
   return h('div', { class: 'rowActions' }, a);
 }
 
+async function bulkReReview(n) {
+  const shown = sortItems(boardItems.filter((it) => matchesFilter(it, S.filter)));
+  const pick = shown.filter((it) => !it.job && !(['flagged', 'suspicious'].includes(it.gate) && it.gateCurrent)).slice(0, n);
+  if (!pick.length) return toast('Nothing to queue: every PR shown has a job or is on security hold', true);
+  if (!confirm(`Queue re-reviews for ${pick.length} PR(s), in this order?\n\n${pick.map((it) => `#${it.number} ${it.title}`).join('\n')}\n\nThey run on Claude Code a few at a time (the worker limit); nothing is posted.`)) return;
+  let ok = 0;
+  for (const it of pick) {
+    try { await action('review', { repo: it.repo, number: it.number }); ok++; } catch (e) { toast(`#${it.number}: ${e.message}`, true); }
+  }
+  toast(`Queued ${ok} re-review(s)`);
+  refreshState().then(showBoard);
+}
+
 /** `author:login` matches the author exactly; every other word must appear in the PR's number, title, author, category or labels. */
 function matchesFilter(it, filter) {
   const words = String(filter || '').toLowerCase().split(/\s+/).filter(Boolean);
   const hay = `#${it.number} ${it.title} ${it.author} ${it.category} ${it.component} ${it.labels.join(' ')}`.toLowerCase();
-  return words.every((w) => (w.startsWith('author:') ? (it.author || '').toLowerCase() === w.slice(7) : hay.includes(w)));
+  return words.every((w) => (w.startsWith('author:') ? (it.author || '').toLowerCase() === w.slice(7)
+    : w.startsWith('kind:') ? (it.review?.kind || '') === w.slice(5) : w === 'is:stale' ? !!it.review?.stale : hay.includes(w)));
 }
 
 function setFilter(value, { fromInput = false } = {}) {
@@ -294,9 +318,12 @@ function renderRows() {
         h('td', { class: 'hideS small' }, `${it.size} lines`, h('div', { class: 'muted' }, `${it.files} files`)),
         h('td', { class: 'hideS' }, it.ci ? chip(it.ci.toLowerCase(), it.ci) : ''),
         h('td', {}, chip(gate, gate, it.scan), it.scanLevel === 'surface' ? h('div', { class: 'muted small', title: it.scan }, 'build/CI touched') : null),
-        h('td', { class: 'hideS small' }, it.myLast ? chip(it.myLast.state.toLowerCase().replace('_', ' '), it.myLast.state) : '', it.headMoved ? h('div', { class: 'muted' }, 'new commits') : null),
+        h('td', { class: 'hideS small' }, it.myLast ? [chip(it.myLast.state.toLowerCase().replace('_', ' '), it.myLast.state), h('div', { class: 'muted' }, ago(it.myLast.at))] : '',
+          it.followUp?.length ? h('ul', { class: 'why' }, it.followUp.map((r) => h('li', {}, r))) : null),
         h('td', { class: 'small' }, it.job ? chip(`${it.job.type} ${it.job.status}`, it.job.status) : null,
-          it.review ? h('div', {}, chip(it.review.status, it.review.status), ` ${it.review.comments} comment(s)`) : null),
+          it.review ? h('div', {}, chip(`${{ 're-review': 're-review', manual: 'your review', initial: 'first review' }[it.review.kind] || it.review.kind} ${it.review.status}`, it.review.status),
+            it.review.stale ? [' ', chip('out of date', 'warn', 'The draft was written for an older head')] : null,
+            h('div', { class: 'muted' }, `${it.review.comments} comment(s)`)) : null),
         h('td', {}, rowActions(it)));
     }))));
 }
@@ -512,6 +539,12 @@ function renderReview() {
     return h('div', {}, t, h('div', { class: 'editRow' }, h('button', { class: 'small primary', onclick: save }, 'Save (⌘↩)'), h('button', { class: 'small ghost', onclick: () => { S.editing.delete('body'); renderPr(); } }, 'Cancel')));
   })() : h('div', {}, review.body ? md(review.body) : h('p', { class: 'muted' }, 'No review body.'), editable ? h('button', { class: 'small', onclick: () => { S.editing.add('body'); renderPr(); } }, 'Edit body') : null);
   const m = review.meta;
+  const staleBox = review.stale?.length && review.status !== 'submitted' ? h('div', { class: 'staleBox' },
+    h('strong', {}, 'Submitting is blocked: this draft is out of date.'),
+    h('ul', {}, review.stale.map((r) => h('li', {}, r))),
+    h('p', {}, 'Revisit it first: a re-review reads the new commits and replies, keeps the points that still apply, carries over your own comments, and replaces this draft.'),
+    h('button', { class: 'primary small', onclick: () => run('Re-review queued', () => action('review', { repo: pr.repo, number: pr.number,
+      type: pr.analysis?.myLastReview ? 're-review' : 'review' })).then(reloadPr) }, 'Re-review to revisit the draft')) : null;
   const top = h('div', { class: 'panel' },
     h('div', { class: 'actions' }, h('h2', { style: 'margin:0' }, `${review.kind === 're-review' ? 'Re-review' : review.kind === 'manual' ? 'Your review' : 'Review'} `), chip(review.status, review.status),
       review.recommended_event ? chip(`recommended: ${review.recommended_event.toLowerCase().replace('_', ' ')}`, review.recommended_event === 'APPROVE' ? 'ok' : review.recommended_event === 'REQUEST_CHANGES' ? 'bad' : '') : null,
@@ -525,7 +558,7 @@ function renderReview() {
   const assess = m.threads?.length ? h('details', { class: 'panel' }, h('summary', {}, `${m.threads.length} thread assessment(s)`),
     h('ul', { class: 'small' }, m.threads.map((t) => h('li', {}, chip(t.assessment, /ADDRESSED$/.test(t.assessment) && !/NOT|PARTIALLY/.test(t.assessment) ? 'ok' : 'warn'), ' ', md(t.why || ''),
       t.evidence?.length ? h('ul', {}, t.evidence.map((e) => h('li', {}, md(e)))) : null)))) : null;
-  return h('div', {}, top, cs.length ? cs.map((c) => commentCard(c)) : h('p', { class: 'muted' }, 'No comments. Add some in the Diff tab.'), assess, dropped, footbar());
+  return h('div', {}, staleBox, top, cs.length ? cs.map((c) => commentCard(c)) : h('p', { class: 'muted' }, 'No comments. Add some in the Diff tab.'), assess, dropped, footbar());
 }
 
 function footbar() {
@@ -547,7 +580,8 @@ function footbar() {
     review.status === 'staged' ? 'Stage the rest' : 'Stage on GitHub'),
     review.status === 'staged' ? h('button', { onclick: () => run(null, () => action('sync-staged', { review: review.id })).then((r) => { toast(r.status === 'submitted' ? 'It was submitted on GitHub' : `Synced: ${r.added} added, ${r.edited} edited, ${r.removed} removed on GitHub`); reloadPr(); }) }, 'Sync from GitHub') : null,
     review.status === 'staged' ? ext(`${pr.url}/files`, h('button', {}, 'Continue on GitHub ↗')) : null,
-    h('button', { class: 'primary', onclick: openSubmit }, 'Submit…'),
+    h('button', { class: 'primary', onclick: openSubmit, disabled: review.stale?.length ? true : null,
+      title: review.stale?.length ? 'Out of date: revisit the draft first (see the note at the top)' : null }, 'Submit…'),
     h('button', { class: 'ghost danger', onclick: () => { if (confirm(review.status === 'staged' ? 'Discard this round and delete the pending review on GitHub?' : 'Discard this review round?')) run('Discarded', () => action('discard', { review: review.id })).then(reloadPr); } }, 'Discard'));
 }
 
@@ -557,8 +591,6 @@ function openSubmit() {
   const rec = review.recommended_event || 'COMMENT';
   f.event.value = rec === 'APPROVE' ? 'COMMENT' : rec;
   f.body.value = review.body;
-  f.allowMovedHead.checked = false; $('#movedWrap').hidden = review.head_sha === pr.head_sha;
-  $('#movedText').textContent = `The PR head is now ${pr.head_sha.slice(0, 10)}; this review read ${review.head_sha.slice(0, 10)}. Submit anyway (comments stay on the reviewed commit).`;
   const inc = review.comments.filter((c) => c.include && c.state !== 'removed' && !c.anchor_error);
   $('#submitSummary').replaceChildren(h('p', {}, `${inc.length} comment(s): ${inc.filter((c) => c.kind === 'inline' || c.kind === 'file').length} on code, ${inc.filter((c) => c.kind === 'reply').length} thread replies, ${inc.filter((c) => c.kind === 'issue').length} conversation replies.`,
     review.status === 'staged' ? ' Comments added on GitHub to the pending review are included.' : ' They are staged and submitted in one go.'),
@@ -574,12 +606,12 @@ function openSubmit() {
         if (acks.some((a) => !a.checked)) throw new Error('acknowledge the lint findings, or edit the text');
         await action('ack', { review: review.id, labels: acks.map((a) => a.value) });
       }
-      const r = await action('submit', { review: review.id, event: f.event.value, body: f.body.value, allowMovedHead: f.allowMovedHead.checked });
+      const r = await action('submit', { review: review.id, event: f.event.value, body: f.body.value });
       toast(r.submittedOnGitHub ? 'It had already been submitted on GitHub' : `Submitted (${r.event})${r.errors?.length ? ` with follow-up errors: ${r.errors.join('; ')}` : ''}`, !!r.errors?.length);
       reloadPr(); refreshState();
     } catch (e) {
       toast(e.message, true);
-      if (e.code === 'HEAD_MOVED') { $('#movedWrap').hidden = false; d.showModal(); }
+      if (e.code === 'STALE') reloadPr();
     }
   };
   d.showModal();

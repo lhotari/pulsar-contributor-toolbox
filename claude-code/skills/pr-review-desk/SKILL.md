@@ -29,7 +29,7 @@ Repository: `--repo`, a PR URL, or the clone you are in (its upstream when it is
 |---|---|
 | `/pr-review-desk`, "triage", "what should I review" | `node "$PRD" triage` then `node "$PRD" ui`; report the lanes in two or three lines and give the link |
 | a PR number or URL, "review 27123" | `node "$PRD" track <N…> --review [--instructions "…"]`, then `ui`. A PR on security hold is not queued: say so and point at the evidence |
-| "re-review", "check my open reviews" | `triage`; the **Follow-up** lane is the answer. Queue re-reviews only for the PRs the user names, or ask whether to queue the lane |
+| "re-review", "check my open reviews" | `triage`; the **Changed since your review** lane is the answer (its "Re-review top N" button queues them in priority order). Queue re-reviews only for the PRs the user names, or ask how many of the top of the lane to queue |
 | "open the desk", "ui" | `node "$PRD" ui --open` |
 | "status" | `node "$PRD" list --lane check` (and `follow-up`, `security`) |
 | "import my prt drafts" | `node "$PRD" import-prt` (one-time; pr-review-track's draft/hold files become draft rounds, skip → ignored) |
@@ -39,7 +39,11 @@ Then stop: the rest happens in the web UI. Report outcomes, not play-by-play.
 
 ## Lanes
 
-Backlog → Queued → AI reviewing → **Your check** → **Staged on GitHub** → Waiting for author / Approved → Follow-up (new commits, replies, threads resolved without a change) → … · plus **Security hold**, Parked (snoozed, parked, ignored, or an ignore rule), Closed/merged. A lane is derived from facts on every change (the human's hold, an active job, the review round, GitHub state), never set by hand.
+Backlog → Queued → AI reviewing → **Drafts to check** → **Staged on GitHub** → Waiting for author / Approved → **Changed since your review** → (re-review) → Drafts to check … · plus **Security hold**, Parked (snoozed, parked, ignored, or an ignore rule), Closed/merged. A lane is derived from facts on every change (the human's hold, an active job, the review round, GitHub state), never set by hand.
+
+- **Drafts to check** holds drafts written for the PR's *current* head — first reviews and re-reviews alike (`kind:re-review` / `kind:initial` filter them).
+- **Changed since your review** holds PRs you reviewed that moved (new commits, replies waiting on you, threads resolved without a code change, new author comments) and PRs whose draft fell behind the head. The Me column says which; the score orders them (author waiting on you ≫ resolved without change ≫ new commits ≫ out-of-date draft). "Re-review top N" queues re-reviews for the first N rows as filtered and sorted. A re-review carries the still-valid points of an out-of-date draft forward.
+- **A stale round cannot be submitted.** When the PR has new commits after the head the draft read, or the author commented, replied in a thread or reviewed after the draft was written, submit is refused (the UI disables it and says why) and the draft has to be revisited: a re-review supersedes it, carries the user's own comments and comments added on GitHub over, and deletes an out-of-date pending review on GitHub. The check is re-run against fresh GitHub data at submit time.
 
 **Priority** is prt's ranking (priority authors, review requested, ASF membership, nobody reviewed it, size, CI, recency, fix titles; for follow-ups: author waiting on me, threads resolved without change, new commits) plus the repo's weights: committers (+150: org MEMBER/OWNER/COLLABORATOR or write permission per the collaborators API), category (`[fix]` up, docs down), labels, paths. Every point has a reason the UI shows.
 

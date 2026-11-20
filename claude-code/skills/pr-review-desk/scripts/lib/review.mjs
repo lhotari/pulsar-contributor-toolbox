@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import * as db from './db.mjs';
 import * as P from './prt.mjs';
-import { diffFor, refreshItem } from './triage.mjs';
+import { diffFor, refreshItem, track, draftStaleness } from './triage.mjs';
 
 export const EVENTS = ['COMMENT', 'REQUEST_CHANGES', 'APPROVE'];
 const SHA = /^[0-9a-f]{7,40}$/i;
@@ -62,7 +62,7 @@ function insertComment(reviewId, c, seq) {
  * A draft from an earlier round is superseded; the comments the human wrote on it carry over.
  * A round that is already staged on GitHub receives the new comments as unstaged additions.
  */
-export async function importFindings(repo, number, findings, { jobId = null, kind = null, gate = null } = {}) {
+export async function importFindings(repo, number, findings, { jobId = null, kind = null, gate = null, basisAt = null } = {}) {
   if (findings.schema !== 1) throw new Error('findings.schema must be 1');
   if (findings.pr && Number(findings.pr) !== number) throw new Error(`findings are for #${findings.pr}, not #${number}`);
   if (findings.repo && findings.repo.toLowerCase() !== repo.toLowerCase()) throw new Error(`findings are for ${findings.repo}, not ${repo}`);
@@ -113,18 +113,27 @@ export async function importFindings(repo, number, findings, { jobId = null, kin
     for (const r of audit.commits) warnings.push(`A link points at another commit than the reviewed head: ${r.url}`);
   }
   if (unresolved.size) warnings.push(`Not linked (no single matching file): ${[...unresolved].slice(0, 8).join(', ')}`);
+  // When the review saw the PR: author activity after this makes the draft stale (see draftStaleness).
+  const basis = basisAt || db.now();
   const meta = {
+    basisAt: basis,
     tier: findings.tier || null, reviewers: findings.reviewers || [], coverage: findings.coverage || null,
     dropped: findings.dropped || [], threads, gate, warnings,
   };
   const recommended = EVENTS.includes(findings.recommendedEvent) ? findings.recommendedEvent : 'COMMENT';
 
+  // A staged round on the same head takes the new comments as unstaged additions. A staged round on an older
+  // head is superseded like a draft: its comments (yours and those added on GitHub) are pulled in first and
+  // carried over, and its pending review is deleted on GitHub afterwards (GitHub allows one per reviewer).
+  let cur0 = db.currentReview(repo, number);
+  const supersedeStaged = cur0?.status === 'staged' && cur0.head_sha !== head;
+  if (supersedeStaged) { await syncStaged(cur0.id); cur0 = db.currentReview(repo, number); }
   const res = db.tx(() => {
     const cur = db.currentReview(repo, number);
     let reviewId; let carried = 0;
-    if (cur?.status === 'staged') {
+    if (cur?.status === 'staged' && cur.head_sha === head) {
       reviewId = cur.id;
-      const m = { ...cur.meta, warnings: [...(cur.meta.warnings || []), ...warnings, 'A later review round added comments to this staged review; they are not on GitHub until you stage again.'], threads, dropped: meta.dropped };
+      const m = { ...cur.meta, basisAt: basis, warnings: [...(cur.meta.warnings || []), ...warnings, 'A later review round added comments to this staged review; they are not on GitHub until you stage again.'], threads, dropped: meta.dropped };
       db.run('UPDATE reviews SET meta = ?, updated_at = ? WHERE id = ?', db.S(m), db.now(), reviewId);
     } else {
       const t = db.now();
@@ -132,9 +141,11 @@ export async function importFindings(repo, number, findings, { jobId = null, kin
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, repo, number, kind || findings.kind || 'initial', 'draft', head, findings.since || null, body, body,
       recommended, findings.recommendedEventWhy || null, db.S(meta), jobId, t, t);
       reviewId = Number(r.lastInsertRowid);
-      if (cur?.status === 'draft') {
-        for (const c of db.comments(cur.id).filter((x) => x.source === 'human')) {
-          insertComment(reviewId, { ...c, resolve: !!c.resolve, include: !!c.include, anchor_error: anchorError(anchors, c), state: 'local' }, c.seq);
+      if (cur?.status === 'draft' || cur?.status === 'staged') {
+        for (const c of db.comments(cur.id).filter((x) => ['human', 'github'].includes(x.source) && x.state !== 'removed')) {
+          const err = anchorError(anchors, c);
+          insertComment(reviewId, { ...c, source: 'human', gh_id: null, gh_node: null, gh_url: null, resolve: !!c.resolve, include: !!c.include && !err,
+            anchor_error: err, state: 'local', meta: { ...c.meta, carriedFrom: cur.id } }, c.seq);
           carried++;
         }
         db.run(`UPDATE reviews SET status = 'discarded', meta = json_set(meta, '$.supersededBy', ?) WHERE id = ?`, reviewId, cur.id);
@@ -145,6 +156,10 @@ export async function importFindings(repo, number, findings, { jobId = null, kin
     db.event(repo, number, `#${number}: ${kind || findings.kind || 'initial'} review imported — ${comments.length} comment(s)${carried ? `, ${carried} of yours carried over` : ''}`, { job: jobId });
     return { review: reviewId, comments: comments.length, carried, warnings };
   });
+  if (supersedeStaged && cur0?.gh_review_id) {
+    const ok = await P.deletePendingReview(repo, number, cur0.gh_review_id);
+    db.event(repo, number, `#${number}: the out-of-date pending review was ${ok ? 'deleted on GitHub; its comments moved to the new draft' : 'NOT deleted on GitHub (delete it there before staging again)'}`, { level: ok ? 'info' : 'warn' });
+  }
   refreshItem(repo, number);
   return res;
 }
@@ -373,16 +388,22 @@ export async function stage(reviewId) {
  * Submit with the event the human chose. Stages first when needed, picks up what was added on GitHub,
  * then posts conversation replies and resolves the threads flagged for it.
  */
-export async function submit(reviewId, { event, body, allowMovedHead = false } = {}) {
+export async function submit(reviewId, { event, body } = {}) {
   const rv = db.review(reviewId);
   if (!EVENTS.includes(event)) throw new Error(`event must be one of ${EVENTS.join(', ')}`);
   if (rv.status === 'submitted') throw new Error('already submitted');
   if (body !== undefined) setBody(reviewId, body);
   const text = (body ?? rv.body).trim();
   if (event === 'REQUEST_CHANGES' && !text && !outgoing(reviewId).comments.length) throw new Error('requesting changes needs a body or comments');
-  const core = await prNode(rv.repo, rv.number);
-  if (core.headRefOid !== rv.head_sha && !allowMovedHead) {
-    throw Object.assign(new Error(`the PR head moved to ${core.headRefOid.slice(0, 10)} since the review read ${rv.head_sha.slice(0, 10)}`), { code: 'HEAD_MOVED' });
+  await prNode(rv.repo, rv.number);
+  // Fresh facts, then refuse a round the PR has moved past: new commits, or the author answering after it was written.
+  await track(rv.repo, rv.number);
+  const stale = draftStaleness(db.review(reviewId), db.pr(rv.repo, rv.number));
+  if (stale.length) {
+    db.run(`UPDATE reviews SET meta = json_set(meta, '$.blockedAt', ?, '$.blockedWhy', json(?)) WHERE id = ?`, db.now(), db.S(stale), reviewId);
+    db.event(rv.repo, rv.number, `#${rv.number}: submit blocked — ${stale.join('; ')}`, { level: 'warn' });
+    refreshItem(rv.repo, rv.number);
+    throw Object.assign(new Error(`Submitting is blocked: ${stale.join('; ')}. Revisit the draft first (Re-review).`), { code: 'STALE', reasons: stale });
   }
   const o = outgoing(reviewId, { body: text });
   if (o.blocking) throw new Error(`refused: ${lintMessage(o)}`);

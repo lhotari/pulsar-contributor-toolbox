@@ -53,7 +53,7 @@ export async function importPrt({ root = PRT_ROOT, repo = null, log = console.lo
             threadAssessments: parsed.threads.map((t) => ({ threadId: t.threadNodeId, assessment: 'IMPORTED', reply: t.post ? t.body : null, resolve: t.resolve })),
             issueCommentAssessments: parsed.issueComments.map((c) => ({ url: null, reply: c.body })),
           };
-          const r = await importFindings(slug, number, findings, { kind: findings.kind });
+          const r = await importFindings(slug, number, findings, { kind: findings.kind, basisAt: parsed.doc.generated || null });
           db.run(`UPDATE reviews SET meta = json_set(meta, '$.importedFrom', ?) WHERE id = ?`, file, r.review);
           if (parsed.status === 'hold') db.run(`UPDATE items SET note = COALESCE(note, 'held in pr-review-track') WHERE repo = ? AND number = ?`, slug, number);
           refreshItem(slug, number);

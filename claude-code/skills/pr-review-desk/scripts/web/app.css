@@ -44,9 +44,10 @@ textarea { width: 100%; font: 13px/1.45 var(--mono); resize: vertical; }
 .topnav a.on { background: var(--soft); color: var(--ink); font-weight: 600; }
 .toggle { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
 main { padding: 16px 18px 90px; max-width: 1600px; margin: 0 auto; }
-.board { display: grid; grid-template-columns: 210px 1fr; gap: 16px; align-items: start; }
+.board { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 16px; align-items: start; }
 .lanes { position: sticky; top: 64px; display: flex; flex-direction: column; gap: 2px; }
-.lanes button { display: flex; justify-content: space-between; border: none; background: none; text-align: left; padding: 6px 10px; border-radius: 6px; color: var(--ink); }
+.lanes button { display: flex; gap: 12px; justify-content: space-between; align-items: baseline; border: none; background: none; text-align: left; padding: 6px 16px 6px 12px; border-radius: 6px; color: var(--ink); white-space: normal; }
+.lanes button .n { flex: none; }
 .lanes button.on { background: var(--panel); box-shadow: inset 3px 0 0 var(--accent); font-weight: 600; }
 .lanes button .n { color: var(--muted); font-variant-numeric: tabular-nums; }
 .lanes button.security .n { color: var(--bad); font-weight: 700; }
@@ -76,6 +77,8 @@ td.title a.t { color: var(--ink); font-weight: 550; }
 .chip.info, .chip.running, .chip.staged, .chip.committer { background: var(--info-bg); color: var(--accent); }
 .chip.attn, .chip.waiting { background: var(--attn-bg); color: var(--attn); }
 .chip.cat { background: transparent; border: 1px solid var(--line); }
+ul.why { margin: 4px 0 0; padding-left: 15px; color: var(--warn); max-width: 230px; }
+.bulk { display: inline-flex; gap: 4px; align-items: center; }
 .reasons { margin: 4px 0 0; padding-left: 18px; font-size: 12px; color: var(--muted); }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
 .panel.securityBad { border-color: var(--bad); background: var(--bad-bg); }
@@ -138,6 +141,10 @@ menu { display: flex; justify-content: flex-end; gap: 8px; padding: 0; margin: 1
 .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--ink); color: var(--bg); padding: 8px 16px; border-radius: 8px; z-index: 30; max-width: 80vw; }
 .toast.err { background: var(--bad); color: #fff; }
 .empty { text-align: center; padding: 60px 0; color: var(--muted); }
+.staleBox { border: 1px solid var(--bad); background: var(--bad-bg); color: var(--ink); border-radius: 10px; padding: 12px 16px; margin-bottom: 14px; }
+.staleBox strong { color: var(--bad); }
+.staleBox ul { margin: 6px 0; padding-left: 20px; }
+.staleBox p { margin: 6px 0 10px; font-size: 13px; }
 .lintBox { border: 1px solid var(--bad); background: var(--bad-bg); color: var(--bad); border-radius: 8px; padding: 8px 12px; margin: 8px 0; font-size: 13px; }
 .lintBox label { display: flex; gap: 6px; align-items: center; color: var(--ink); margin-top: 4px; }
 .pageHead { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: baseline; margin-bottom: 12px; }

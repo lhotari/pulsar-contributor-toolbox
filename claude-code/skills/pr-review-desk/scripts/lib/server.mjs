@@ -14,6 +14,7 @@ import * as review from './review.mjs';
 import * as jobs from './jobs.mjs';
 import * as autopilot from './autopilot.mjs';
 import { scanSummary } from './scan.mjs';
+import { followUpReasons, draftStaleness } from './triage.mjs';
 
 const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'web');
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
@@ -53,9 +54,10 @@ function items(repo, lane) {
       size: (x.additions || 0) + (x.deletions || 0), files: x.changed_files, labels: db.J(x.labels, []), ci: x.ci, updated_at: x.updated_at,
       gate: x.gate, gateCurrent: x.gate_sha === x.head_sha, scan: scanSummary(db.J(x.scan)), scanLevel: db.J(x.scan)?.level || null,
       hold: x.hold, hold_until: x.hold_until, note: x.note,
-      myLast: a.myLastReview ? { state: a.myLastReview.state, at: a.myLastReview.submittedAt } : null, headMoved: !!a.headMoved,
+      myLast: a.myLastReview ? { state: a.myLastReview.state, at: a.myLastReview.submittedAt, oid: a.myLastReview.oid } : null, headMoved: !!a.headMoved,
+      followUp: followUpReasons(a, x.author, { draft: rv?.status === 'draft' ? rv : null, pr: { head_sha: x.head_sha, analysis: a } }),
       threads: a.threadCounts || {},
-      review: rv ? { id: rv.id, status: rv.status, kind: rv.kind, comments: cs.filter((c) => c.include && c.state !== 'removed').length,
+      review: rv ? { id: rv.id, status: rv.status, kind: rv.kind, stale: draftStaleness(rv, { head_sha: x.head_sha, analysis: a }).length > 0, comments: cs.filter((c) => c.include && c.state !== 'removed').length,
         staged: cs.filter((c) => c.state === 'staged').length, recommended: rv.recommended_event } : null,
       job: job ? { id: job.id, type: job.type, status: job.status } : null };
   });
@@ -68,7 +70,7 @@ function prView(repo, number) {
   const cur = rounds.find((r) => r.status !== 'discarded') || null;
   return {
     pr: { ...pr, body: pr.body }, item: { ...it, scanSummary: scanSummary(it.scan) },
-    review: cur ? { ...cur, comments: db.comments(cur.id), lints: review.outgoing(cur.id) } : null,
+    review: cur ? { ...cur, comments: db.comments(cur.id), lints: review.outgoing(cur.id), stale: draftStaleness(cur, pr) } : null,
     rounds: rounds.map((r) => ({ id: r.id, kind: r.kind, status: r.status, head_sha: r.head_sha, event: r.event, created_at: r.created_at, submitted_at: r.submitted_at, gh_url: r.gh_url })),
     jobs: db.all('SELECT id, type, status, args, result, created_at, finished_at, head_sha FROM jobs WHERE repo = ? AND number = ? ORDER BY id DESC LIMIT 20', repo, number)
       .map((j) => ({ ...j, args: db.J(j.args, {}), result: db.J(j.result) })),
@@ -83,7 +85,7 @@ const ACTIONS = {
   scan: async (a) => triage.scan(a.repo, Number(a.number)),
   review: (a) => {
     const n = Number(a.number); const it = db.item(a.repo, n);
-    const type = a.type || (db.pr(a.repo, n).analysis?.myLastReview ? 're-review' : 'review');
+    const type = ['review', 're-review'].includes(a.type) ? a.type : (db.pr(a.repo, n).analysis?.myLastReview ? 're-review' : 'review');
     return { job: jobs.enqueue(a.repo, n, type, { instructions: a.instructions || null, static: it.gate !== 'clear' }) };
   },
   revise: (a) => ({ job: jobs.enqueue(a.repo, Number(a.number), 'revise', { instructions: a.instructions, scope: a.scope || null }) }),
@@ -109,7 +111,7 @@ const ACTIONS = {
   discard: async (a) => { await review.discard(Number(a.review)); return {}; },
   stage: async (a) => review.stage(Number(a.review)),
   'sync-staged': async (a) => review.syncStaged(Number(a.review)),
-  submit: async (a) => review.submit(Number(a.review), { event: a.event, body: a.body, allowMovedHead: !!a.allowMovedHead }),
+  submit: async (a) => review.submit(Number(a.review), { event: a.event, body: a.body }),
   body: (a) => { review.setBody(Number(a.review), a.body); return {}; },
   ack: (a) => { review.ackLints(Number(a.review), a.labels || []); return review.outgoing(Number(a.review)); },
   'comment-add': async (a) => ({ id: await review.addComment(Number(a.review), a) }),
@@ -180,10 +182,10 @@ export function serve({ port = DEFAULT_PORT, open = false } = {}) {
         try { const r = await fn(a); dispatch(); return send(200, r ?? {}); } finally { if (writes && key) locks.delete(key); }
       }
       send(404, { error: 'no such endpoint' });
-    } catch (e) { send(e.code === 'HEAD_MOVED' ? 409 : 400, { error: e.message, code: e.code || null }); }
+    } catch (e) { send(e.code === 'STALE' ? 409 : 400, { error: e.message, code: e.code || null }); }
   };
   function dispatch() {
-    try { jobs.dispatch(running); } catch (e) { console.error(`dispatch: ${e.message}`); }
+    try { jobs.reapOrphans(running); jobs.dispatch(running); } catch (e) { console.error(`dispatch: ${e.message}`); }
     for (const [id, c] of running) if (c.exitCode !== null) running.delete(id);
   }
   setInterval(dispatch, 10_000).unref?.();

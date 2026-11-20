@@ -200,6 +200,7 @@ async function main() {
         const f = JSON.parse(fs.readFileSync(p.findings, 'utf8'));
         const it = db.item(j.repo, j.number);
         const r = await review.importFindings(j.repo, j.number, f, { jobId: j.id, kind: j.type === 're-review' ? 're-review' : 'initial',
+          basisAt: j.started_at || j.created_at,
           gate: { state: it.gate, by: it.gate_by, note: it.gate_note } });
         triage.refreshItem(j.repo, j.number);
         return out(r);
