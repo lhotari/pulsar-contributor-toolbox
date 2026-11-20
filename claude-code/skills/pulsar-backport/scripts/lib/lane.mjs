@@ -107,26 +107,36 @@ export function syncPicks(sid, branch) {
   return { added, removed, total: picks(sid, branch).length };
 }
 
-/** Dependencies that are not satisfied in this lane before the given pick. */
+/** The user left this PR out of the branch in plan review (decision "skip" set or accepted by the user). */
+export function excludedInReview(sid, branch, pr) {
+  return !!db.get(`SELECT 1 FROM targets WHERE session_id = ? AND pr = ? AND branch = ? AND on_branch = 0
+     AND decision = 'skip' AND decision_source = 'user'`, sid, pr, branch);
+}
+
+/**
+ * Dependencies that are not satisfied in this lane before the given pick. `later`: it follows in this batch;
+ * `excluded`: the user left it out in review, so the pick goes in without it (adapted when it conflicts).
+ */
 export function unmetDeps(sid, branch, pick) {
   const earlier = new Set(picks(sid, branch).filter((p) => ['picked', 'empty'].includes(p.status) && p.pr !== pick.pr).map((p) => p.pr));
-  const rows = db.all(`SELECT d.*, t.on_branch, t.decision FROM deps d
+  const rows = db.all(`SELECT d.*, t.on_branch, t.decision, t.decision_source FROM deps d
        LEFT JOIN targets t ON t.session_id = d.session_id AND t.pr = d.depends_on AND t.branch = ?
        WHERE d.session_id = ? AND d.pr = ? AND (d.branch IS NULL OR d.branch = ?) AND d.status != 'dismissed'`, branch, sid, pick.pr, branch);
   // A dependency that merged after this PR on master and is a pick later in this batch is a follow-up, whichever way
   // the hint points: it goes in after this pick, in master order, and does not block it.
   const later = new Map(picks(sid, branch).filter((p) => ['pending', 'blocked', 'conflict'].includes(p.status) && p.seq > pick.seq).map((p) => [p.pr, p]));
   return rows.filter((d) => !earlier.has(d.depends_on) && !(d.on_branch ?? depOnBranch(sid, branch, d.depends_on)))
-    .map((d) => (later.has(d.depends_on) ? { ...d, later: true } : d));
+    .map((d) => (later.has(d.depends_on) ? { ...d, later: true }
+      : d.decision === 'skip' && d.decision_source === 'user' ? { ...d, excluded: true } : d));
 }
 
-/** A blocked pick whose dependencies were since picked, or turned out to follow later in the batch, goes again. */
+/** A blocked pick whose dependencies were since picked, follow later in the batch or were left out in review goes again. */
 export function releaseBlocked(sid, branch) {
   const out = [];
   for (const p of picks(sid, branch).filter((x) => x.status === 'blocked')) {
-    if (!unmetDeps(sid, branch, p).every((d) => d.later)) continue;
+    if (!unmetDeps(sid, branch, p).every((d) => d.later || d.excluded)) continue;
     setPick(sid, branch, p.pr, { status: 'pending', detail: { ...p.detail, unmet: undefined } });
-    db.event(sid, `#${p.pr} is no longer blocked: its dependencies are picked or follow it in master order`, { branch });
+    db.event(sid, `#${p.pr} is no longer blocked: its dependencies are picked, follow it in master order or were left out in review`, { branch });
     out.push(p.pr);
   }
   return out;
@@ -176,7 +186,7 @@ export function pickNext(sid, branch) {
   }
   const unmet = unmetDeps(sid, branch, next);
   const dry = g.dryPick(dir, 'HEAD', next.source_sha, `${next.source_sha}^`);
-  const hard = unmet.filter((d) => !d.later && (d.source !== 'blame' || !dry.clean));
+  const hard = unmet.filter((d) => !d.later && !d.excluded && (d.source !== 'blame' || !dry.clean));
   if (hard.length) {
     detail.unmet = hard.map((d) => ({ depends_on: d.depends_on, source: d.source, detail: d.detail, decision: d.decision }));
     setPick(sid, branch, next.pr, { status: 'blocked', detail });
@@ -185,6 +195,7 @@ export function pickNext(sid, branch) {
     return { status: 'blocked', pr: next.pr, unmet: detail.unmet };
   }
   if (unmet.length) detail.warnings = unmet.map((d) => (d.later ? `#${d.depends_on} (${d.detail}) merged after it on master and follows later in this batch`
+    : d.excluded ? `goes in without #${d.depends_on} (${d.detail}), which was left out in review`
     : `applies cleanly although it builds on #${d.depends_on} (${d.detail})`));
   // A replayed pick is the lane's earlier commit (resolution included) followed by its fixups.
   const res = g.cherryPick(dir, [next.source_sha, ...(detail.extras || [])], { trailer: !detail.reused && !detail.replay });
@@ -485,7 +496,8 @@ function conflictDeps(sid, cfg, branch, pick, files) {
       const dep = Number(m[1]);
       const t = db.get('SELECT on_branch, decision FROM targets WHERE session_id = ? AND pr = ? AND branch = ?', sid, dep, branch);
       if (!t || t.on_branch || inLane.has(dep)) continue;
-      out.push({ depends_on: dep, file: f.split('/').pop(), decision: t.decision, title: line.slice(41).replace(g.PR_RE, '').trim() });
+      out.push({ depends_on: dep, file: f.split('/').pop(), decision: t.decision, excluded: excludedInReview(sid, branch, dep) || undefined,
+        title: line.slice(41).replace(g.PR_RE, '').trim() });
       db.run(`INSERT OR IGNORE INTO deps (session_id, pr, depends_on, branch, source, detail, phase, created_at) VALUES (?,?,?,?,?,?,?,?)`,
         sid, pick.pr, dep, branch, 'conflict', `also changed ${f.split('/').pop()}, which conflicts`, 'backport', db.now());
     }

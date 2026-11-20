@@ -350,4 +350,45 @@ test('while backporting: late picks go in master order, drops rebuild the lane, 
   assert.equal(db.get('SELECT decision FROM targets WHERE session_id = ? AND pr = 110 AND branch = ?', sid, B).decision, 'backport', 'decisions stay');
 });
 
+test('a dependency left out in review is not asked again: the pick goes on without it', async () => {
+  const control = await import('../scripts/lib/control.mjs');
+  const sid = 'excluded-session'; const B = 'branch-4.2';
+  plan.createSession({ id: sid, repo, remote: 'origin', sincePr: 111, branches: plan.parseBranches('branch-4.2:4.2.8') });
+  plan.discover(sid, { log: () => {}, blame: false });
+  db.run(`INSERT INTO deps (session_id, pr, depends_on, branch, source, detail, phase, created_at) VALUES (?,?,?,?,?,?,?,?)`, sid, 112, 110, null, 'manual', 'builds on it', 'plan', db.now());
+  assert.deepEqual(plan.pullInDependencies(sid).added, [110]);
+  // The user leaves #110 out in review; #112 is still wanted.
+  plan.setDecisions(sid, [[110, 'skip'], [112, 'backport'], [113, 'skip'], [114, 'skip'], [115, 'skip']].map(([pr, decision]) => ({ pr, branch: B, decision })));
+  db.run(`UPDATE sessions SET status = 'backporting' WHERE id = ?`, sid);
+  lane.startLane(sid, B, { log: () => {} });
+  const r = lane.pickAll(sid, B, { log: () => {} });
+  assert.deepEqual([r.last.status, r.last.pr], ['conflict', 112], 'not blocked on #110: it was left out in review');
+  const p = lane.lanePicks(sid, B).find((x) => x.pr === 112);
+  assert.equal(p.detail.unmet, undefined);
+  // #110 is before the since point, so the conflict scan does not see it; a hint for it as the scan would record it:
+  db.run(`UPDATE picks SET detail = ? WHERE session_id = ? AND branch = ? AND pr = 112`,
+    db.S({ ...p.detail, conflictDeps: [{ depends_on: 110, file: 'Bar.java', decision: 'skip', title: 'Prerequisite' }] }), sid, B);
+  // The resolve worker sees it in its context, and asking for it is answered at once; the job stays the worker's.
+  const jid = db.get(`SELECT id FROM jobs WHERE session_id = ? AND type = 'resolve' AND status = 'queued'`, sid).id;
+  db.run(`UPDATE jobs SET status = 'running' WHERE id = ?`, jid);
+  const bpt = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'scripts', 'bpt.mjs');
+  const ctx = JSON.parse(execFileSync('node', [bpt, 'job', 'show', String(jid)], { encoding: 'utf8' }));
+  assert.deepEqual(ctx.pick.excludedInReview.map((x) => x.pr), [110]);
+  const said = execFileSync('node', [bpt, 'job', 'ask', String(jid), '--question', 'needs #110', '--propose', 'dep:112:110'], { encoding: 'utf8' });
+  assert.match(said, /NOT ASKED/);
+  assert.equal(jobs.job(jid).status, 'running');
+  // Once no job works on it, the conflict decision does not offer #110 again.
+  jobs.finish(jid, 'failed', { error: 'test' });
+  const d = control.list(sid).find((x) => x.key === `conflict:${B}:112`);
+  assert.ok(!d.options.some((o) => o.id === 'add:110'), 'no "Backport #110 first" option');
+  assert.match(d.text, /without #110, left out in review/);
+  // A blocked pick whose only missing dependency is later left out in review goes again.
+  lane.resetLane(sid, B, 'test');
+  plan.setDecisions(sid, [{ pr: 110, branch: B, decision: 'undecided' }]);
+  lane.startLane(sid, B, { log: () => {} });
+  assert.deepEqual(lane.pickAll(sid, B, { log: () => {} }).last.status, 'blocked');
+  plan.setDecisions(sid, [{ pr: 110, branch: B, decision: 'skip' }]);
+  assert.deepEqual(lane.releaseBlocked(sid, B), [112]);
+});
+
 function edit2(dir, f, i, text) { const p = path.join(dir, 'mod/src/main/java', f); const a = fs.readFileSync(p, 'utf8').split('\n'); a[i - 1] = text; fs.writeFileSync(p, a.join('\n')); }

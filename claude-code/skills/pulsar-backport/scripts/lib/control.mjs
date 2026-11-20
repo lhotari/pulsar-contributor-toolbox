@@ -136,10 +136,14 @@ export function pending(sid) {
       }
       if (['conflict', 'needs-fix'].includes(p.status) && idle) {
         const tries = attempts(sid, b, 'resolve', { pr: p.pr });
-        const hints = (p.detail.conflictDeps || []).filter((c, i, a) => a.findIndex((x) => x.depends_on === c.depends_on) === i).slice(0, 3);
+        const uniq = (p.detail.conflictDeps || []).filter((c, i, a) => a.findIndex((x) => x.depends_on === c.depends_on) === i);
+        // A PR the user left out in review is not offered again: the pick is resolved without it.
+        const left = uniq.filter((c) => c.excluded || lane.excludedInReview(sid, b, c.depends_on));
+        const hints = uniq.filter((c) => !left.includes(c)).slice(0, 3);
         add({ key: `${p.status}:${b}:${p.pr}`, kind: p.status, branch: b, pr: p.pr,
           title: `#${p.pr} ${title(p.pr)} ${p.status === 'conflict' ? `conflicts in ${(p.detail.conflicts || []).map((f) => f.split('/').pop()).join(', ')}` : 'needs a fix after the post-pick check'}`,
-          text: [tries ? `${tries} resolve attempt(s) did not finish it.` : '', hints.length ? `Missing master commits that touched these files: ${hints.map((c) => `#${c.depends_on} (${c.decision})`).join(', ')}.` : ''].filter(Boolean).join(' '),
+          text: [tries ? `${tries} resolve attempt(s) did not finish it.` : '', hints.length ? `Missing master commits that touched these files: ${hints.map((c) => `#${c.depends_on} (${c.decision})`).join(', ')}.` : '',
+            left.length ? `Resolved without ${left.map((c) => `#${c.depends_on}`).join(', ')}, left out in review.` : ''].filter(Boolean).join(' '),
           options: [
             { id: 'resolve', label: tries ? 'Resolve with Claude again' : 'Resolve with Claude', recommended: true, input: tries ? 'Instructions for the worker (optional)' : null, optional: true, run: (text) => enqueue(sid, b, 'resolve', { pr: p.pr, instructions: text || undefined }) },
             ...hints.map((c) => ({ id: `add:${c.depends_on}`, label: `Backport #${c.depends_on} first`, run: () => { settle(sid, b, `#${c.depends_on} added before #${p.pr}`); return lane.addDependency(sid, b, p.pr, c.depends_on, `also changed ${c.file}, which conflicts`); } })),

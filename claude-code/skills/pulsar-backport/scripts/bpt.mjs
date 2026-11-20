@@ -87,6 +87,12 @@ function jobContext(id) {
       const it = items.get(j.args.pr);
       ctx.pick = { ...brief(p), assessment: it?.assessment, deps: it?.deps, labels: it?.labels };
       if (j.type === 'resolve' && p) ctx.pick.tests = lane.changedTests(j.session_id, j.branch, p);
+      if (p) {
+        // PRs this pick builds on or conflicts with that the user left out in review: resolve without them.
+        const cand = [...lane.unmetDeps(j.session_id, j.branch, p).map((d) => d.depends_on), ...(p.detail.conflictDeps || []).map((c) => c.depends_on)];
+        ctx.pick.excludedInReview = [...new Set(cand)].filter((d) => lane.excludedInReview(j.session_id, j.branch, d))
+          .map((d) => ({ pr: d, title: items.get(d)?.title, note: items.get(d)?.targets?.[j.branch]?.decision_note }));
+      }
     }
     ctx.picks = picks.map((p) => ({ pr: p.pr, status: p.status, title: items.get(p.pr)?.title, picked: p.picked_sha, master: p.detail.master || p.source_sha,
       adapt: items.get(p.pr)?.targets?.[j.branch]?.adapt }));
@@ -281,9 +287,21 @@ async function main() {
         case 'fail': jobs.finish(Number(pos[0]), 'failed', { error: need(opt.reason, '--reason') }); return out('ok');
         case 'ask': {
           const id = Number(pos[0]); const j = jobs.job(id);
-          const proposals = control.parseProposals(opt.propose === true ? '' : opt.propose, j.args.pr);
+          const all = control.parseProposals(opt.propose === true ? '' : opt.propose, j.args.pr);
+          // A dependency the user left out in review is not asked about again.
+          const left = j.branch ? all.filter((p) => p.type === 'dep' && lane.excludedInReview(j.session_id, j.branch, p.dep)) : [];
+          const proposals = all.filter((p) => !left.includes(p));
+          if (left.length && !proposals.length) {
+            // Answered here: the question is not sent and the job stays with the worker.
+            const prs = left.map((p) => `#${p.dep}`).join(', '); const them = left.length > 1 ? 'them' : 'it'; const pr = left[0].pr;
+            db.event(j.session_id, `Job ${id} asked for ${prs}, left out in review; told it to go on without ${them}`, { branch: j.branch, job: id });
+            return out(`NOT ASKED. The user left ${prs} out of ${j.branch} in plan review (decision skip), so ${them} will not be backported. `
+              + `This job is still yours: make #${pr} work without ${them}, adapting the change to the code the branch has${j.type === 'resolve' ? ', and finish with lane resolved' : ''}. `
+              + `Only if #${pr} cannot work at all without ${prs}, ask with --propose drop:${pr}.`);
+          }
           const recommendation = typeof opt.recommend === 'string' ? opt.recommend : null;
-          jobs.finish(id, 'waiting', { question: need(opt.question, '--question'), proposals, recommendation });
+          const question = need(opt.question, '--question') + (left.length ? `\n(Not offered: ${left.map((p) => `#${p.dep}`).join(', ')}, left out in review.)` : '');
+          jobs.finish(id, 'waiting', { question, proposals, recommendation });
           if (j.branch) db.updateLane(j.session_id, j.branch, { attention: `Job ${id} asks a question (Decisions needed)` });
           return out('ok');
         }
