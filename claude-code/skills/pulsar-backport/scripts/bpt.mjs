@@ -19,6 +19,7 @@ const HELP = `bpt — apache/pulsar backport sessions (state: ${db.DB_PATH})
 
   doctor
   serve [--port 8765] [--open]                      web UI + job runner + autopilot
+  url [--open]                                      the running server's link (with its token)
   session create <id> --branches branch-4.2:4.2.6,branch-4.0:4.0.15<branch-4.2 (--since-pr N | --since-sha S) [--title T] [--repo DIR] [--remote NAME]
   session list | show <id> | start-backport <id> | config <id> key=value...
   plan discover <id> [--no-blame]                   refresh PRs, branch presence, labels, dry runs, dependency hints
@@ -141,7 +142,15 @@ async function main() {
       const gh = spawnSync('gh', ['auth', 'status'], { encoding: 'utf8' }); checks.gh = gh.status === 0 ? 'ok' : (gh.stderr || '').trim();
       const cl = spawnSync(process.env.BPT_CLAUDE || 'claude', ['--version'], { encoding: 'utf8' }); checks.claude = cl.status === 0 ? cl.stdout.trim() : 'not found';
       checks.cherryPickSkill = fs.existsSync(path.join(SKILLS, 'pulsar-cherry-pick', 'SKILL.md'));
+      const s = (await import('./lib/server.mjs')).serverInfo(); checks.server = s ? `running (pid ${s.pid}) ${s.url}` : 'not running (bpt serve)';
       return out(checks);
+    }
+    case 'url': {
+      db.open();
+      const s = (await import('./lib/server.mjs')).serverInfo();
+      if (!s) { console.error('bpt server is not running; start it with: bpt serve [--port 8765]'); process.exit(1); }
+      if (opt.open) (await import('node:child_process')).spawn('open', [s.url], { detached: true, stdio: 'ignore' }).on('error', () => {}).unref();
+      console.log(s.url); return;
     }
     case 'serve': {
       const { serve } = await import('./lib/server.mjs');

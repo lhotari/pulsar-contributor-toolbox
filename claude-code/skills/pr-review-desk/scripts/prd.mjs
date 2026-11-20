@@ -72,6 +72,7 @@ const HELP = `prd — pr-review-desk engine
   doctor                                   gh login, database, server, budget
   serve [--port 8766] [--open]             run the web UI in the foreground
   ui [--open]                              start the UI in the background if needed and print its link
+  url [--open]                             the running server's link (exit 1 when it is not running)
   repo add [owner/repo] [--checkout DIR --remote NAME] | repo list | repo autopilot <slug> on|off
   repo config <slug> --json '{...}'        merge into the repo's rules (see lib/config.mjs)
   triage [--repo o/r] [--full]             sync, scan, apply rules; prints the lanes
@@ -108,6 +109,12 @@ async function main() {
       return g.status === 0 ? undefined : process.exit(1);
     }
     case 'serve': return serve({ port: Number(o.port || DEFAULT_PORT), open: !!o.open });
+    case 'url': {
+      const s = serverInfo();
+      if (!s) { console.error('prd server is not running; start it with: prd ui'); process.exit(1); }
+      if (o.open) spawn('open', [s.url], { detached: true, stdio: 'ignore' }).unref();
+      console.log(s.url); return;
+    }
     case 'ui': {
       const s = ensureServer(Number(o.port || DEFAULT_PORT));
       if (o.open) spawn('open', [s.url], { detached: true, stdio: 'ignore' }).unref();

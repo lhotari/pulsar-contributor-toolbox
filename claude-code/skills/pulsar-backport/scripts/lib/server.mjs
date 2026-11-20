@@ -15,7 +15,16 @@ import * as control from './control.mjs';
 const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'web');
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
 
-function token() {
+/** The running server (pid alive) and its link, or null. */
+export function serverInfo() {
+  const row = db.get(`SELECT value FROM meta WHERE key = 'server'`);
+  const s = row ? JSON.parse(row.value) : null;
+  if (!s) return null;
+  try { process.kill(s.pid, 0); } catch { return null; }
+  return { ...s, url: `http://127.0.0.1:${s.port}/#${token()}` };
+}
+
+export function token() {
   const t = db.get(`SELECT value FROM meta WHERE key = 'token'`);
   if (t) return t.value;
   const v = crypto.randomBytes(18).toString('base64url');
@@ -230,6 +239,7 @@ export function serve({ port = 8765, open = false } = {}) {
   const server = http.createServer((req, res) => { handle(req, res).catch((e) => { res.writeHead(500).end(e.message); }); });
   server.listen(port, '127.0.0.1', () => {
     const link = `http://127.0.0.1:${port}/#${tok}`;
+    db.run(`INSERT OR REPLACE INTO meta (key, value) VALUES ('server', ?)`, JSON.stringify({ pid: process.pid, port, at: db.now() }));
     console.log(`bpt UI: ${link}\nstate: ${db.DB_PATH}`);
     if (open) spawn('open', [link], { detached: true, stdio: 'ignore' }).on('error', () => {}).unref();
     tick();
