@@ -492,11 +492,15 @@ function renderPicks(branch) {
     if (det.check && !det.check.ok) extra.push(h('pre', { class: 'check' }, det.check.output));
     const B = [];
     const b = (label, action, args, opts = {}) => B.push(h('button', { class: opts.cls, onclick: () => act(action, branch, args, opts.confirm) }, label));
-    if (['conflict', 'needs-fix'].includes(p.status)) { b('Resolve with Claude', 'resolve', { pr: p.pr }, { cls: 'primary' }); b('I resolved it', 'resolved', { pr: p.pr }); }
+    // A job already working on this pick (a resolver, queued, running or waiting for an answer).
+    const job = (S.summary?.activeJobs || []).find((j) => j.branch === branch && j.args?.pr === p.pr);
+    const stop = job ? `\n\nThis cancels ${job.type} job ${job.id} (${job.status}) first${job.status === 'running' ? ' and discards its uncommitted changes' : ''}.` : '';
+    if (job) B.push(h('span', { class: 'small' }, chip(job.status, job.status), ` ${job.type} job ${job.id} `, h('a', { href: '#', onclick: (e) => { e.preventDefault(); openLog(job.id); } }, 'log')));
+    if (['conflict', 'needs-fix'].includes(p.status) && !job) { b('Resolve with Claude', 'resolve', { pr: p.pr }, { cls: 'primary' }); b('I resolved it', 'resolved', { pr: p.pr }); }
     if (p.status === 'blocked') { b('Re-check', 'unblock', { pr: p.pr }); }
-    if (['pending', 'conflict', 'blocked'].includes(p.status)) b('Skip', 'skip', { pr: p.pr, reason: '' }, { cls: 'ghost', confirm: `Skip #${p.pr} on ${branch}? Its decision becomes "skip".` });
+    if (['pending', 'conflict', 'blocked'].includes(p.status)) b('Skip', 'skip', { pr: p.pr, reason: '' }, { cls: 'ghost', confirm: `Skip #${p.pr} on ${branch}? Its decision becomes "skip".${stop}` });
     if (['picked', 'needs-fix'].includes(p.status) && !pushed) B.push(h('button', { class: 'ghost danger', onclick: () => {
-      const reason = prompt(`Drop #${p.pr} from ${branch}? Its decision becomes "skip".\n\nThe lane is rebuilt from its commit: later picks are re-applied from their lane commits (resolutions and fixups kept), then verified and tested again. A pushed test PR is replaced by a new one.\n\nReason:`, '');
+      const reason = prompt(`Drop #${p.pr} from ${branch}? Its decision becomes "skip".${stop}\n\nThe lane is rebuilt from its commit: later picks are re-applied from their lane commits (resolutions and fixups kept), then verified and tested again. A pushed test PR is replaced by a new one.\n\nReason:`, '');
       if (reason !== null) act('drop', branch, { pr: p.pr, reason: reason || 'dropped from the UI' });
     } }, 'Drop'));
     if (p.status !== 'skipped' && !pushed) B.push(h('button', { class: 'ghost', onclick: () => {

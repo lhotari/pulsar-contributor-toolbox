@@ -9,6 +9,21 @@ const attempts = (sid, branch, type, key = {}) => db.all(`SELECT args FROM jobs 
   .map((j) => db.J(j.args, {})).filter((a) => Object.entries(key).every(([k, v]) => a[k] === v)).length;
 
 /** Jobs on the lane must not be working in the worktree while the lane changes; a waiting question is superseded. */
+/**
+ * Cancel the jobs working on one pick (a resolve job, queued, running or waiting) before the pick is skipped or
+ * dropped. A cancelled resolver's half-done work in the worktree belongs to that pick and is discarded with it.
+ */
+export function cancelPickJobs(sid, branch, pr, why) {
+  const js = db.all(`SELECT id, status FROM jobs WHERE session_id = ? AND branch = ? AND status IN ('queued', 'running', 'waiting')
+     AND json_extract(args, '$.pr') = ?`, sid, branch, pr);
+  for (const j of js) jobs.cancel(j.id, why);
+  if (js.some((j) => j.status === 'running')) {
+    const l = db.lane(sid, branch);
+    if (l.worktree) { lane.discardWorktreeChanges(l.worktree); db.event(sid, `Discarded the cancelled resolver's uncommitted changes for #${pr}`, { branch, level: 'warn' }); }
+  }
+  return js.map((j) => j.id);
+}
+
 export function settle(sid, branch, why, except = null) {
   const run = db.get(`SELECT id, type FROM jobs WHERE session_id = ? AND branch = ? AND status = 'running'`, sid, branch);
   if (run) throw new Error(`job ${run.id} (${run.type}) is running on ${branch}; wait for it or cancel it first`);

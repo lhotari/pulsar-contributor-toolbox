@@ -80,9 +80,13 @@ const ACTIONS = {
   'pick-all': (sid, b) => ({ job: jobs.enqueue(sid, b, 'pick-all') }),
   resolve: (sid, b, a) => ({ job: jobs.enqueue(sid, b, 'resolve', { pr: Number(a.pr), instructions: a.instructions }) }),
   resolved: (sid, b, a) => lane.markResolved(sid, b, Number(a.pr)),
-  skip: (sid, b, a) => { lane.skipPick(sid, b, Number(a.pr), a.reason || 'skipped from the UI'); return {}; },
+  // Skip and drop cancel the jobs working on that pick first (a running resolver is stopped).
+  skip: (sid, b, a) => {
+    const cancelled = control.cancelPickJobs(sid, b, Number(a.pr), `#${a.pr} skipped by the user`);
+    lane.skipPick(sid, b, Number(a.pr), a.reason || 'skipped from the UI'); return { cancelled };
+  },
   // A committed pick too: the lane is rebuilt from it, later picks re-applied from their lane commits.
-  drop: (sid, b, a) => { control.settle(sid, b, `#${a.pr} dropped`); return lane.dropPick(sid, b, Number(a.pr), a.reason || 'dropped from the UI'); },
+  drop: (sid, b, a) => { control.cancelPickJobs(sid, b, Number(a.pr), `#${a.pr} dropped by the user`); control.settle(sid, b, `#${a.pr} dropped`); return lane.dropPick(sid, b, Number(a.pr), a.reason || 'dropped from the UI'); },
   'add-dep': (sid, b, a) => { control.settle(sid, b, `#${a.dep} added before #${a.pr}`); return lane.addDependency(sid, b, Number(a.pr), Number(a.dep), a.detail || 'added in the UI while backporting'); },
   'out-of-order': (sid, b, a) => { lane.pickOutOfOrder(sid, b, Number(a.pr), a.reason); return {}; },
   unblock: (sid, b, a) => ({ ok: lane.unblock(sid, b, Number(a.pr)) }),

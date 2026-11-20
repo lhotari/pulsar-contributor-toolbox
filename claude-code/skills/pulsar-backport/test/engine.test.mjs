@@ -331,6 +331,11 @@ test('while backporting: late picks go in master order, drops rebuild the lane, 
   control.apply(sid, `unwanted:${B}:114`, 'keep');
   assert.equal(lane.holds(sid, B).length, 0);
 
+  // Skipping or dropping a pick cancels the job working on it first.
+  const rj = jobs.enqueue(sid, B, 'resolve', { pr: 115 });
+  assert.deepEqual(control.cancelPickJobs(sid, B, 115, 'test'), [rj]);
+  assert.equal(jobs.job(rj).status, 'cancelled');
+
   // Abort: the lane is reset, its test PR closed and its branch deleted; the session is back in planning.
   const out = lane.abortBackport(sid, { cancel: (id) => jobs.cancel(id) });
   assert.deepEqual(out, { reset: [B], kept: [] });

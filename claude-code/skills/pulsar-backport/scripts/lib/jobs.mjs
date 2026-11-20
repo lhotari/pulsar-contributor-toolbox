@@ -119,10 +119,10 @@ export function reply(id, text) {
   db.event(j.session_id, `Reply sent to job ${id}`, { branch: j.branch, job: id });
 }
 
-export function cancel(id) {
+export function cancel(id, why = 'cancelled by the user') {
   const j = job(id);
-  if (j.pid) { try { process.kill(j.pid, 'SIGTERM'); } catch { /* already gone */ } }
-  finish(id, 'cancelled', { summary: 'cancelled by the user' });
+  if (j.pid && j.status === 'running') { try { process.kill(j.pid, 'SIGTERM'); } catch { /* already gone */ } }
+  finish(id, 'cancelled', { summary: why });
 }
 
 /** Human-readable lines from a job log (stream-json for Claude, plain text for the engine). */

@@ -386,6 +386,12 @@ export function rewind(sid, branch, { drop = [], before = null, reason = '' } = 
   return { dropped, replayed, head };
 }
 
+/** Throw away uncommitted tracked changes (a cancelled resolver's partial work); a stopped cherry-pick is aborted later. */
+export function discardWorktreeChanges(dir) {
+  const st = g.state(dir);
+  if (st.dirty && !st.cherryPicking && !st.rebasing) g.git(dir, ['reset', '--quiet', '--hard', 'HEAD']);
+}
+
 /** Remove a pick from the lane. A committed pick rebuilds the lane from it; the decision becomes "skip". */
 export function dropPick(sid, branch, pr, reason) {
   const p = picks(sid, branch).find((x) => x.pr === pr);
