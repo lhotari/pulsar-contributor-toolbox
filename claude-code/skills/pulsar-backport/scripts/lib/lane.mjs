@@ -202,7 +202,7 @@ export function pickNext(sid, branch) {
     queueResolve(sid, branch, next.pr);
     return { status: 'conflict', pr: next.pr, conflicts: res.conflicts, conflictDeps: detail.conflictDeps };
   }
-  const check = runCheck(dir, next.detail.master || next.source_sha);
+  const check = runCheck(dir, next.detail.master || next.source_sha, st.head);
   detail.check = check;
   const pickedSha = detail.extras?.length ? pickCommit(dir, st.head, next) : res.sha;
   setPick(sid, branch, next.pr, { status: check.ok ? 'picked' : 'needs-fix', picked_sha: pickedSha, detail });
@@ -493,10 +493,11 @@ function conflictDeps(sid, cfg, branch, pick, files) {
   return out;
 }
 
-function runCheck(dir, sha) {
+function runCheck(dir, sha, base = null) {
   const script = checkPickScript();
   if (!script) return { ok: true, skipped: 'check-pick.sh not found' };
-  const r = spawnSync('bash', [script, sha], { cwd: dir, encoding: 'utf8' });
+  // With a base, only lines added since it count (the pick and its fixups), not code already on the branch.
+  const r = spawnSync('bash', [script, sha, ...(base ? [base] : [])], { cwd: dir, encoding: 'utf8' });
   return { ok: r.status === 0, output: (r.stdout || '').slice(-4000) };
 }
 
@@ -523,7 +524,7 @@ export function markResolved(sid, branch, pr, { tests = null, result = null } = 
   const own = p.detail.startHead && p.detail.startHead !== st.head && g.isAncestor(l.worktree, p.detail.startHead, st.head) ? pickCommit(l.worktree, p.detail.startHead, p) : null;
   const msg = g.git(l.worktree, ['log', '-1', '--format=%B', 'HEAD']);
   if (!own && !msg.includes(master) && !msg.includes(`(#${pr})`)) throw new Error(`HEAD ${g.short(st.head)} does not look like the pick of #${pr} (no trailer or PR number)`);
-  const check = runCheck(l.worktree, master);
+  const check = runCheck(l.worktree, master, own ? p.detail.startHead : null);
   // Leftover slog, conflict markers, unguarded debug or Gradle files on a Maven branch are not a resolution yet.
   if (!check.ok) throw new Error(`check-pick.sh still reports findings for #${pr}; fix them (pulsar-cherry-pick skill: slog → slf4j, Gradle → Maven, guards) and amend, then run this again:\n${(check.output || '').slice(-1500)}`);
   // What validated the resolution: the tests the resolver ran and their outcome (none for a hand resolution without them).

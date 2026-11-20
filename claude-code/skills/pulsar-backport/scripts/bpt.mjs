@@ -41,13 +41,14 @@ const HELP = `bpt — apache/pulsar backport sessions (state: ${db.DB_PATH})
   lane rewind <id> <branch> --before <master-order>    re-apply every pick after that position
   decisions <id>                                    what the backport waits for, with the options
   decisions <id> apply <key> <option> [--text T]    choose an option (the UI does the same)
+  decisions <id> recommended                        choose the recommended option wherever it needs no input
   abort <id> [--reason T]                           reset every lane not yet pushed, close test PRs, back to planning
   lane phase <id> <branch> <phase>  |  lane finalize <id> <branch> [--allow-rebase]
   ci rerun <id> <branch>
   advance <id> [--force]                            one autopilot step
   job list [--session ID] | show|run|log|cancel <job> | claim [--session ID] [--wait SECONDS]
   job done <job> --summary T | fail <job> --reason T | reply <job> <text>
-  job ask <job> --question T [--propose dep:<pr>:<dep>,drop:<pr>,rerun,reset]   ask the user; proposals become one-click options
+  job ask <job> --question T [--recommend T] [--propose dep:<pr>:<dep>,drop:<pr>,rerun,reset]   ask the user; proposals and the recommendation become one-click options
 `;
 
 function parse(argv) {
@@ -243,6 +244,7 @@ async function main() {
     case 'advance': return out(autopilot.advance(need(sub, 'session id'), { force: !!opt.force }));
     case 'decisions': {
       const sid = need(sub, 'session id');
+      if (pos[0] === 'recommended') return out(control.applyRecommended(sid));
       if (pos[0] === 'apply') return out(control.apply(sid, need(pos[1], 'decision key'), need(pos[2], 'option'), typeof opt.text === 'string' ? opt.text : undefined));
       return out(control.list(sid));
     }
@@ -271,8 +273,9 @@ async function main() {
         case 'ask': {
           const id = Number(pos[0]); const j = jobs.job(id);
           const proposals = control.parseProposals(opt.propose === true ? '' : opt.propose, j.args.pr);
-          jobs.finish(id, 'waiting', { question: need(opt.question, '--question'), proposals });
-          if (j.branch) db.updateLane(j.session_id, j.branch, { attention: `Job ${id} asks: ${opt.question}` });
+          const recommendation = typeof opt.recommend === 'string' ? opt.recommend : null;
+          jobs.finish(id, 'waiting', { question: need(opt.question, '--question'), proposals, recommendation });
+          if (j.branch) db.updateLane(j.session_id, j.branch, { attention: `Job ${id} asks a question (Decisions needed)` });
           return out('ok');
         }
         case 'reply': jobs.reply(Number(pos[0]), pos.slice(1).join(' ')); return out('ok');

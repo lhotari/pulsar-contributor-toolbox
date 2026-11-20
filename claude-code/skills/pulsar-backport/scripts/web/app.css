@@ -50,7 +50,14 @@ main { padding: 18px 20px 60px; max-width: 1500px; margin: 0 auto; }
 .needed h2 { color: var(--attn); margin-bottom: 8px; }
 .need { border-top: 1px solid var(--line); padding: 9px 0; }
 .need:first-of-type { border-top: none; }
-.need .needText { white-space: pre-wrap; margin-top: 3px; }
+.needHead { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+.needHead h2 { margin: 0; }
+.need .needTitle { line-height: 1.5; }
+.need .needText { margin-top: 6px; max-width: 110ch; font-size: 14px; line-height: 1.6; }
+.need .needText p { margin: 0 0 6px; }
+.need .needText code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; background: var(--soft); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; overflow-wrap: anywhere; }
+.need .needRec { margin-top: 4px; padding: 6px 10px; border-left: 3px solid var(--accent); background: var(--soft); border-radius: 0 6px 6px 0; max-width: 110ch; font-size: 14px; }
+.attention .clamp { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .need .laneButtons { margin-top: 7px; }
 /* Paths, test lists (Class#m1+m2+...) and SHAs have no spaces: let them break instead of widening the page. */
 .pickRow td, .filters .small, .need .needText, .attention, .feed .ev span { overflow-wrap: anywhere; }
@@ -109,3 +116,6 @@ button.small { padding: 2px 8px; font-size: 12px; }
 tr.groupEnd > td { border-bottom: 2px solid var(--accent); }
 .comment { margin: 10px 0; display: flex; flex-direction: column; gap: 6px; }
 .comment textarea { width: 100%; max-width: 900px; }
+
+button.copy { display: inline-flex; align-items: center; vertical-align: middle; padding: 2px 4px; margin-left: 4px; border: 1px solid transparent; background: none; color: var(--muted); cursor: pointer; border-radius: 4px; }
+button.copy:hover { color: var(--accent); border-color: var(--line, var(--soft)); background: var(--soft); }

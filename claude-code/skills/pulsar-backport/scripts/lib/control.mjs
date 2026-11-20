@@ -74,11 +74,14 @@ export function pending(sid) {
     const j = jobs.job(j0.id); const b = j.branch;
     const props = j.result?.proposals || [];
     const done = (label) => { jobs.finish(j.id, 'done', { summary: `the user chose: ${label}` }); if (b) db.updateLane(sid, b, { attention: null }); };
+    const rec = j.result?.recommendation || recommendationIn(j.result?.question);
     add({ key: `job:${j.id}`, kind: 'question', branch: b, pr: j.args.pr || null, job: j.id,
-      title: `${j.type}${j.args.pr ? ` #${j.args.pr}` : ''} asks`, text: j.result?.question || '',
+      title: `${j.type}${j.args.pr ? ` #${j.args.pr}` : ''} asks`, text: j.result?.question || '', recommendation: rec,
       options: [
         ...props.map((p, i) => ({ id: `p${i}`, label: proposalLabel(p), recommended: i === 0, run: () => { const r = runProposal(sid, b, p, j.id); if (jobs.job(j.id).status === 'waiting') done(proposalLabel(p)); return r; } })),
-        { id: 'reply', label: 'Reply to the worker', input: 'Your answer; the worker resumes with it', recommended: !props.length, run: (text) => { if (!text) throw new Error('write a reply'); jobs.reply(j.id, text); if (b) db.updateLane(sid, b, { attention: null }); return {}; } },
+        ...(rec && !props.length ? [{ id: 'recommendation', label: 'Go with the recommendation', recommended: true,
+          run: () => { jobs.reply(j.id, `Go ahead with your recommendation: ${rec}`); if (b) db.updateLane(sid, b, { attention: null }); return {}; } }] : []),
+        { id: 'reply', label: 'Reply to the worker', input: 'Your answer; the worker resumes with it', recommended: !props.length && !rec, run: (text) => { if (!text) throw new Error('write a reply'); jobs.reply(j.id, text); if (b) db.updateLane(sid, b, { attention: null }); return {}; } },
         { id: 'cancel', label: 'Cancel the job', cls: 'ghost', run: () => { jobs.cancel(j.id); if (b) db.updateLane(sid, b, { attention: null }); return {}; } },
       ] });
   }
@@ -199,6 +202,25 @@ export function apply(sid, key, option, text) {
   const r = o.run(text) || {};
   db.event(sid, `Decision: ${d.title} → ${o.label}${text ? ` (${String(text).slice(0, 200)})` : ''}`, { branch: d.branch || null });
   return r;
+}
+
+/** A worker that did not pass --recommend often ends its question with "I recommend ..."; use that sentence. */
+export function recommendationIn(text) {
+  const m = String(text || '').match(/(?:^|[.?!]\s+)((?:I(?:'d| would)? recommend|I suggest|Recommendation:)[^]*?)(?:[.!](?:\s|$)|$)/i);
+  return m ? m[1].replace(/^(I(?:'d| would)? recommend(?: that)?|I suggest|Recommendation:)\s*/i, '').replace(/^./, (c) => c.toUpperCase()).trim() || null : null;
+}
+
+/** Apply the recommended option of every decision that needs no typed input or confirmation. */
+export function applyRecommended(sid) {
+  const done = []; const left = [];
+  for (const d of pending(sid)) {
+    const o = d.options.find((x) => x.recommended);
+    if (!o || (o.input && !o.optional) || o.confirm) { left.push(d.key); continue; }
+    // An earlier choice may have settled this one already (a rebuilt lane, an unblocked pick).
+    if (!pending(sid).some((x) => x.key === d.key)) continue;
+    try { apply(sid, d.key, o.id); done.push({ key: d.key, option: o.label }); } catch (e) { left.push(d.key); done.push({ key: d.key, error: e.message }); }
+  }
+  return { done, left };
 }
 
 /** JSON for the UI and the CLI (without the run functions). */

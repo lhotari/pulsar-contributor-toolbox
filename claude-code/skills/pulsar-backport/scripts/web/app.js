@@ -41,6 +41,14 @@ async function api(path, body) {
   if (!r.ok) throw new Error(j.error || r.statusText);
   return j;
 }
+const COPY_SVG = '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><rect x="5" y="5" width="9" height="9" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M11 5V3.5A1.5 1.5 0 0 0 9.5 2h-6A1.5 1.5 0 0 0 2 3.5v6A1.5 1.5 0 0 0 3.5 11H5" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>';
+/** A small button that copies the text to the clipboard. */
+function copyBtn(text, what = 'path') {
+  return h('button', { class: 'copy', type: 'button', title: `Copy ${what}: ${text}`, 'aria-label': `Copy ${what}`, html: COPY_SVG, onclick: async (e) => {
+    e.stopPropagation();
+    try { await navigator.clipboard.writeText(text); toast(`Copied ${text}`); } catch (err) { toast(`Copy failed: ${err.message}`, true); }
+  } });
+}
 function toast(msg, err = false) {
   const t = $('#toast'); t.textContent = msg; t.className = `toast${err ? ' err' : ''}`; t.hidden = false;
   clearTimeout(toast.t); toast.t = setTimeout(() => { t.hidden = true; }, err ? 7000 : 2500);
@@ -118,12 +126,13 @@ function laneCard(l, sum) {
       h('span', { class: 'grow' }), (sum.needed || []).some((d) => d.branch === l.branch) ? chip(`${sum.needed.filter((d) => d.branch === l.branch).length} decision(s) needed`, 'blocked') : null,
       h('span', { class: 'small muted' }, l.phase)),
     steps(l),
-    l.attention ? h('div', { class: 'attention small' }, l.attention) : null,
+    l.attention ? h('div', { class: 'attention small', title: l.attention }, h('span', { class: (sum.needed || []).some((d) => d.branch === l.branch) ? 'clamp' : '' }, l.attention)) : null,
     h('div', { class: 'laneStats' },
       h('span', {}, `${p.picked}/${p.total} picked`), p.conflict ? h('span', {}, chip(`${p.conflict} conflict`, 'conflict')) : null,
       p.blocked ? h('span', {}, chip(`${p.blocked} blocked`, 'blocked')) : null, p.needsFix ? h('span', {}, chip(`${p.needsFix} needs fix`, 'needs-fix')) : null,
       p.skipped ? h('span', {}, `${p.skipped} skipped`) : null,
       l.base_sha ? h('span', { class: 'mono' }, `${short(l.base_sha)}..${short(l.head_sha)}`) : null,
+      l.worktree ? h('span', { class: 'small muted', title: l.worktree }, 'worktree ', copyBtn(l.worktree, 'worktree path')) : null,
       l.test_pr_url ? h('a', { href: l.test_pr_url, target: '_blank' }, `test PR #${l.test_pr}`) : null, ciLine('test'), ciLine('final'),
       ci.test?.failed?.length && /failed/.test(l.phase) ? h('span', {}, ci.test.failed.slice(0, 4).map((f) => h('a', { href: f.link, target: '_blank', class: 'small' }, ` ${f.name}`))) : null),
     laneButtons(l, sum));
@@ -141,14 +150,49 @@ async function choose(d, o) {
     toast(`${o.label}${extra.length ? `: ${extra.join('; ')}` : ''}`); S.plan = null; await refresh(true);
   } catch (e) { toast(e.message, true); }
 }
+// Quoted code in a worker's text ('FutureUtils.exception(...)', `x`) shows as code; each line is a paragraph.
+// A single quote opens only after a space or '(' and closes before a space or punctuation, so apostrophes stay text.
+const CODE_RE = /`([^`]+)`|(?<=^|[\s(])'([^'\s][^'\n]*?[^'\s])'(?=$|[\s),.;:?!])/g;
+function prose(text) {
+  return String(text).split(/\n+/).filter((x) => x.trim()).map((para) => {
+    const kids = []; let at = 0;
+    for (const m of para.matchAll(CODE_RE)) {
+      const code = m[1] ?? m[2];
+      if (m[2] && !/[().;{}=<>\/#]/.test(code)) continue; // a quoted phrase, not code
+      kids.push(para.slice(at, m.index), h('code', {}, code)); at = m.index + m[0].length;
+    }
+    kids.push(para.slice(at));
+    return h('p', {}, ...kids);
+  });
+}
+// The recommended option, when it can be applied with one click (no typed input, no confirmation).
+const oneClick = (d) => d.options.find((o) => o.recommended && !(o.input && !o.optional) && !o.confirm);
+async function continueRecommended(list) {
+  const todo = list.filter(oneClick);
+  if (!confirm(`Continue with the recommended action for ${todo.length} decision(s)?\n\n${todo.map((d) => `• ${d.pr ? `#${d.pr} ` : ''}${oneClick(d).label}${d.recommendation ? ` (${d.recommendation})` : ''}`).join('\n')}`)) return;
+  try {
+    const r = await api(`sessions/${S.sid}/control`, { recommended: true });
+    const errs = r.done.filter((x) => x.error);
+    toast(errs.length ? `${r.done.length - errs.length} done; ${errs.map((x) => x.error).join('; ')}` : `${r.done.length} decision(s) done`, !!errs.length);
+    S.plan = null; await refresh(true);
+  } catch (e) { toast(e.message, true); }
+}
 function renderNeeded(s) {
   const box = $('#needed'); const list = s.needed || [];
   box.hidden = !list.length; if (!list.length) { box.replaceChildren(); return; }
-  box.replaceChildren(h('h2', {}, `Decisions needed (${list.length})`), ...list.map((d) => h('div', { class: 'need' },
-    h('div', {}, d.branch ? chip(d.branch, '') : null, ' ', d.pr ? prLink(d.pr) : null, ' ', h('b', {}, d.pr ? d.title.replace(`#${d.pr} `, '') : d.title),
-      d.job ? h('a', { href: '#', class: 'small', onclick: (e) => { e.preventDefault(); openLog(d.job); } }, ` job ${d.job} log`) : null),
-    d.text ? h('div', { class: 'small needText' }, d.text) : null,
-    h('div', { class: 'laneButtons' }, d.options.map((o) => h('button', { class: o.cls || (o.recommended ? 'primary' : ''), title: o.input || '', onclick: () => choose(d, o) }, o.label))))));
+  const auto = list.filter(oneClick);
+  box.replaceChildren(h('div', { class: 'needHead' }, h('h2', {}, `Decisions needed (${list.length})`), h('span', { class: 'grow' }),
+    auto.length ? h('button', { class: 'primary', title: 'Choose the recommended option of each decision below that needs no typed input', onclick: () => continueRecommended(list) },
+      auto.length === list.length ? 'Continue with recommended' : `Continue with recommended (${auto.length} of ${list.length})`) : null),
+  ...list.map((d) => {
+    const rec = d.options.find((o) => o.recommended);
+    return h('div', { class: 'need' },
+      h('div', { class: 'needTitle' }, d.branch ? chip(d.branch, '') : null, ' ', d.pr ? prLink(d.pr) : null, ' ', h('b', {}, d.pr ? d.title.replace(`#${d.pr} `, '') : d.title),
+        d.job ? h('a', { href: '#', class: 'small', onclick: (e) => { e.preventDefault(); openLog(d.job); } }, ` job ${d.job} log`) : null),
+      d.text ? h('div', { class: 'needText' }, prose(d.text)) : null,
+      rec ? h('div', { class: 'needRec' }, h('span', { class: 'muted' }, 'Recommended: '), h('b', {}, rec.label), d.recommendation && rec.id === 'recommendation' ? ` — ${d.recommendation}` : '') : null,
+      h('div', { class: 'laneButtons' }, d.options.map((o) => h('button', { class: o.cls || (o.recommended ? 'primary' : ''), title: o.input || '', onclick: () => choose(d, o) }, o.label))));
+  }));
 }
 
 function renderSession() {
@@ -512,7 +556,7 @@ function renderPicks(branch) {
     return h('tr', { class: 'pickRow' }, h('td', { class: 'muted small' }, i + 1), h('td', {}, prLink(p.pr), ' ', strip(titles.get(p.pr) || ''), det.reused ? h('span', { class: 'small muted' }, ' (reused)') : null, ...extra),
       h('td', {}, chip(p.status, p.status)), h('td', { class: 'mono' }, short(p.picked_sha) || h('span', { class: 'muted' }, short(p.source_sha))), h('td', {}, h('div', { class: 'laneButtons' }, B)));
   });
-  body.replaceChildren(h('div', { class: 'filters' }, h('span', { class: 'small muted' }, `Worktree ${d.worktree || '–'} · local branch ${d.local_branch || '–'}`), h('span', { class: 'grow' }),
+  body.replaceChildren(h('div', { class: 'filters' }, h('span', { class: 'small muted' }, `Worktree ${d.worktree || '–'}`, d.worktree ? copyBtn(d.worktree, 'worktree path') : null, ` · local branch ${d.local_branch || '–'}`), h('span', { class: 'grow' }),
     h('button', { onclick: () => act('sync', branch) }, 'Sync with plan decisions')),
   h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, '#'), h('th', {}, 'PR'), h('th', {}, 'Status'), h('th', {}, 'Commit'), h('th', {}, ''))), h('tbody', {}, rows)));
 }

@@ -71,7 +71,7 @@ node "$BPT" job fail <job> --reason "why it cannot be done"
 node "$BPT" job ask  <job> --question "the decision only the user can make"
 ```
 
-`job ask` is right when the fix needs a product decision, a dependency the user hasn't approved, or a non-mechanical rewrite. Add `--propose` with the actions you recommend (recommended first), so the user approves one with a click instead of typing an answer:
+`job ask` is right when the fix needs a product decision, a dependency the user hasn't approved, or a non-mechanical rewrite. Keep the question short and plain. Add `--propose` with the actions you recommend (recommended first), so the user approves one with a click instead of typing an answer; when none of those fits, put what you would do in `--recommend "<one imperative sentence>"`, which the user accepts with one click (you resume with it as the reply):
 
 ```bash
 node "$BPT" job ask <job> --question "#27214 calls ManagedLedgerConfig#getFoo, added by #26925" --propose dep:27214:26925,drop:27214
@@ -111,7 +111,7 @@ Follow the pulsar-backport-plan skill's *Triage* section for the session.
 
 ## Changing course while backporting
 
-Decisions made during planning can turn out wrong, and dependencies show up only when the picks meet the branch. Nothing has to be fixed by hand: the UI's **Decisions needed** panel (and `node "$BPT" decisions <id>`) lists every point where the backport waits for the user, each with the options that carry it on (the recommended one first). Autopilot stops at each one.
+Decisions made during planning can turn out wrong, and dependencies show up only when the picks meet the branch. Nothing has to be fixed by hand: the UI's **Decisions needed** panel (and `node "$BPT" decisions <id>`) lists every point where the backport waits for the user, each with the options that carry it on (the recommended one first). Autopilot stops at each one. **Continue with recommended** (`decisions <id> recommended`) takes the recommended option of every decision that needs no typed input or confirmation.
 
 | Situation | Options |
 |---|---|

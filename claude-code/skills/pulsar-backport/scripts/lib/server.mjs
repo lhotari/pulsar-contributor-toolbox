@@ -194,7 +194,7 @@ export function serve({ port = 8765, open = false } = {}) {
         }
         if (what === 'config' && m === 'POST') return send(200, plan.saveConfig(sid, await body(req)));
         if (what === 'control' && m === 'GET') return send(200, control.list(sid));
-        if (what === 'control' && m === 'POST') { const a = await body(req); const r = control.apply(sid, a.key, a.option, a.text); tick(); return send(200, r ?? {}); }
+        if (what === 'control' && m === 'POST') { const a = await body(req); const r = a.recommended ? control.applyRecommended(sid) : control.apply(sid, a.key, a.option, a.text); tick(); return send(200, r ?? {}); }
         if (what === 'action' && m === 'POST') {
           const a = await body(req); const fn = ACTIONS[a.action];
           if (!fn) return send(400, { error: `unknown action ${a.action}` });
