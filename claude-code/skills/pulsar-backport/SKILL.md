@@ -33,7 +33,7 @@ not-started → picking ⇄ needs-attention → picked → verifying → verifie
 ```
 
 - **picking**: `pick-all` cherry-picks pending PRs in master order with `-x` in the lane worktree `~/workspace-pulsar/pulsar-cherry-picking/worktrees/<session>/<branch>` (local branch `bpt/<session>/<branch>`). Before each pick it re-runs blame analysis against the lane: an in-range master commit that the PR builds on and that is neither on the branch nor earlier in the batch is a **dependency found while backporting**. If the pick then conflicts — or the dependency came from the evaluator or a person — the pick is **blocked** and the user decides in the UI (Accept adds the dependency to the batch ahead of it; Dismiss proceeds). A clean pick on top of a blame hint only records a warning; the build check catches the rest.
-- **needs-attention**: a `conflict` (cherry-pick stopped), `needs-fix` (applied, but `check-pick.sh` found slog/markers/unguarded debug), or `blocked` pick. Conflicts also record *conflict dependency hints*: in-range master commits missing from the lane that touched the conflicted files.
+- **needs-attention**: a `conflict` (cherry-pick stopped), `needs-fix` (applied, but `check-pick.sh` found slog, markers, unguarded debug, or Gradle files: branch-4.2 and branch-4.0 build with Maven, master with Gradle), or `blocked` pick. Conflicts also record *conflict dependency hints*: in-range master commits missing from the lane that touched the conflicted files.
 - **verifying**: a Claude job compiles every touched module and runs the changed tests.
 - **testing**: the engine pushes the lane to `<branch>-backports-<session>` on apache/pulsar and opens a PR against the branch (labels `ready-to-test`, `doc-not-needed`; title says do not merge). CI is polled every 5 minutes.
 - **ci-failed**: a Claude job investigates (investigate-ci skill). Flaky or pre-existing → `bpt ci rerun` (limited by `maxReruns`, default 3). Caused by a pick → `fixup!` commit for that pick, then `lane phase … verified`, and the engine pushes again (fast-forward, no force).
@@ -80,7 +80,19 @@ node "$BPT" job ask <job> --question "#27214 calls ManagedLedgerConfig#getFoo, a
 Proposals: `dep:<pr>:<dependency>` (backport the dependency first, in master order), `drop:<pr>` (leave the pick out; the lane is rebuilt without it), `rerun`, `reset`. An approved proposal finishes your job; a typed reply resumes your session with it.
 
 ### resolve (`conflict` or `needs-fix` pick)
-Follow the **pulsar-cherry-pick** skill's per-commit loop for this one commit: read the source commit, resolve with zdiff3 (take the commit's logic, re-skin to the branch: slf4j, Maven, Java 8 on 4.0 client modules), run `scripts/check-pick.sh <master-sha>` from that skill, compile the module (`./mvnw -q -pl <module> test-compile …`; install shared modules first), run the commit's changed test methods. Then `git add` and `git -c core.editor=true cherry-pick --continue` (for `needs-fix`: `git commit --amend --no-edit`), and `node "$BPT" lane resolved <session> <branch> <pr>`.
+Conflicts and failed post-pick checks go to this Claude job as soon as they happen, with or without autopilot (two attempts, then the pick waits under Decisions needed; session config `autoResolve=false` turns it off).
+
+Follow the **pulsar-cherry-pick** skill's per-commit loop for this one commit: read the source commit, resolve with zdiff3 (take the commit's logic, re-skin to the branch: slf4j, Maven, Java 8 on 4.0 client modules), run `scripts/check-pick.sh <master-sha>` from that skill, compile the module (`./mvnw -q -pl <module> test-compile …`; install shared modules first).
+
+Run the commit's changed tests as that skill's step 6 says. `ctx.pick.tests` has them worked out: the test methods the commit added or modified, as a `-Dtest` value per module (`Class#m1+m2`; a whole class when the change is outside a test method), or, when the commit changes no test, the branch's existing `<Class>Test` of the classes it changes (`fallback: true`). A failure caused by the resolution is fixed and re-run; one that also fails on the branch without the pick is noted and does not block. The verify job builds and tests the whole lane later.
+
+`lane resolved` re-runs check-pick.sh and refuses while it still reports findings, so slog → slf4j, debug guards and Gradle → Maven are done before a pick counts as resolved.
+
+Then `git add` and `git -c core.editor=true cherry-pick --continue` (for `needs-fix`: `git commit --amend --no-edit`), and report what validated it:
+
+```bash
+node "$BPT" lane resolved <session> <branch> <pr> --tests "TopicPoliciesTest#testA+testB,PersistentTopicTest" --result "passed"
+```
 If the conflict shows the pick needs an earlier PR (the conflict hints list candidates, but it may also be a PR merged before the plan's range): leave the cherry-pick as it is and `job ask` with `--propose dep:<pr>:<dep>` and the symbol or file it needs in the question. Do not pull in other PRs on your own; the engine adds the approved dependency in master order.
 
 ### verify (all picks applied)

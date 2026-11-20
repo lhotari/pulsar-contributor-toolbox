@@ -295,6 +295,10 @@ test('while backporting: late picks go in master order, drops rebuild the lane, 
   assert.equal(db.lane(sid, B).phase, 'picking'); assert.equal(db.lane(sid, B).test_branch, null); assert.equal(db.lane(sid, B).ci.round, 2);
   const r = lane.pickAll(sid, B, { log: () => {} });
   assert.deepEqual([r.last.status, r.last.pr], ['conflict', 112], '#112 needs #110, which is not on the branch');
+  // The conflict goes to a Claude resolve job at once (no autopilot here), with the commit's changed tests worked out.
+  const queued = db.get(`SELECT id, args FROM jobs WHERE session_id = ? AND type = 'resolve' AND status = 'queued'`, sid);
+  assert.equal(db.J(queued.args).pr, 112);
+  assert.deepEqual(lane.changedTests(sid, B, pick(112)), { tests: [], fallback: true, dtest: {} }, 'no test changed, no <Class>Test on the branch');
 
   // A worker asks, proposing the dependency; approving it pulls #110 into the plan and puts it first.
   const jid = jobs.enqueue(sid, B, 'resolve', { pr: 112 });

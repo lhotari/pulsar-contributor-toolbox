@@ -34,7 +34,8 @@ const HELP = `bpt — apache/pulsar backport sessions (state: ${db.DB_PATH})
   plan show <id> [--pr N] | report <id> [--out FILE] | labels <id> [--apply] [--removals]
   dep add <id> <pr> <depends-on> [--branch B] [--detail T] | dep set <id> <dep-id> <open|accepted|dismissed>
   lane <start|pick|pick-all|show|push-test|poll|squash|reset|push-final-fix> <id> <branch>
-  lane resolved|unblock <id> <branch> <pr>  |  lane skip|drop <id> <branch> <pr> --reason T   (drop: also a committed pick; the lane is rebuilt)
+  lane resolved <id> <branch> <pr> [--tests A#m1+m2,B] [--result T]   after resolving; the tests that validated it
+  lane unblock <id> <branch> <pr>  |  lane skip|drop <id> <branch> <pr> --reason T   (drop: also a committed pick; the lane is rebuilt)
   lane add-dep <id> <branch> <pr> <dep> [--detail T]   backport <dep> before <pr>, in master order (rebuilds the lane if needed)
   lane out-of-order <id> <branch> <pr> --reason T      let a late pick go on top instead of in master order
   lane rewind <id> <branch> --before <master-order>    re-apply every pick after that position
@@ -83,6 +84,7 @@ function jobContext(id) {
       const p = picks.find((x) => x.pr === j.args.pr);
       const it = items.get(j.args.pr);
       ctx.pick = { ...brief(p), assessment: it?.assessment, deps: it?.deps, labels: it?.labels };
+      if (j.type === 'resolve' && p) ctx.pick.tests = lane.changedTests(j.session_id, j.branch, p);
     }
     ctx.picks = picks.map((p) => ({ pr: p.pr, status: p.status, title: items.get(p.pr)?.title, picked: p.picked_sha, master: p.detail.master || p.source_sha,
       adapt: items.get(p.pr)?.targets?.[j.branch]?.adapt }));
@@ -212,7 +214,7 @@ async function main() {
         case 'pick': return out(lane.pickNext(sid, branch));
         case 'pick-all': return out(lane.pickAll(sid, branch).last);
         case 'show': return out({ ...db.lane(sid, branch), picks: lane.lanePicks(sid, branch) });
-        case 'resolved': return out(lane.markResolved(sid, branch, Number(need(arg, 'pr'))));
+        case 'resolved': return out(lane.markResolved(sid, branch, Number(need(arg, 'pr')), { tests: typeof opt.tests === 'string' ? opt.tests : null, result: typeof opt.result === 'string' ? opt.result : null }));
         case 'unblock': return out(lane.unblock(sid, branch, Number(need(arg, 'pr'))));
         case 'skip': lane.skipPick(sid, branch, Number(need(arg, 'pr')), need(opt.reason, '--reason')); return out('ok');
         case 'drop': return out(lane.dropPick(sid, branch, Number(need(arg, 'pr')), need(opt.reason, '--reason')));

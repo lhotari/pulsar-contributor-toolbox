@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import * as db from './db.mjs';
 import * as g from './git.mjs';
 import * as gh from './gh.mjs';
+import * as jobs from './jobs.mjs';
 import { remote, remoteRef, depOnBranch, saveConfig, pullInDependencies } from './plan.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -180,6 +181,7 @@ export function pickNext(sid, branch) {
     setPick(sid, branch, next.pr, { status: 'conflict', detail });
     db.updateLane(sid, branch, { phase: 'needs-attention' });
     attention(sid, branch, `#${next.pr} conflicts in ${res.conflicts.map((f) => f.split('/').pop()).join(', ')}`);
+    queueResolve(sid, branch, next.pr);
     return { status: 'conflict', pr: next.pr, conflicts: res.conflicts, conflictDeps: detail.conflictDeps };
   }
   const check = runCheck(dir, next.detail.master || next.source_sha);
@@ -190,10 +192,76 @@ export function pickNext(sid, branch) {
   if (!check.ok) {
     db.updateLane(sid, branch, { phase: 'needs-attention' });
     attention(sid, branch, `#${next.pr} applied, but the post-pick check found leftover slog, markers or unguarded debug logging`);
+    queueResolve(sid, branch, next.pr);
     return { status: 'needs-fix', pr: next.pr };
   }
   db.event(sid, `#${next.pr} ${detail.replay ? 're-applied' : 'picked'} as ${g.short(pickedSha)}${detail.warnings ? ` (${detail.warnings.length} dependency warning(s))` : ''}`, { branch });
   return { status: 'picked', pr: next.pr, sha: pickedSha, warnings: detail.warnings };
+}
+
+/**
+ * A conflict (or a failed post-pick check) goes to a Claude resolve job right away, autopilot or not; after two
+ * attempts that did not finish it, it waits for the user under Decisions needed. Session config autoResolve=false
+ * turns this off.
+ */
+function queueResolve(sid, branch, pr) {
+  if (db.session(sid).config.autoResolve === false) return null;
+  const tries = db.get(`SELECT COUNT(*) n FROM jobs WHERE session_id = ? AND branch = ? AND type = 'resolve' AND json_extract(args, '$.pr') = ?
+     AND status IN ('failed', 'done', 'cancelled')`, sid, branch, pr).n;
+  return tries >= 2 ? null : jobs.enqueue(sid, branch, 'resolve', { pr });
+}
+
+const METHOD_RE = /^\s*(?:(?:public|protected|private|static|final|synchronized)\s+)*[\w<>[\],\s]+?\s+(\w+)\s*\([^;]*$/;
+/**
+ * Step 6 of the pulsar-cherry-pick per-commit loop, worked out for the resolver: the test methods the commit
+ * added or modified, per module, as -Dtest values. A change outside any @Test method (setup, helpers, fields)
+ * means the whole class. A commit that changes no test falls back to the branch's existing <Class>Test of the
+ * classes it changes (the same fallback that skill describes).
+ */
+export function changedTests(sid, branch, pick) {
+  const l = db.lane(sid, branch); const cfg = db.session(sid).config;
+  const sha = pick.detail.master || pick.source_sha;
+  const git = (args) => g.git(cfg.repo, args, { allowFail: true }).out || '';
+  const files = git(['show', '--format=', '--name-only', sha]).split('\n').filter(Boolean);
+  const tests = [];
+  for (const f of files.filter((x) => g.isTestPath(x) && /\.java$/.test(x))) {
+    const src = git(['show', `${sha}:${f}`]).split('\n'); if (src.length < 2) continue;
+    if (!src.some((x) => /@Test\b/.test(x))) continue; // a helper or base class, not a test
+    const changed = [];
+    for (const m of git(['show', '--format=', '-U0', sha, '--', f]).matchAll(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/gm)) {
+      const from = Number(m[1]); const n = m[2] === undefined ? 1 : Number(m[2]);
+      for (let i = from; i < from + Math.max(n, 1); i++) changed.push(i);
+    }
+    const methods = new Set(); let whole = false;
+    const classAt = src.findIndex((x) => /^\s*(public\s+|final\s+|abstract\s+)*class\s/.test(x));
+    for (const ln of changed) {
+      // Imports, the header and blank lines select nothing.
+      if (ln - 1 <= classAt || /^\s*(import\s|package\s|\/\/|\*|\/\*|$)/.test(src[ln - 1] ?? '')) continue;
+      let name = null;
+      for (let i = Math.min(ln, src.length) - 1; i >= 0; i--) {
+        const mm = src[i].match(METHOD_RE);
+        if (mm && !/^\s*(if|for|while|switch|catch|return|new)\b/.test(src[i])) {
+          const annotated = src.slice(Math.max(0, i - 6), i).some((x) => /@Test\b/.test(x));
+          name = annotated ? mm[1] : null; break;
+        }
+        if (/^\s*(public\s+|final\s+|abstract\s+)*class\s/.test(src[i])) break;
+      }
+      if (name) methods.add(name); else whole = true;
+    }
+    tests.push({ file: f, module: f.split('/src/')[0], cls: f.split('/').pop().replace(/\.java$/, ''), methods: whole ? null : [...methods] });
+  }
+  let fallback = false;
+  if (!tests.length && l.worktree) {
+    fallback = true;
+    for (const f of files.filter((x) => !g.isTestPath(x) && /\.java$/.test(x)).slice(0, 10)) {
+      const c = f.split('/').pop().replace(/\.java$/, '');
+      const hit = (g.git(l.worktree, ['ls-files', `*/${c}Test.java`], { allowFail: true }).out || '').split('\n').filter(Boolean)[0];
+      if (hit && tests.length < 3) tests.push({ file: hit, module: hit.split('/src/')[0], cls: c + 'Test', methods: null });
+    }
+  }
+  const byModule = {};
+  for (const t of tests) (byModule[t.module] ||= []).push(t.methods?.length ? `${t.cls}#${t.methods.join('+')}` : t.cls);
+  return { tests, fallback, dtest: Object.fromEntries(Object.entries(byModule).map(([m, v]) => [m, v.join(',')])) };
 }
 
 /** The commit of `pick` among from..HEAD (its fixups may follow it). */
@@ -420,7 +488,7 @@ export function pickAll(sid, branch, { log = console.log, max = 1000 } = {}) {
 }
 
 /** After a human or worker resolved a conflict (or fixed a needs-fix pick) and committed. */
-export function markResolved(sid, branch, pr) {
+export function markResolved(sid, branch, pr, { tests = null, result = null } = {}) {
   const l = db.lane(sid, branch); const p = picks(sid, branch).find((x) => x.pr === pr);
   if (!p) throw new Error(`#${pr} is not a pick of ${branch}`);
   const st = g.state(l.worktree);
@@ -432,10 +500,15 @@ export function markResolved(sid, branch, pr) {
   const msg = g.git(l.worktree, ['log', '-1', '--format=%B', 'HEAD']);
   if (!own && !msg.includes(master) && !msg.includes(`(#${pr})`)) throw new Error(`HEAD ${g.short(st.head)} does not look like the pick of #${pr} (no trailer or PR number)`);
   const check = runCheck(l.worktree, master);
-  const detail = { ...p.detail, check, resolvedAt: db.now() };
+  // Leftover slog, conflict markers, unguarded debug or Gradle files on a Maven branch are not a resolution yet.
+  if (!check.ok) throw new Error(`check-pick.sh still reports findings for #${pr}; fix them (pulsar-cherry-pick skill: slog → slf4j, Gradle → Maven, guards) and amend, then run this again:\n${(check.output || '').slice(-1500)}`);
+  // What validated the resolution: the tests the resolver ran and their outcome (none for a hand resolution without them).
+  const validation = tests ? { tests: String(tests).split(/[,\s]+/).filter(Boolean), result: result || 'not reported', at: db.now() } : null;
+  const detail = { ...p.detail, check, resolvedAt: db.now(), validation };
   setPick(sid, branch, pr, { status: 'picked', picked_sha: own || st.head, detail });
   db.updateLane(sid, branch, { head_sha: st.head, phase: 'picking', attention: null });
-  db.event(sid, `#${pr} resolved as ${g.short(st.head)}${check.ok ? '' : ' (check-pick still reports findings)'}`, { branch });
+  db.event(sid, `#${pr} resolved as ${g.short(own || st.head)}${validation ? `; validated with ${validation.tests.length} test(s): ${validation.result}` : '; no tests reported'}`,
+    { branch, level: validation ? 'info' : 'warn' });
   return { ok: true, check };
 }
 

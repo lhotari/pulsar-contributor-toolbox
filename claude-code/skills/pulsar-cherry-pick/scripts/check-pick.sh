@@ -2,13 +2,14 @@
 #
 # check-pick.sh — post-resolution sanity scan for a Pulsar cherry-pick.
 #
-# Scans the files a commit touched for the three things that silently break a
+# Scans the files a commit touched for the four things that silently break a
 # backport from master onto an slf4j/Maven release branch:
 #   1. leftover conflict markers
 #   2. leftover slog (structured logger) syntax that won't compile on slf4j branches
 #   3. added unguarded *argument-bearing* slf4j debug/trace (slog guards these
 #      automatically; slf4j does not). Constant-message calls build nothing and are
 #      reported as informational only — they need no guard.
+#   4. Gradle build files left in the tree of a Maven branch (the change belongs in a pom.xml)
 #
 # Run it after resolving conflicts and before `cherry-pick --continue`, or right
 # after the pick commits. The file list comes from the source commit; the
@@ -86,6 +87,27 @@ if [ -n "$const_dbg" ]; then
   echo "  constant-message debug/trace (no guard needed — informational):"
   echo "$const_dbg" | sed 's/^/    /'
 fi
+
+echo "== 4. Gradle files on a Maven branch =="
+# master builds with Gradle, the release branches with Maven. A Gradle file that applied (a new
+# build.gradle.kts, a libs.versions.toml hunk) does nothing on a Maven branch: the change belongs in a pom.xml.
+gradle_hits=0
+if [ -f pom.xml ] && [ ! -f settings.gradle.kts ] && [ ! -f settings.gradle ]; then
+  if [ -n "$sha" ]; then
+    mapfile -t all_files < <(git show --name-only --format='' "$sha" 2>/dev/null)
+  elif git rev-parse -q --verify CHERRY_PICK_HEAD >/dev/null 2>&1; then
+    mapfile -t all_files < <(git diff --name-only HEAD 2>/dev/null)
+  else
+    mapfile -t all_files < <(git diff --name-only HEAD^ HEAD 2>/dev/null)
+  fi
+  for f in "${all_files[@]}"; do
+    case "$f" in
+      *.gradle|*.gradle.kts|gradle/libs.versions.toml|gradle/*.versions.toml)
+        if [ -f "$f" ]; then echo "  GRADLE: $f (move the change to the Maven pom.xml, then git rm it)"; gradle_hits=1; fi ;;
+    esac
+  done
+fi
+[ "$gradle_hits" -eq 0 ] && echo "  none" || issues=1
 
 echo
 if [ "$issues" -eq 0 ]; then
