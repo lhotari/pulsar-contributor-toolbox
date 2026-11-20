@@ -1,7 +1,8 @@
-// Local web UI. Binds to 127.0.0.1 only and checks the Host header; every API call needs the token printed at
+// Local web UI. Binds to 127.0.0.1 unless servers.yaml lists more addresses (lib/listen.mjs) and checks the Host header; every API call needs the token printed at
 // startup (it travels in the URL fragment, so it never reaches a server log or a Referer). Staging and
 // submitting reviews happen only here, on the human's click.
 import http from 'node:http';
+import { listenConfig, listenAll, allowedHosts, hostOf, urlFor } from './listen.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -171,15 +172,16 @@ async function readBody(req) {
   return s ? JSON.parse(s) : {};
 }
 
-export function serve({ port = DEFAULT_PORT, open = false } = {}) {
+export function serve({ port = null, open = false } = {}) {
   db.open(); jobs.recover();
   const tok = token();
+  const lc = listenConfig('prd', { port: port || process.env.PRD_PORT || null, defaultPort: 8766 });
+  const allowed = allowedHosts(lc.bind);
   const running = new Map();
   const locks = new Map();   // one GitHub-writing action per PR at a time
   const handle = async (req, res) => {
     const url = new URL(req.url, 'http://x');
-    const host = (req.headers.host || '').replace(/:\d+$/, '');
-    if (!['127.0.0.1', 'localhost'].includes(host)) { res.writeHead(403).end('bad host'); return; }
+    if (!allowed.has(hostOf(req.headers.host))) { res.writeHead(403).end('bad host'); return; }
     const send = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(obj)); };
     if (!url.pathname.startsWith('/api/')) {
       const f = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
@@ -225,12 +227,11 @@ export function serve({ port = DEFAULT_PORT, open = false } = {}) {
   setInterval(dispatch, 10_000).unref?.();
   const loop = () => autopilot.tick().then((s) => s.length && console.log(s.join('\n'))).catch((e) => console.error(`tick: ${e.message}`)).finally(dispatch);
   setInterval(loop, 60_000).unref?.();
-  const server = http.createServer((req, res) => { handle(req, res).catch((e) => { res.writeHead(500).end(e.message); }); });
-  server.listen(port, '127.0.0.1', () => {
-    const link = `http://127.0.0.1:${port}/#${tok}`;
-    db.meta('server', JSON.stringify({ pid: process.pid, port, at: db.now() }));
-    console.log(`pr-review-desk UI: ${link}\nstate: ${db.DB_PATH}`);
-    if (open) spawn('open', [link], { detached: true, stdio: 'ignore' }).on('error', () => {}).unref();
+  const server = listenAll(() => http.createServer((req, res) => { handle(req, res).catch((e) => { res.writeHead(500).end(e.message); }); }), lc, (addresses) => {
+    db.meta('server', JSON.stringify({ pid: process.pid, port: lc.port, addresses, at: db.now() }));
+    const links = addresses.map((a) => urlFor(a, lc.port, tok));
+    console.log(`${links.map((l) => `pr-review-desk UI: ${l}`).join('\n')}\nstate: ${db.DB_PATH}`);
+    if (open) spawn('open', [links[0]], { detached: true, stdio: 'ignore' }).on('error', () => {}).unref();
     loop();
   });
   const stop = () => { server.close(); process.exit(0); };

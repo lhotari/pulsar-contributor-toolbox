@@ -11,6 +11,7 @@ import * as lane from './lane.mjs';
 import * as jobs from './jobs.mjs';
 import * as autopilot from './autopilot.mjs';
 import * as control from './control.mjs';
+import { listenConfig, listenAll, allowedHosts, hostOf, urlFor } from './listen.mjs';
 
 const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'web');
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
@@ -21,7 +22,8 @@ export function serverInfo() {
   const s = row ? JSON.parse(row.value) : null;
   if (!s) return null;
   try { process.kill(s.pid, 0); } catch { return null; }
-  return { ...s, url: `http://127.0.0.1:${s.port}/#${token()}` };
+  const urls = (s.addresses || ['127.0.0.1']).map((a) => urlFor(a, s.port, token()));
+  return { ...s, url: urls[0], urls };
 }
 
 export function token() {
@@ -121,14 +123,15 @@ async function body(req) {
   return s ? JSON.parse(s) : {};
 }
 
-export function serve({ port = 8765, open = false } = {}) {
+export function serve({ port = null, open = false } = {}) {
   db.open(); autopilot.recover();
   const tok = token();
+  const lc = listenConfig('bpt', { port, defaultPort: 8765 });
+  const allowed = allowedHosts(lc.bind);
   const running = new Map();
   const handle = async (req, res) => {
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    const host = (req.headers.host || '').split(':')[0];
-    if (!['127.0.0.1', 'localhost'].includes(host)) { res.writeHead(403).end('bad host'); return; }
+    if (!allowed.has(hostOf(req.headers.host))) { res.writeHead(403).end('bad host'); return; }
+    const url = new URL(req.url, 'http://x');
     const send = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(obj)); };
     if (!url.pathname.startsWith('/api/')) {
       const f = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
@@ -236,12 +239,11 @@ export function serve({ port = 8765, open = false } = {}) {
     } finally { ticking = false; }
   }
   setInterval(tick, 10_000).unref?.();
-  const server = http.createServer((req, res) => { handle(req, res).catch((e) => { res.writeHead(500).end(e.message); }); });
-  server.listen(port, '127.0.0.1', () => {
-    const link = `http://127.0.0.1:${port}/#${tok}`;
-    db.run(`INSERT OR REPLACE INTO meta (key, value) VALUES ('server', ?)`, JSON.stringify({ pid: process.pid, port, at: db.now() }));
-    console.log(`bpt UI: ${link}\nstate: ${db.DB_PATH}`);
-    if (open) spawn('open', [link], { detached: true, stdio: 'ignore' }).on('error', () => {}).unref();
+  const server = listenAll(() => http.createServer((req, res) => { handle(req, res).catch((e) => { res.writeHead(500).end(e.message); }); }), lc, (addresses) => {
+    db.run(`INSERT OR REPLACE INTO meta (key, value) VALUES ('server', ?)`, JSON.stringify({ pid: process.pid, port: lc.port, addresses, at: db.now() }));
+    const links = addresses.map((a) => urlFor(a, lc.port, tok));
+    console.log(`${links.map((l) => `bpt UI: ${l}`).join('\n')}\nstate: ${db.DB_PATH}`);
+    if (open) spawn('open', [links[0]], { detached: true, stdio: 'ignore' }).on('error', () => {}).unref();
     tick();
   });
   const stop = () => { server.close(); process.exit(0); };

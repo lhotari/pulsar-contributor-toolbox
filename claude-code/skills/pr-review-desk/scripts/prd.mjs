@@ -13,7 +13,8 @@ import * as jobs from './lib/jobs.mjs';
 import * as autopilot from './lib/autopilot.mjs';
 import { addRepo, here, parsePrRef } from './lib/repos.mjs';
 import { scanSummary } from './lib/scan.mjs';
-import { serve, token, DEFAULT_PORT } from './lib/server.mjs';
+import { serve, token } from './lib/server.mjs';
+import { urlFor } from './lib/listen.mjs';
 
 const argv = process.argv.slice(2);
 function opts(list) {
@@ -43,14 +44,15 @@ function serverInfo() {
   const s = db.J(db.meta('server'));
   if (!s) return null;
   try { process.kill(s.pid, 0); } catch { return null; }
-  return { ...s, url: `http://127.0.0.1:${s.port}/#${token()}` };
+  const urls = (s.addresses || ['127.0.0.1']).map((a) => urlFor(a, s.port, token()));
+  return { ...s, url: urls[0], urls };
 }
 
-function ensureServer(port = DEFAULT_PORT) {
+function ensureServer(port = null) {
   const s = serverInfo(); if (s) return s;
   const log = path.join(db.HOME, 'server.log');
   const fd = fs.openSync(log, 'a');
-  const child = spawn(process.execPath, [path.resolve(import.meta.dirname, 'prd.mjs'), 'serve', '--port', String(port)],
+  const child = spawn(process.execPath, [path.resolve(import.meta.dirname, 'prd.mjs'), 'serve', ...(port ? ['--port', String(port)] : [])],
     { detached: true, stdio: ['ignore', fd, fd], env: { ...process.env, PRD_JOB: '' } });
   child.unref();
   for (let i = 0; i < 40; i++) { spawnSync('sleep', ['0.25']); const x = serverInfo(); if (x && x.pid === child.pid) return { ...x, log }; }
@@ -103,22 +105,22 @@ async function main() {
       const s = serverInfo();
       out([`gh: ${g.status === 0 ? 'logged in' : `NOT logged in: ${(g.stderr || '').trim().split('\n')[0]}`}`, `login: ${g.status === 0 ? await triage.login() : '?'}`,
         `database: ${db.DB_PATH}`, `repos: ${db.all('SELECT slug FROM repos').map((r) => r.slug).join(', ') || 'none'}`,
-        `server: ${s ? `running (pid ${s.pid}) ${s.url}` : 'not running (prd ui)'}`,
+        `server: ${s ? `running (pid ${s.pid}) ${s.urls.join(' ')}` : 'not running (prd ui)'}`,
         `claude: ${spawnSync(process.env.PRD_CLAUDE || 'claude', ['--version'], { encoding: 'utf8' }).stdout?.trim() || 'NOT FOUND'}`,
         `budget: ${jobs.reviewPlan('review').budget}`].join('\n'));
       return g.status === 0 ? undefined : process.exit(1);
     }
-    case 'serve': return serve({ port: Number(o.port || DEFAULT_PORT), open: !!o.open });
+    case 'serve': return serve({ port: o.port ? Number(o.port) : null, open: !!o.open });
     case 'url': {
       const s = serverInfo();
       if (!s) { console.error('prd server is not running; start it with: prd ui'); process.exit(1); }
       if (o.open) spawn('open', [s.url], { detached: true, stdio: 'ignore' }).unref();
-      console.log(s.url); return;
+      console.log(s.urls.join('\n')); return;
     }
     case 'ui': {
-      const s = ensureServer(Number(o.port || DEFAULT_PORT));
+      const s = ensureServer(o.port ? Number(o.port) : null);
       if (o.open) spawn('open', [s.url], { detached: true, stdio: 'ignore' }).unref();
-      return out(`pr-review-desk UI: ${s.url}`);
+      return out(s.urls.map((u) => `pr-review-desk UI: ${u}`).join('\n'));
     }
     case 'repo': {
       const p = opts(rest);
