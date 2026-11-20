@@ -13,7 +13,10 @@ const h = (tag, attrs = {}, ...kids) => {
   return el;
 };
 const chip = (text, cls = text) => h('span', { class: `chip ${cls || ''}` }, text);
-const prLink = (pr) => h('a', { href: `https://github.com/apache/pulsar/pull/${pr}`, target: '_blank', rel: 'noopener', onclick: (e) => e.stopPropagation() }, `#${pr}`);
+const prTitle = (pr) => (S.plan?.items || []).find((it) => it.pr === Number(pr))?.title || null;
+const prLink = (pr) => h('a', { href: `https://github.com/apache/pulsar/pull/${pr}`, target: '_blank', rel: 'noopener', title: prTitle(pr), onclick: (e) => e.stopPropagation() }, `#${pr}`);
+/** Text with every #12345 turned into a link to the PR (its title on hover when the plan knows it). */
+const linkPrs = (text) => String(text).split(/(?<![\w&])#(\d{3,6})\b/).map((part, i) => (i % 2 ? prLink(part) : part));
 const short = (s) => (s || '').slice(0, 11);
 const strip = (t) => (t || '').replace(/^(\[[^\]]*\]\s*)+/, '');
 const when = (ts) => ts ? new Date(ts).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
@@ -126,7 +129,7 @@ function laneCard(l, sum) {
       h('span', { class: 'grow' }), (sum.needed || []).some((d) => d.branch === l.branch) ? chip(`${sum.needed.filter((d) => d.branch === l.branch).length} decision(s) needed`, 'blocked') : null,
       h('span', { class: 'small muted' }, l.phase)),
     steps(l),
-    l.attention ? h('div', { class: 'attention small', title: l.attention }, h('span', { class: (sum.needed || []).some((d) => d.branch === l.branch) ? 'clamp' : '' }, l.attention)) : null,
+    l.attention ? h('div', { class: 'attention small', title: l.attention }, h('span', { class: (sum.needed || []).some((d) => d.branch === l.branch) ? 'clamp' : '' }, ...linkPrs(l.attention))) : null,
     h('div', { class: 'laneStats' },
       h('span', {}, `${p.picked}/${p.total} picked`), p.conflict ? h('span', {}, chip(`${p.conflict} conflict`, 'conflict')) : null,
       p.blocked ? h('span', {}, chip(`${p.blocked} blocked`, 'blocked')) : null, p.needsFix ? h('span', {}, chip(`${p.needsFix} needs fix`, 'needs-fix')) : null,
@@ -159,9 +162,9 @@ function prose(text) {
     for (const m of para.matchAll(CODE_RE)) {
       const code = m[1] ?? m[2];
       if (m[2] && !/[().;{}=<>\/#]/.test(code)) continue; // a quoted phrase, not code
-      kids.push(para.slice(at, m.index), h('code', {}, code)); at = m.index + m[0].length;
+      kids.push(...linkPrs(para.slice(at, m.index)), h('code', {}, code)); at = m.index + m[0].length;
     }
-    kids.push(para.slice(at));
+    kids.push(...linkPrs(para.slice(at)));
     return h('p', {}, ...kids);
   });
 }
@@ -187,10 +190,10 @@ function renderNeeded(s) {
   ...list.map((d) => {
     const rec = d.options.find((o) => o.recommended);
     return h('div', { class: 'need' },
-      h('div', { class: 'needTitle' }, d.branch ? chip(d.branch, '') : null, ' ', d.pr ? prLink(d.pr) : null, ' ', h('b', {}, d.pr ? d.title.replace(`#${d.pr} `, '') : d.title),
+      h('div', { class: 'needTitle' }, d.branch ? chip(d.branch, '') : null, ' ', d.pr ? prLink(d.pr) : null, ' ', h('b', {}, ...linkPrs(d.pr ? d.title.replace(`#${d.pr} `, '') : d.title)),
         d.job ? h('a', { href: '#', class: 'small', onclick: (e) => { e.preventDefault(); openLog(d.job); } }, ` job ${d.job} log`) : null),
       d.text ? h('div', { class: 'needText' }, prose(d.text)) : null,
-      rec ? h('div', { class: 'needRec' }, h('span', { class: 'muted' }, 'Recommended: '), h('b', {}, rec.label), d.recommendation && rec.id === 'recommendation' ? ` — ${d.recommendation}` : '') : null,
+      rec ? h('div', { class: 'needRec' }, h('span', { class: 'muted' }, 'Recommended: '), h('b', {}, ...linkPrs(rec.label)), ...(d.recommendation && rec.id === 'recommendation' ? [' — ', ...linkPrs(d.recommendation)] : [])) : null,
       h('div', { class: 'laneButtons' }, d.options.map((o) => h('button', { class: o.cls || (o.recommended ? 'primary' : ''), title: o.input || '', onclick: () => choose(d, o) }, o.label))));
   }));
 }
