@@ -59,12 +59,16 @@ node "$BPT" plan discover <id>
 - The UI's **Plan review** tab is the review list: each row (or dependency group, shown as one block under a group header) has **Accept**, which makes the current decisions the user's and removes the row from the list. **All items** shows everything with its review status and an Undo. CLI: `plan review <id> <pr>... [--undo]` — only when the user asks.
 
 - Each PR/branch has a decision (`undecided | backport | skip | defer`), shown in the UI with its recommendation and whether the user set it. `plan decide <id> <pr> <branch|all> <decision>` sets it from chat when the user tells you to; `plan recommend <id>` resets the ones the user hasn't touched (`--all` resets everything).
-- **Dependency groups** change together: PRs joined by evaluator, follow-up, manual or conflict dependencies, or by accepted blame hints, per branch. Setting one member's decision sets the whole group (the UI says which PRs changed; `--no-group` on the CLI opts out). Open blame hints don't group. Dismissing a dependency splits a group. A "mixed!" group chip means its members' decisions differ — surface those to the user.
+- **Dependency groups**: PRs joined by evaluator, follow-up, manual or conflict dependencies, or by accepted blame hints (open blame hints don't group). The plan list shows a group as one block and accepts it as one; decisions are still set per PR (`--group` on `plan decide` sets the whole group), and accepting a group whose decisions differ asks for confirmation. Dismissing a dependency splits a group. Groups whose decisions differ are worth surfacing to the user.
 - **Value for users/operators** (`high | medium | low` + who benefits) comes from triage and is editable in the UI or with `plan value <id> <pr> <level> --note T`; a user-set value survives re-imports. Value is not severity: it weighs how many deployments hit the bug and whether there is a workaround.
 
 ## Update a plan ("revisit", "refresh", "new merges since last time")
 
 `node "$BPT" plan discover <id>` again. It keeps decisions and verdicts, gives newly merged PRs a new round number (the UI's "New this round" filter), marks PRs that someone else picked meanwhile (they move to "on branch"), and refreshes dry runs and labels. Then triage only the new PRs (`triage-export` without `--all`). Tell the user what changed: newly picked by others, new picks, verdicts that changed because a dependency is now present.
+
+## Comments for skipped PRs
+
+A PR that is skipped but still worth having on the branches (e.g. its fix depends on a PR that won't be backported) can get a **queued comment**: the row's details in the UI ("Insert \"needs a separate backport\"" fills in the skipped branches), or `plan comment <id> <pr> --separate-backport` / `--text T` / `--clear`. Queued comments are posted from the user's gh account automatically once every lane is done (all branches pushed and green), each at most once; `plan comments <id>` lists them. Only queue comments the user asked for.
 
 ## Report
 

@@ -105,7 +105,10 @@ test('verdict import (legacy keys) and accept recommendations', () => {
   assert.equal(plan.planView(SID).items.find((i) => i.pr === 103).assessment.value, 'high');
   // #103 depends on #102: they form a group and change together.
   assert.deepEqual(plan.planView(SID).items.find((i) => i.pr === 103).groups['branch-4.2'], [102, 103]);
-  const changed = plan.setDecisions(SID, [{ pr: 103, branch: 'branch-4.2', decision: 'defer' }]);
+  // A decision changes only its PR by default, so a group can be split; group: true changes all members.
+  assert.deepEqual(plan.setDecisions(SID, [{ pr: 103, branch: 'branch-4.2', decision: 'skip' }]).map((c) => c.pr), [103]);
+  assert.equal(t(102).decision, 'skip'); assert.equal(t(102).decision_source, 'recommended');
+  const changed = plan.setDecisions(SID, [{ pr: 103, branch: 'branch-4.2', decision: 'defer' }], { group: true });
   assert.deepEqual(changed.map((c) => c.pr).sort(), [102, 103]);
   assert.equal(t(102).decision, 'defer'); assert.equal(t(102).decision_source, 'user');
   assert.equal(t(102, 'branch-4.0').decision, 'skip', 'other branch untouched');
@@ -211,4 +214,17 @@ test('finalize refuses to push an untested rebase without confirmation', () => {
   const r2 = lane.finalize(SID, 'branch-4.0', { allowRebase: true });
   assert.equal(r2.status, 'pushed');
   assert.equal(sh(origin, 'rev-list', '--count', 'branch-4.0~3..branch-4.0'), '3');
+});
+
+test('queued PR comments are posted once every lane is done', () => {
+  plan.setComment(SID, 105, '');
+  assert.equal(plan.separateBackportText(SID, 104), 'This PR would need to be separately backported to branch-4.2 & branch-4.0.');
+  plan.setComment(SID, 104, 'Needs its own backport to branch-4.2 & branch-4.0 since it depends on #102.');
+  assert.equal(lane.pollCi(SID, 'branch-4.0').phase, 'done');
+  const steps = autopilot.advance(SID);
+  assert.ok(steps.some((s) => s.note === 'post queued PR comments'), JSON.stringify(steps));
+  assert.deepEqual(plan.postComments(SID, { log: () => {} }), { posted: 1, failed: 0 });
+  assert.match(fs.readFileSync(ghLog, 'utf8'), /pr comment 104/);
+  assert.equal(plan.pendingComments(SID).length, 0);
+  assert.throws(() => plan.setComment(SID, 104, 'again'), /already posted/);
 });

@@ -136,7 +136,8 @@ function renderSession() {
   $('#sMeta').replaceChildren(`${s.status} · PRs after ${short(s.config.sinceSha)}${s.config.masterHead ? ` up to ${s.config.masterHead}` : ''} · discover round ${s.config.round || 0}${s.config.lastDiscover ? ` (${when(s.config.lastDiscover)})` : ''}`,
     ...s.lanes.map((l) => { const vv = v(l.branch); const dd = d(l.branch); const mine = s.decisions.filter((x) => x.branch === l.branch && x.source === 'user').reduce((n, x) => n + x.n, 0);
       return h('div', {}, `${l.branch}: ${vv.pick || 0} pick · ${vv.maybe || 0} maybe · ${vv.untriaged || 0} untriaged — ${dd.backport || 0} backport, ${dd.undecided || 0} undecided (${mine} decided by you, the rest recommended)`); }),
-    s.openDeps ? h('div', {}, chip(`${s.openDeps} open dependency hints on PRs that may go in`, 'blocked')) : '');
+    s.openDeps ? h('div', {}, chip(`${s.openDeps} open dependency hints on PRs that may go in`, 'blocked')) : '',
+    s.comments?.pending || s.comments?.posted ? h('div', {}, `PR comments: ${s.comments.pending} queued (posted when every branch is done), ${s.comments.posted} posted`) : '');
   $('#autopilot').checked = !!s.config.autopilot; $('#runner').value = s.config.runner || 'headless'; $('#autoPushTest').checked = s.config.autoPushTest !== false;
   const A = [];
   const btn = (label, fn, cls) => A.push(h('button', { class: cls, onclick: fn }, label));
@@ -150,6 +151,7 @@ function renderSession() {
   }, 'ghost');
   btn('Labels…', showLabels);
   btn('Report → VS Code', () => act('report'), 'ghost');
+  if (s.comments?.pending) btn(`Post ${s.comments.pending} comment(s) now`, () => act('post-comments', null, null, `Post the ${s.comments.pending} queued PR comment(s) on GitHub now, before the backport is finished?`), 'ghost');
   if (s.status === 'planning') btn('Start backporting', () => act('start-backport', null, null, 'Start backporting with the current decisions? Lanes start in order; later lanes wait for the lanes they reuse.'), 'primary');
   else { btn('Next step', () => act('advance', null, { force: true }), 'primary'); btn('Back to planning', () => act('stop-backport', null, null, 'Pause backporting? Running jobs continue; nothing new is started.'), 'ghost'); }
   $('#sessionActions').replaceChildren(...A);
@@ -252,7 +254,9 @@ function planRow(it, lanes, mode, inGroup) {
       : h('td', {}, h('button', { class: 'primary small', title: `Accept: ${decisionSummary(it, lanes)}`, onclick: (e) => { e.stopPropagation(); review([it.pr]); } }, '✓ Accept'));
   const tr = h('tr', { class: `row${inGroup ? ' inGroup' : ''}${it.reviewed_at ? ' reviewed' : ''}`, onclick: () => { S.open.has(it.pr) ? S.open.delete(it.pr) : S.open.add(it.pr); renderPlan(); } },
     h('td', { class: 'title' }, prLink(it.pr), ' ', it.round === S.summary.config.round && S.summary.config.round > 1 ? chip('new', 'new') : null, ' ', strip(it.title),
-      it.kind === 'flaky' ? h('span', {}, ' ', chip('flaky', '')) : null, it.excluded ? h('div', { class: 'small muted' }, `excluded: ${it.excluded}`) : null,
+      it.kind === 'flaky' ? h('span', {}, ' ', chip('flaky', '')) : null,
+      it.comment ? h('span', { title: it.comment }, ' ', commentChip(it)) : null,
+      it.excluded ? h('div', { class: 'small muted' }, `excluded: ${it.excluded}`) : null,
       a.impact ? h('div', { class: 'small muted' }, a.impact) : null),
     h('td', { class: 'value' }, h('div', { class: 'cell2' },
       h('select', { class: `val ${valueCls(a.value)}`, title: a.valueSource === 'user' ? 'Set by you' : 'From triage; change it if you know better', onclick: (e) => e.stopPropagation(), onchange: (e) => setValue(it.pr, e.target.value || null) },
@@ -289,11 +293,14 @@ function groupHead(members, lanes, mode) {
     h('div', { class: 'groupBar' },
       h('b', {}, `Dependency group of ${members.length}`), ' ', ...members.map((m) => h('span', {}, prLink(m.pr), ' ')),
       mixed.length ? chip(`decisions differ on ${mixed.map((l) => l.branch).join(', ')}`, 'conflict') : chip('decisions agree', 'done'),
-      h('span', { class: 'small muted' }, 'Changing a decision changes the group; dismiss a dependency in a row\'s details to split it.'),
+      h('span', { class: 'small muted' }, 'Accepted together; each PR keeps its own decision. Dismiss a dependency in a row\'s details to split the group.'),
       h('span', { class: 'grow' }),
       allReviewed
         ? h('span', {}, chip('reviewed', 'done'), ' ', h('button', { class: 'ghost small', onclick: () => review(members.map((m) => m.pr), false) }, 'Undo'))
-        : h('button', { class: 'primary', disabled: mixed.length ? true : null, title: mixed.length ? 'Make the decisions agree first' : 'Accept every member\'s decisions', onclick: () => review(members.map((m) => m.pr)) }, `✓ Accept group (${members.length})`))));
+        : h('button', { class: 'primary', title: 'Accept every member\'s decisions', onclick: () => {
+          if (mixed.length && !confirm(`The decisions in this group differ:\n\n${members.map((m) => `#${m.pr}: ${decisionSummary(m, lanes)}`).join('\n')}\n\nAccept them as they are?`)) return;
+          review(members.map((m) => m.pr));
+        } }, `✓ Accept group (${members.length})`))));
 }
 function renderPlan() {
   const body = $('#tabBody');
@@ -364,6 +371,26 @@ async function setEquiv(pr, branch, rejected) {
   try { await api(`sessions/${S.sid}/equiv`, { pr, branch, rejected }); toast(rejected ? `#${pr} back in the plan for ${branch}` : `#${pr} treated as on ${branch}`); S.plan = null; refresh(true); }
   catch (e) { toast(e.message, true); }
 }
+function commentChip(it) {
+  const st = it.comment_state?.status || 'pending';
+  return st === 'posted' ? chip('comment posted', 'done') : st === 'failed' ? chip('comment failed', 'failed') : chip('comment queued', 'blocked');
+}
+function commentEditor(it) {
+  const st = it.comment_state || {};
+  if (st.status === 'posted') {
+    return h('div', { class: 'comment small' }, h('b', {}, 'Comment posted '), st.url ? h('a', { href: st.url, target: '_blank', rel: 'noopener' }, 'on GitHub') : null, h('div', { class: 'muted' }, it.comment));
+  }
+  const id = `cm-${it.pr}`;
+  const save = async (text) => { try { await api(`sessions/${S.sid}/comment`, { pr: it.pr, text }); it.comment = text.trim() || null; it.comment_state = it.comment ? { status: 'pending' } : null; toast(it.comment ? 'Comment queued' : 'Comment removed'); renderPlan(); refresh(); } catch (e) { toast(e.message, true); } };
+  return h('div', { class: 'comment', onclick: (e) => e.stopPropagation() },
+    h('div', { class: 'small' }, h('b', {}, 'Comment to post on this PR'), h('span', { class: 'muted' }, ' — posted from your gh account after every branch is pushed and green'),
+      st.status === 'failed' ? h('span', {}, ' ', chip('failed', 'failed'), ` ${st.error || ''}`) : null),
+    h('textarea', { id, rows: 3, placeholder: 'e.g. This PR would need to be separately backported to branch-4.2 & branch-4.0 since the fix depends on #27039.' }, it.comment || ''),
+    h('div', { class: 'laneButtons' },
+      h('button', { onclick: async () => { const r = await api(`sessions/${S.sid}/comment`, { pr: it.pr, template: 'separate-backport' }); const ta = $(`#${id}`); ta.value = r.text + (ta.value ? `\n\n${ta.value}` : ''); ta.focus(); } }, 'Insert "needs a separate backport"'),
+      h('button', { class: 'primary', onclick: () => save($(`#${id}`).value) }, it.comment ? 'Update comment' : 'Queue comment'),
+      it.comment ? h('button', { class: 'ghost', onclick: () => save('') }, 'Remove') : null));
+}
 function planDetail(it, lanes) {
   const a = it.assessment || {};
   const kv = (k, v) => v ? [h('div', { class: 'muted small' }, k), h('div', {}, v)] : [];
@@ -380,6 +407,7 @@ function planDetail(it, lanes) {
           t.dryrun?.conflicts?.length ? h('div', { class: 'small' }, `Dry run on ${t.dryrun.head}: ${t.dryrun.conflicts.map((c) => `${c.file}${c.test ? ' (test)' : ''} ${c.hunks}h`).join(', ')}`) : null,
           h('div', {}, h('input', { value: t.note || '', placeholder: 'Port note', size: 70, onclick: (e) => e.stopPropagation(), onchange: (e) => api(`sessions/${S.sid}/note`, { pr: it.pr, branch: l.branch, note: e.target.value }).then(() => toast('Note saved')) })),
           t.decision_note ? h('div', { class: 'small muted' }, t.decision_note) : null)); })),
+    commentEditor(it),
     h('div', { class: 'deps' }, ...it.deps.map(depRow),
       h('div', { class: 'dep small' }, 'Add dependency: #', h('input', { size: 7, id: `dep-${it.pr}`, onclick: (e) => e.stopPropagation() }),
         h('button', { onclick: async (e) => { e.stopPropagation(); const v = Number($(`#dep-${it.pr}`).value); if (!v) return; await api(`sessions/${S.sid}/deps`, { pr: it.pr, dependsOn: v }); S.plan = null; refresh(true); } }, 'Add'),

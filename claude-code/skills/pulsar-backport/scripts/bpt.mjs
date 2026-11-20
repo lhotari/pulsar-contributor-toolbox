@@ -23,10 +23,12 @@ const HELP = `bpt — apache/pulsar backport sessions (state: ${db.DB_PATH})
   plan discover <id> [--no-blame]                   refresh PRs, branch presence, labels, dry runs, dependency hints
   plan triage-export <id> [--all] [--size 25]       batches + BRIEF.md for evaluator subagents (prints JSON)
   plan import <id> <verdicts.json>...
-  plan decide <id> <pr> <branch|all> <undecided|backport|skip|defer> [--note T] [--no-group]   (changes the PR's dependency group)
+  plan decide <id> <pr> <branch|all> <undecided|backport|skip|defer> [--note T] [--group]   (--group: the whole dependency group)
   plan value <id> <pr> <high|medium|low> [--note T]  value for users/operators (kept across re-imports)
   plan equiv <id> <pr> <branch> [--confirm]        mark a detected branch-specific equivalent as not the same (--confirm undoes)
   plan review <id> <pr>... [--undo]                 accept the rows' decisions (whole dependency groups) and hide them from review
+  plan comment <id> <pr> (--text T | --separate-backport | --clear)   queue a comment, posted after every lane is done
+  plan comments <id> | post-comments <id>          list queued comments / post them now
   plan recommend <id> [--branch B] [--all]          reset decisions to the recommendations (--all: also your own)
   plan show <id> [--pr N] | report <id> [--out FILE] | labels <id> [--apply] [--removals]
   dep add <id> <pr> <depends-on> [--branch B] [--detail T] | dep set <id> <dep-id> <open|accepted|dismissed>
@@ -100,6 +102,7 @@ function runEngineJob(id) {
       case 'squash': { const r = lane.squash(sid, b); summary = `squashed to ${g.short(r.squashed)}`; break; }
       case 'finalize': { const r = lane.finalize(sid, b, { allowRebase: !!j.args.allowRebase }); summary = r.status; break; }
       case 'push-final-fix': lane.pushFinalFix(sid, b); summary = 'pushed'; break;
+      case 'post-comments': { const r = plan.postComments(sid); summary = `${r.posted} posted, ${r.failed} failed`; if (r.failed) throw new Error(summary); break; }
       case 'apply-labels': { const r = plan.applyLabels(sid, { removals: !!j.args.removals }); summary = `${r.added} added, ${r.removed} removed`; break; }
       default: throw new Error(`not an engine job: ${j.type}`);
     }
@@ -157,11 +160,18 @@ async function main() {
       if (sub === 'decide') {
         const [, pr, branch, decision] = pos;
         const branches = branch === 'all' ? db.all('SELECT branch FROM lanes WHERE session_id = ?', sid).map((l) => l.branch) : [branch];
-        return out(plan.setDecisions(sid, branches.map((b) => ({ pr: Number(pr), branch: b, decision, note: typeof opt.note === 'string' ? opt.note : null })), { group: !opt['no-group'] }));
+        return out(plan.setDecisions(sid, branches.map((b) => ({ pr: Number(pr), branch: b, decision, note: typeof opt.note === 'string' ? opt.note : null })), { group: !!opt.group }));
       }
       if (sub === 'value') { plan.setValue(sid, Number(pos[1]), pos[2], typeof opt.note === 'string' ? opt.note : undefined); return out('ok'); }
       if (sub === 'equiv') { plan.rejectEquivalent(sid, Number(pos[1]), need(pos[2], 'branch'), !opt.confirm); return out('ok'); }
       if (sub === 'review') return out(plan.setReviewed(sid, pos.slice(1).map(Number), !opt.undo));
+      if (sub === 'comment') {
+        const pr = Number(need(pos[1], 'pr'));
+        const text = opt.clear ? '' : opt['separate-backport'] ? plan.separateBackportText(sid, pr) : need(opt.text, '--text');
+        plan.setComment(sid, pr, text); return out(text ? { pr, comment: text } : 'removed');
+      }
+      if (sub === 'comments') return out(plan.pendingComments(sid));
+      if (sub === 'post-comments') return out(plan.postComments(sid));
       if (sub === 'recommend') return out(plan.applyRecommendations(sid, { branch: opt.branch || null, all: !!opt.all }));
       if (sub === 'show') { const v = plan.planView(sid); return out(opt.pr ? v.items.find((x) => x.pr === Number(opt.pr)) : v); }
       if (sub === 'report') { const md = plan.report(sid); if (opt.out) { fs.writeFileSync(opt.out, md); return out(opt.out); } return out(md); }

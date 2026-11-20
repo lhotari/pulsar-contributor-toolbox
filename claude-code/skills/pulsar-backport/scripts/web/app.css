@@ -98,3 +98,5 @@ tr.inGroup > td:first-child { border-left: 3px solid var(--accent); }
 tr.reviewed td { opacity: .8; }
 button.small { padding: 2px 8px; font-size: 12px; }
 tr.groupEnd > td { border-bottom: 2px solid var(--accent); }
+.comment { margin: 10px 0; display: flex; flex-direction: column; gap: 6px; }
+.comment textarea { width: 100%; max-width: 900px; }

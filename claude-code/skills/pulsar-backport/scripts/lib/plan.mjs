@@ -394,10 +394,10 @@ export function dependencyGroups(sid) {
 }
 
 /**
- * Set decisions made by the user. With group (the default), the whole dependency group of each PR on that branch
- * gets the same decision. Returns the [{pr, branch}] that changed, including group members.
+ * Set decisions made by the user. Only the given PRs change unless group is set: then the whole dependency group of
+ * each PR on that branch gets the same decision. Returns the [{pr, branch}] that changed, including group members.
  */
-export function setDecisions(sid, list, { group = true } = {}) {
+export function setDecisions(sid, list, { group = false } = {}) {
   const groups = group ? dependencyGroups(sid) : null;
   const changed = [];
   db.tx(() => {
@@ -464,6 +464,48 @@ export function setReviewed(sid, prs, reviewed = true) {
   return [...all];
 }
 
+// --- comments posted after the backport ---
+
+/** Queue (or clear, with an empty text) a comment that is posted on the PR once every lane is done. */
+export function setComment(sid, pr, text) {
+  const row = db.get('SELECT comment_state FROM items WHERE session_id = ? AND pr = ?', sid, pr);
+  if (!row) throw new Error(`no PR #${pr} in ${sid}`);
+  if (db.J(row.comment_state)?.status === 'posted') throw new Error(`the comment on #${pr} was already posted`);
+  const t = (text || '').trim();
+  db.run('UPDATE items SET comment = ?, comment_state = ? WHERE session_id = ? AND pr = ?',
+    t || null, t ? db.S({ status: 'pending' }) : null, sid, pr);
+  db.event(sid, t ? `Comment queued for #${pr}` : `Comment for #${pr} removed`);
+}
+
+/** The suggested text for a PR that is skipped because it needs its own backport. */
+export function separateBackportText(sid, pr) {
+  const lanes = db.all(`SELECT t.branch FROM targets t JOIN lanes l ON l.session_id = t.session_id AND l.branch = t.branch
+                        WHERE t.session_id = ? AND t.pr = ? AND t.on_branch = 0 AND t.decision != 'backport' ORDER BY l.seq`, sid, pr).map((x) => x.branch);
+  return `This PR would need to be separately backported to ${lanes.join(' & ') || 'the release branches'}.`;
+}
+
+export function pendingComments(sid) {
+  return db.all(`SELECT pr, comment, comment_state FROM items WHERE session_id = ? AND comment IS NOT NULL ORDER BY master_order`, sid)
+    .map((r) => ({ pr: r.pr, comment: r.comment, state: db.J(r.comment_state, {}) }))
+    .filter((r) => r.state.status !== 'posted');
+}
+
+/** Post the queued comments (pending and previously failed). Each one is posted at most once. */
+export function postComments(sid, { log = console.log } = {}) {
+  const res = { posted: 0, failed: 0 };
+  for (const c of pendingComments(sid)) {
+    try {
+      const url = gh.comment(c.pr, c.comment);
+      db.run('UPDATE items SET comment_state = ? WHERE session_id = ? AND pr = ?', db.S({ status: 'posted', url: url.trim(), postedAt: db.now() }), sid, c.pr);
+      db.event(sid, `Comment posted on #${c.pr}`, { data: { url } }); log(`#${c.pr} ${url}`); res.posted++;
+    } catch (e) {
+      db.run('UPDATE items SET comment_state = ? WHERE session_id = ? AND pr = ?', db.S({ status: 'failed', error: e.message.slice(0, 500), at: db.now() }), sid, c.pr);
+      db.event(sid, `Comment on #${c.pr} failed: ${e.message}`, { level: 'error' }); res.failed++;
+    }
+  }
+  return res;
+}
+
 /** Put decisions back to the recommendation; your own decisions stay unless all is set. */
 export function applyRecommendations(sid, { branch = null, all = false } = {}) {
   const r = db.run(`UPDATE targets SET decision = IFNULL(recommendation, 'undecided'), decision_source = 'recommended', decided_at = NULL
@@ -486,7 +528,7 @@ export function planView(sid) {
   return {
     lanes,
     items: items.map((it) => ({
-      ...it, labels: db.J(it.labels, []), stats: db.J(it.stats, {}), assessment: db.J(it.assessment),
+      ...it, labels: db.J(it.labels, []), stats: db.J(it.stats, {}), assessment: db.J(it.assessment), comment_state: db.J(it.comment_state),
       targets: Object.fromEntries(lanes.map((l) => [l.branch, tmap.get(`${it.pr}|${l.branch}`) || null])),
       deps: dmap.get(it.pr) || [],
       groups: Object.fromEntries(lanes.map((l) => [l.branch, [...(groups.get(l.branch)?.get(it.pr) || [])].sort((a, b) => a - b)])),

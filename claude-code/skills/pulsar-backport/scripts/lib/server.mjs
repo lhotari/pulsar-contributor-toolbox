@@ -45,12 +45,15 @@ function sessionSummary(sid) {
        AND IFNULL(dt.on_branch, 0) = 0 AND IFNULL(dt.decision, '') != 'backport'`, sid).n;
   const activeJobs = db.all(`SELECT id, branch, type, runner, status, args, result, claimed_by, started_at FROM jobs WHERE session_id = ? AND status IN ('queued','running','waiting') ORDER BY id`, sid)
     .map((j) => ({ ...j, args: db.J(j.args, {}), result: db.J(j.result) }));
-  return { ...s, lanes, decisions, verdicts, openDeps, activeJobs, review };
+  const comments = { pending: plan.pendingComments(sid).length,
+    posted: db.get(`SELECT COUNT(*) n FROM items WHERE session_id = ? AND json_extract(comment_state, '$.status') = 'posted'`, sid).n };
+  return { ...s, lanes, decisions, verdicts, openDeps, activeJobs, review, comments };
 }
 
 const ACTIONS = {
   discover: (sid) => ({ job: jobs.enqueue(sid, null, 'discover') }),
   triage: (sid, b, a) => ({ job: jobs.enqueue(sid, null, 'triage', { instructions: a.instructions }) }),
+  'post-comments': (sid) => ({ job: jobs.enqueue(sid, null, 'post-comments') }),
   'apply-labels': (sid, b, a) => ({ job: jobs.enqueue(sid, null, 'apply-labels', { removals: !!a.removals }) }),
   report: (sid) => {
     const file = path.join(db.BPT_HOME, `${sid}-plan-${db.now().slice(0, 10)}.md`);
@@ -136,13 +139,19 @@ export function serve({ port = 8765, open = false } = {}) {
         if (what === 'lanes' && parts[3] && m === 'GET') return send(200, { ...db.lane(sid, parts[3]), picks: lane.lanePicks(sid, parts[3]) });
         if (what === 'decision' && m === 'POST') {
           const a = await body(req);
-          const changed = plan.setDecisions(sid, a.items || [a], { group: a.group !== false });
+          const changed = plan.setDecisions(sid, a.items || [a], { group: a.group === true });
           for (const l of db.all(`SELECT branch FROM lanes WHERE session_id = ? AND phase NOT IN ('not-started','done')`, sid)) lane.syncPicks(sid, l.branch);
           return send(200, { changed });
         }
         if (what === 'value' && m === 'POST') { const a = await body(req); plan.setValue(sid, Number(a.pr), a.value || null, a.note); return send(200, { ok: true }); }
         if (what === 'equiv' && m === 'POST') { const a = await body(req); plan.rejectEquivalent(sid, Number(a.pr), a.branch, a.rejected !== false); return send(200, { ok: true }); }
         if (what === 'review' && m === 'POST') { const a = await body(req); return send(200, { prs: plan.setReviewed(sid, a.prs || [a.pr], a.reviewed !== false) }); }
+        if (what === 'comment' && m === 'POST') {
+          const a = await body(req);
+          const text = a.template === 'separate-backport' ? plan.separateBackportText(sid, Number(a.pr)) : a.text;
+          if (a.template) return send(200, { text });
+          plan.setComment(sid, Number(a.pr), text); return send(200, { ok: true });
+        }
         if (what === 'note' && m === 'POST') {
           const a = await body(req);
           db.run('UPDATE targets SET note = ? WHERE session_id = ? AND pr = ? AND branch = ?', a.note, sid, Number(a.pr), a.branch);

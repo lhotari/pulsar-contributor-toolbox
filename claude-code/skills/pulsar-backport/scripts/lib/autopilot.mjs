@@ -3,6 +3,7 @@
 import * as db from './db.mjs';
 import * as jobs from './jobs.mjs';
 import * as lane from './lane.mjs';
+import * as plan from './plan.mjs';
 
 const POLL_MS = Number(process.env.BPT_POLL_MS || 5 * 60 * 1000);
 const REUSABLE = ['ready', 'final-ci', 'final-ci-failed', 'done'];
@@ -67,6 +68,11 @@ export function advance(sid, { force = false } = {}) {
       case 'ready': say('ready to finalize (user action)'); break;
       default: break;
     }
+  }
+  // Every lane pushed and green: post the comments queued during planning (e.g. "needs a separate backport").
+  if (lanes.length && lanes.every((l) => db.get('SELECT phase FROM lanes WHERE session_id = ? AND branch = ?', sid, l.branch).phase === 'done')
+      && plan.pendingComments(sid).some((c) => c.state.status === 'pending') && !jobs.activeJob(sid, null)) {
+    jobs.enqueue(sid, null, 'post-comments'); steps.push({ note: 'post queued PR comments' });
   }
   return steps;
 }

@@ -10,7 +10,7 @@ import { sessionDir } from './plan.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const BPT = path.resolve(HERE, '..', 'bpt.mjs');
-export const ENGINE = ['discover', 'start-lane', 'pick-all', 'push-test', 'rerun', 'squash', 'finalize', 'push-final-fix', 'apply-labels'];
+export const ENGINE = ['discover', 'start-lane', 'pick-all', 'push-test', 'rerun', 'squash', 'finalize', 'push-final-fix', 'apply-labels', 'post-comments'];
 export const CLAUDE = ['triage', 'resolve', 'verify', 'fix-ci'];
 export const ACTIVE = ['queued', 'running', 'waiting'];
 

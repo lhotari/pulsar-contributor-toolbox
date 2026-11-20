@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS items (
   assessment TEXT,                             -- evaluator JSON (impact, severity, risk, ...)
   round INTEGER NOT NULL DEFAULT 1,            -- discover round that first saw the PR
   reviewed_at TEXT,                            -- set when the user accepted the row's decisions
+  comment TEXT,                                -- posted on the PR once every lane is done
+  comment_state TEXT,                          -- JSON: {status: pending|posted|failed, url, postedAt, error}
   PRIMARY KEY (session_id, pr)
 );
 -- Per PR and target branch: facts, evaluator verdict and the human decision.
@@ -151,6 +153,8 @@ function migrate(d) {
   if (!cols.has('recommendation')) d.exec('ALTER TABLE targets ADD COLUMN recommendation TEXT');
   const icols = new Set(d.prepare('PRAGMA table_info(items)').all().map((c) => c.name));
   if (!icols.has('reviewed_at')) d.exec('ALTER TABLE items ADD COLUMN reviewed_at TEXT');
+  if (!icols.has('comment')) d.exec('ALTER TABLE items ADD COLUMN comment TEXT');
+  if (!icols.has('comment_state')) d.exec('ALTER TABLE items ADD COLUMN comment_state TEXT');
   if (!cols.has('equiv')) d.exec('ALTER TABLE targets ADD COLUMN equiv TEXT');
   if (!cols.has('decision_source')) d.exec("ALTER TABLE targets ADD COLUMN decision_source TEXT NOT NULL DEFAULT 'none'");
 }

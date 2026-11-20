@@ -50,8 +50,9 @@ export function editLabels(pr, { add = [], remove = [] }, repo = REPO) {
   if (add.length || remove.length) gh(args);
 }
 
+/** Returns the comment URL that gh prints. */
 export function comment(pr, body, repo = REPO) {
-  gh(['pr', 'comment', String(pr), '-R', repo, '--body-file', '-'], { input: body });
+  return gh(['pr', 'comment', String(pr), '-R', repo, '--body-file', '-'], { input: body });
 }
 
 export function closePr(pr, body, repo = REPO) {

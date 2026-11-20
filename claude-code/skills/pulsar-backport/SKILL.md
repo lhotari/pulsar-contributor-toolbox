@@ -40,7 +40,7 @@ not-started → picking ⇄ needs-attention → picked → verifying → verifie
 - **ci-green → ready**: autosquash folds the fixups into their picks and asserts the tree is byte-identical to the tested tree.
 - **Finalize** (user click): fast-forward push of the squashed commits to the real branch, then `workflow_dispatch` of Pulsar CI, Flaky, Go and Python function workflows (Pulsar CI has no push trigger). If someone pushed to the branch meanwhile, the batch is rebased and the UI asks before pushing that untested combination.
 - **final-ci-failed**: rerun for flakes; a real fix goes on top as a new commit and the user pushes it from the UI ("Push fix").
-- **done**: `cherry-picked/<branch>` and `release/<version>` labels on every picked PR, test PR closed with a comment, test branch deleted.
+- **done**: `cherry-picked/<branch>` and `release/<version>` labels on every picked PR, test PR closed with a comment, test branch deleted. When **every** lane is done, autopilot posts the PR comments queued during planning (e.g. "needs a separate backport" on a skipped PR); a failed post is retried on the next post-comments run, a posted one never twice.
 
 ## Driving from this session
 
