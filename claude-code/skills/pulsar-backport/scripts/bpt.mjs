@@ -35,6 +35,9 @@ const HELP = `bpt — apache/pulsar backport sessions (state: ${db.DB_PATH})
   plan show <id> [--pr N] | report <id> [--out FILE] | labels <id> [--apply] [--removals]
   dep add <id> <pr> <depends-on> [--branch B] [--detail T] | dep set <id> <dep-id> <open|accepted|dismissed>
   lane <start|pick|pick-all|show|push-test|poll|squash|reset|push-final-fix> <id> <branch>
+  lane build <id> <branch> <pr>   run the build check (changed modules compile, changed tests, checkstyle) for a committed pick
+  lane absorb <id> <branch>       squash fixup! commits into the picks they fix and update the pick shas
+  lane accept-build <id> <branch> <pr> --reason T   accept a failing build check that is not the pick's fault
   lane resolved <id> <branch> <pr> [--tests A#m1+m2,B] [--result T]   after resolving; the tests that validated it
   lane unblock <id> <branch> <pr>  |  lane skip|drop <id> <branch> <pr> --reason T   (drop: also a committed pick; the lane is rebuilt)
   lane add-dep <id> <branch> <pr> <dep> [--detail T]   backport <dep> before <pr>, in master order (rebuilds the lane if needed)
@@ -230,6 +233,9 @@ async function main() {
         case 'pick': return out(lane.pickNext(sid, branch));
         case 'pick-all': return out(lane.pickAll(sid, branch).last);
         case 'show': return out({ ...db.lane(sid, branch), picks: lane.lanePicks(sid, branch) });
+        case 'build': { const p = lane.lanePicks(sid, branch).find((x) => x.pr === Number(need(arg, 'pr'))); if (!p?.picked_sha) throw new Error('not a committed pick'); return out(lane.buildPick(sid, branch, p)); }
+        case 'absorb': return out(lane.absorbFixups(sid, branch));
+        case 'accept-build': lane.acceptBuild(sid, branch, Number(need(arg, 'pr')), need(opt.reason, '--reason')); return out('ok');
         case 'resolved': return out(lane.markResolved(sid, branch, Number(need(arg, 'pr')), { tests: typeof opt.tests === 'string' ? opt.tests : null, result: typeof opt.result === 'string' ? opt.result : null }));
         case 'unblock': return out(lane.unblock(sid, branch, Number(need(arg, 'pr'))));
         case 'skip': lane.skipPick(sid, branch, Number(need(arg, 'pr')), need(opt.reason, '--reason')); return out('ok');

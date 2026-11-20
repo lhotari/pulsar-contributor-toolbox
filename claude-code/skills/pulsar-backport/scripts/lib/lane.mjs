@@ -9,6 +9,7 @@ import * as db from './db.mjs';
 import * as g from './git.mjs';
 import * as gh from './gh.mjs';
 import * as jobs from './jobs.mjs';
+import { buildCheck } from './build.mjs';
 import { remote, remoteRef, depOnBranch, saveConfig, pullInDependencies } from './plan.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -165,6 +166,14 @@ export function pickNext(sid, branch) {
   list = picks(sid, branch);
   const stuck = list.find((p) => ['conflict', 'needs-fix', 'blocked'].includes(p.status));
   if (stuck) { db.updateLane(sid, branch, { phase: 'needs-attention' }); return { status: stuck.status, pr: stuck.pr }; }
+  // A fix made for an earlier pick goes into that pick's commit before anything else happens.
+  if (laneCommits(sid, branch).some((c) => c.fixup)) { const a = absorbFixups(sid, branch); if (a.absorbed) return { status: 'absorbed', amended: a.amended }; }
+  // Every committed pick passes the build check (compile, changed tests, checkstyle) before the next one goes in.
+  const unbuilt = list.find((p) => p.status === 'picked' && needsBuild(cfg, p));
+  if (unbuilt) {
+    const b = buildPick(sid, branch, unbuilt);
+    return b.ok ? { status: 'built', pr: unbuilt.pr } : { status: 'needs-fix', pr: unbuilt.pr, build: b.stage };
+  }
   const next = list.find((p) => p.status === 'pending');
   if (!next) {
     db.updateLane(sid, branch, { phase: 'picked', head_sha: st.head, attention: null });
@@ -233,10 +242,17 @@ export function pickNext(sid, branch) {
  * attempts that did not finish it, it waits for the user under Decisions needed. Session config autoResolve=false
  * turns this off.
  */
+export function resolveAttempts(sid, branch, pr) {
+  // A failed build check is a new problem: only the attempts since it count.
+  const p = picks(sid, branch).find((x) => x.pr === pr);
+  const since = p?.status === 'needs-fix' && p.detail.build && !p.detail.build.ok ? p.detail.build.at : '';
+  return db.get(`SELECT COUNT(*) n FROM jobs WHERE session_id = ? AND branch = ? AND type = 'resolve' AND json_extract(args, '$.pr') = ?
+     AND status IN ('failed', 'done', 'cancelled') AND created_at > ?`, sid, branch, pr, since).n;
+}
+
 function queueResolve(sid, branch, pr) {
   if (db.session(sid).config.autoResolve === false) return null;
-  const tries = db.get(`SELECT COUNT(*) n FROM jobs WHERE session_id = ? AND branch = ? AND type = 'resolve' AND json_extract(args, '$.pr') = ?
-     AND status IN ('failed', 'done', 'cancelled')`, sid, branch, pr).n;
+  const tries = resolveAttempts(sid, branch, pr);
   return tries >= 2 ? null : jobs.enqueue(sid, branch, 'resolve', { pr });
 }
 
@@ -513,13 +529,92 @@ function runCheck(dir, sha, base = null) {
   return { ok: r.status === 0, output: (r.stdout || '').slice(-4000) };
 }
 
+/** A committed pick that has no passing (or user-accepted) build check yet. */
+export function needsBuild(cfg, p) {
+  if (cfg.buildCheck === false || !p.picked_sha) return false;
+  const b = p.detail.build;
+  return !(b && (b.ok || b.accepted));
+}
+
+/**
+ * Run the build check for one committed pick in the lane worktree at its HEAD: the modules of the files the pick
+ * changed, its changed test methods, checkstyle for its Java files. A failure makes the pick `needs-fix` and goes to
+ * a resolve job (the fix goes into the pick's own commit, or into the earlier pick that caused it).
+ */
+export function buildPick(sid, branch, p, { log = console.log } = {}) {
+  const l = db.lane(sid, branch); const cfg = db.session(sid).config;
+  const files = g.git(l.worktree, ['diff-tree', '--no-commit-id', '--name-only', '-r', p.picked_sha]).split('\n').filter(Boolean);
+  const { dtest } = changedTests(sid, branch, p);
+  const r = buildCheck({ dir: l.worktree, files, dtest, cfg, name: `build-${sid}-${branch}-${p.pr}`, log });
+  const build = { ...r, head: g.rev(l.worktree, 'HEAD') };
+  const fresh = picks(sid, branch).find((x) => x.pr === p.pr);
+  if (r.ok) {
+    setPick(sid, branch, p.pr, { detail: { ...fresh.detail, build } });
+    db.event(sid, r.skipped ? `#${p.pr}: build check skipped (${r.skipped})` : `#${p.pr} passed the build check: ${r.modules.join(', ')}${r.tests ? `; tests ${r.tests}` : '; no changed tests'}; checkstyle`, { branch, level: r.skipped ? 'warn' : 'info' });
+    return build;
+  }
+  setPick(sid, branch, p.pr, { status: 'needs-fix', detail: { ...fresh.detail, build } });
+  db.updateLane(sid, branch, { phase: 'needs-attention' });
+  attention(sid, branch, `#${p.pr} applied, but the build check failed (${r.stage}) in ${r.modules.join(', ')}`);
+  queueResolve(sid, branch, p.pr);
+  return build;
+}
+
+/** The user accepts a failing build check for a pick (a failure that is not the pick's, e.g. it fails on the branch too). */
+export function acceptBuild(sid, branch, pr, reason) {
+  const p = picks(sid, branch).find((x) => x.pr === pr);
+  if (!p?.detail.build || p.detail.build.ok) throw new Error(`#${pr} has no failing build check`);
+  setPick(sid, branch, pr, { status: 'picked', detail: { ...p.detail, build: { ...p.detail.build, accepted: reason || 'accepted by the user' } } });
+  db.updateLane(sid, branch, { phase: 'picking', attention: null });
+  db.event(sid, `#${pr}: failing build check accepted (${reason || 'no reason given'})`, { branch, level: 'warn' });
+}
+
+/**
+ * Squash every fixup! commit into the pick it fixes (git rebase --autosquash), so a fix lives in the cherry-pick
+ * commit where the problem came from, and update every pick's commit sha (the commits after it are rewritten).
+ * The tree does not change. An amended pick's build check runs again. A pushed test branch cannot be rewritten
+ * (no force-push): it is retired and the next test push opens a new round. Once the real branch is pushed, fixes
+ * are new commits on top instead.
+ */
+export function absorbFixups(sid, branch) {
+  const l = db.lane(sid, branch); const dir = l.worktree;
+  if (PUSHED.includes(l.phase)) return { absorbed: 0, reason: 'the real branch is pushed; a fix is a new commit on top' };
+  const st = g.state(dir);
+  if (st.cherryPicking || st.rebasing || st.dirty) return { absorbed: 0, reason: 'the worktree is busy' };
+  const commits = laneCommits(sid, branch);
+  const fix = commits.filter((c) => c.fixup);
+  if (!fix.length) return { absorbed: 0 };
+  const target = (c) => { const ref = c.subject.replace(/^(fixup|squash|amend)! /, ''); return commits.find((x) => x.pick && (x.sha.startsWith(ref) || x.subject === ref)) || null; };
+  const amended = [...new Set(fix.map((c) => target(c)?.pick?.pr).filter(Boolean))];
+  const before = st.head;
+  const r = g.git(dir, ['rebase', '-i', '--autosquash', l.base_sha], { allowFail: true, env: { GIT_SEQUENCE_EDITOR: ':', GIT_EDITOR: ':' } });
+  if (!r.ok) { g.git(dir, ['rebase', '--abort'], { allowFail: true }); g.git(dir, ['reset', '--quiet', '--hard', before]); throw new Error(`autosquash failed; restored ${g.short(before)}: ${r.err}`); }
+  if (g.git(dir, ['diff', '--stat', before, 'HEAD'])) { g.git(dir, ['reset', '--quiet', '--hard', before]); throw new Error(`autosquash changed the tree; restored ${g.short(before)}`); }
+  const head = g.rev(dir, 'HEAD');
+  const byPr = new Map(picks(sid, branch).map((p) => [p.pr, p]));
+  for (const c of laneCommits(sid, branch)) {
+    if (!c.pick) continue;
+    const p = byPr.get(c.pick.pr);
+    const detail = amended.includes(p.pr) ? { ...p.detail, build: undefined, amendedAt: db.now() } : p.detail;
+    setPick(sid, branch, p.pr, { picked_sha: c.sha, detail });
+  }
+  const pushed = !!l.test_branch;
+  db.updateLane(sid, branch, { head_sha: head, squashed_sha: null,
+    ...(pushed ? { ci: retireTest(l, `fixups squashed into ${amended.map((x) => `#${x}`).join(', ')}`), test_branch: null, test_pr: null, test_pr_url: null } : {}) });
+  db.event(sid, `Squashed ${fix.length} fix(es) into ${amended.map((x) => `#${x}`).join(', ') || 'their picks'}; the lane is rewritten from there (${g.short(before)} → ${g.short(head)}, same tree)`, { branch });
+  if (pushed) db.event(sid, `${l.test_branch} cannot be fast-forwarded any more; the next test push opens a new PR`, { branch });
+  const reusing = db.all(`SELECT branch FROM lanes WHERE session_id = ? AND reuse_from = ? AND phase != 'not-started'`, sid, branch);
+  if (reusing.length) db.event(sid, `${reusing.map((x) => x.branch).join(', ')} already reuses the earlier ${branch} commits; reset ${reusing.length > 1 ? 'those lanes' : 'that lane'} to pick up the amended picks`, { branch, level: 'attention' });
+  return { absorbed: fix.length, amended, before, head };
+}
+
 export function pickAll(sid, branch, { log = console.log, max = 1000 } = {}) {
   const results = [];
   for (let i = 0; i < max; i++) {
     const r = pickNext(sid, branch);
     results.push(r);
     log(`${r.status}${r.pr ? ` #${r.pr}` : ''}${r.sha ? ` ${g.short(r.sha)}` : ''}`);
-    if (!['picked', 'empty', 'rewound'].includes(r.status)) return { last: r, results };
+    if (!['picked', 'empty', 'rewound', 'built', 'absorbed'].includes(r.status)) return { last: r, results };
   }
   return { last: results.at(-1), results };
 }
@@ -541,12 +636,14 @@ export function markResolved(sid, branch, pr, { tests = null, result = null } = 
   if (!check.ok) throw new Error(`check-pick.sh still reports findings for #${pr}; fix them (pulsar-cherry-pick skill: slog → slf4j, Gradle → Maven, guards) and amend, then run this again:\n${(check.output || '').slice(-1500)}`);
   // What validated the resolution: the tests the resolver ran and their outcome (none for a hand resolution without them).
   const validation = tests ? { tests: String(tests).split(',').map((x) => x.trim()).filter(Boolean), result: result || 'not reported', at: db.now() } : null;
-  const detail = { ...p.detail, check, resolvedAt: db.now(), validation };
+  // The engine's build check runs again for a resolved pick (the next pick-all does it before picking on).
+  const detail = { ...p.detail, check, resolvedAt: db.now(), validation, build: undefined };
   setPick(sid, branch, pr, { status: 'picked', picked_sha: own || st.head, detail });
   db.updateLane(sid, branch, { head_sha: st.head, phase: 'picking', attention: null });
+  const absorbed = laneCommits(sid, branch).some((c) => c.fixup) ? absorbFixups(sid, branch) : null;
   db.event(sid, `#${pr} resolved as ${g.short(own || st.head)}${validation ? `; validated with ${validation.tests.length} test(s): ${validation.result}` : '; no tests reported'}`,
     { branch, level: validation ? 'info' : 'warn' });
-  return { ok: true, check };
+  return { ok: true, check, ...(absorbed?.absorbed ? { amended: absorbed.amended } : {}) };
 }
 
 export function skipPick(sid, branch, pr, reason) {
@@ -609,6 +706,8 @@ Fixes for CI failures are added as \`fixup!\` commits and squashed into the matc
 
 /** Push the lane to its test branch on apache/pulsar (never forced) and open or reuse the test PR. */
 export function pushTest(sid, branch) {
+  // CI and verify fixes go into the pick they fix; that retires a pushed test branch (the next round gets a new one).
+  if (laneCommits(sid, branch).some((c) => c.fixup)) absorbFixups(sid, branch);
   closeRetired(sid, branch);
   const s = db.session(sid); const cfg = s.config; const l = db.lane(sid, branch); const r = remote(cfg);
   const tb = l.test_branch || testBranchName(cfg, sid, branch, l.ci.round || 1);

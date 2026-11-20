@@ -172,11 +172,17 @@ test('autopilot runs verify as a Claude job; fixups squash to the same tree', ()
 test('test PR, CI green, squash, finalize, done', () => {
   const push = lane.pushTest(SID, 'branch-4.2');
   assert.equal(push.pr.number, 9001);
+  // The verify fixup went into #101's own commit before the push; the pick shas follow the rewritten lane.
+  const wt = lane.worktreeDir(SID, 'branch-4.2');
+  assert.doesNotMatch(sh(wt, 'log', '--format=%s', 'origin/branch-4.2..HEAD'), /fixup!/);
+  const p101 = lane.lanePicks(SID, 'branch-4.2').find((p) => p.pr === 101);
+  assert.match(sh(wt, 'show', `${p101.picked_sha}:mod/src/main/java/Foo.java`), /adapted/);
+  assert.match(sh(wt, 'log', '-1', '--format=%s', p101.picked_sha), /\(#101\)/);
   assert.ok(sh(origin, 'branch', '--list', 'branch-4.2-backports-test-session'));
   assert.equal(lane.pollCi(SID, 'branch-4.2').phase, 'ci-green');
   const tested = sh(lane.worktreeDir(SID, 'branch-4.2'), 'rev-parse', 'HEAD^{tree}');
   const sq = lane.squash(SID, 'branch-4.2');
-  assert.notEqual(sq.tested, sq.squashed);
+  assert.equal(sq.tested, sq.squashed, 'nothing left to squash');
   assert.equal(sh(lane.worktreeDir(SID, 'branch-4.2'), 'rev-parse', 'HEAD^{tree}'), tested);
   assert.equal(sh(lane.worktreeDir(SID, 'branch-4.2'), 'rev-list', '--count', 'origin/branch-4.2..HEAD'), '3');
   const f = lane.finalize(SID, 'branch-4.2');
@@ -295,7 +301,7 @@ test('while backporting: late picks go in master order, drops rebuild the lane, 
   const added = control.list(sid).find((d) => d.key === `added:${B}:112`);
   assert.deepEqual(added.options.map((o) => o.id), ['repick', 'on-top', 'skip']);
   assert.ok(autopilot.advance(sid).some((s) => /waits for a decision on #112/.test(s.note)));
-  // Re-pick in master order: #113..#115 are re-applied after #112, the fixup rides with #113, the test branch is retired.
+  // Re-pick in master order: #113..#115 are re-applied after #112 (#113 with its fix inside), the test branch is retired.
   assert.deepEqual(control.apply(sid, added.key, 'repick').replayed, [113, 114, 115]);
   assert.equal(db.lane(sid, B).phase, 'picking'); assert.equal(db.lane(sid, B).test_branch, null); assert.equal(db.lane(sid, B).ci.round, 2);
   const r = lane.pickAll(sid, B, { log: () => {} });
@@ -313,11 +319,12 @@ test('while backporting: late picks go in master order, drops rebuild the lane, 
   assert.deepEqual(control.apply(sid, q.key, 'p0').pulledIn, [110]);
   assert.equal(jobs.job(jid).status, 'done');
   assert.equal(lane.pickAll(sid, B, { log: () => {} }).last.status, 'done');
-  assert.equal(pick(115).picked_sha, sh(wt, 'rev-parse', 'HEAD~1'), 'the pick commit, not the fixup riding with it');
-  assert.deepEqual(subjects(), ['fixup! Another fix (#113)', 'Fix line three (#115)', 'Fix line eight (#114)', 'Another fix (#113)',
+  assert.equal(pick(115).picked_sha, sh(wt, 'rev-parse', 'HEAD'), 'the verify fixup was squashed into #113 before the first push');
+  assert.match(sh(wt, 'show', `${pick(113).picked_sha}:mod/src/main/java/Foo.java`), /line 6 other, adapted/);
+  assert.deepEqual(subjects(), ['Fix line three (#115)', 'Fix line eight (#114)', 'Another fix (#113)',
     'Fix on top of the prerequisite (#112)', '[improve][broker] Prerequisite (#110)']);
 
-  // Dropping a committed pick rebuilds the lane without it and without its fixup.
+  // Dropping a committed pick rebuilds the lane without it (and the fix squashed into it).
   assert.deepEqual(lane.dropPick(sid, B, 113, 'not needed on 4.2'), { dropped: [113], replayed: [114, 115], head: sh(wt, 'rev-parse', 'HEAD') });
   assert.equal(lane.pickAll(sid, B, { log: () => {} }).last.status, 'done');
   assert.deepEqual(subjects(), ['Fix line three (#115)', 'Fix line eight (#114)', 'Fix on top of the prerequisite (#112)', '[improve][broker] Prerequisite (#110)']);
@@ -389,6 +396,55 @@ test('a dependency left out in review is not asked again: the pick goes on witho
   assert.deepEqual(lane.pickAll(sid, B, { log: () => {} }).last.status, 'blocked');
   plan.setDecisions(sid, [{ pr: 110, branch: B, decision: 'skip' }]);
   assert.deepEqual(lane.releaseBlocked(sid, B), [112]);
+});
+
+test('every pick passes the build check; a fix for an earlier pick is squashed into it and the shas follow', () => {
+  // Fake Maven: records its arguments; fails compile/test while the FAIL marker exists.
+  const mvnLog = path.join(tmp, 'mvn.log'); const failMark = path.join(tmp, 'mvn.fail');
+  const fake = path.join(bin, 'fake-mvn');
+  fs.writeFileSync(fake, `#!/bin/sh\necho "$@" >> ${mvnLog}\ncase "$*" in *checkstyle:check*) exit 0 ;; esac\n[ -e ${failMark} ] && { echo "[ERROR] COMPILATION ERROR: cannot find symbol"; exit 1; }\nexit 0\n`, { mode: 0o755 });
+  process.env.BPT_MVN = fake;
+  fs.appendFileSync(path.join(repo, '.git/info/exclude'), '\npom.xml\n');
+  try {
+    const sid = 'build-session'; const B = 'branch-4.2';
+    plan.createSession({ id: sid, repo, remote: 'origin', sincePr: 113, branches: plan.parseBranches('branch-4.2:4.2.9') });
+    plan.discover(sid, { log: () => {}, blame: false });
+    plan.setDecisions(sid, [114, 115].map((pr) => ({ pr, branch: B, decision: 'backport' })));
+    db.run(`UPDATE sessions SET status = 'backporting' WHERE id = ?`, sid);
+    lane.startLane(sid, B, { log: () => {} });
+    const wt = lane.worktreeDir(sid, B);
+    fs.writeFileSync(path.join(wt, 'mod/pom.xml'), '<project/>');
+    const pick = (pr) => lane.lanePicks(sid, B).find((p) => p.pr === pr);
+    const r = lane.pickAll(sid, B, { log: () => {} });
+    assert.equal(r.last.status, 'done');
+    assert.deepEqual(r.results.map((x) => x.status), ['picked', 'built', 'picked', 'built', 'done'], 'each pick is built before the next one');
+    assert.equal(pick(114).detail.build.ok, true); assert.deepEqual(pick(114).detail.build.modules, ['mod']);
+    const calls = fs.readFileSync(mvnLog, 'utf8');
+    assert.match(calls, /-pl mod -am (test|test-compile)/);
+    assert.match(calls, /-pl mod initialize checkstyle:check -Dcheckstyle.includes=\*\*\/Foo.java/);
+
+    // The check fails for #114 (built again, e.g. after a rebuild): the pick needs a fix and goes to a resolve job.
+    fs.writeFileSync(failMark, '');
+    db.run(`UPDATE picks SET detail = json_remove(detail, '$.build') WHERE session_id = ? AND pr = 114`, sid);
+    db.updateLane(sid, B, { phase: 'picking' });
+    const f = lane.pickAll(sid, B, { log: () => {} }).last;
+    assert.deepEqual([f.status, f.pr], ['needs-fix', 114]);
+    assert.match(pick(114).detail.build.output, /cannot find symbol/);
+    assert.ok(db.get(`SELECT 1 x FROM jobs WHERE session_id = ? AND type = 'resolve' AND json_extract(args, '$.pr') = 114`, sid));
+    // The worker fixes it where it belongs, in #114's commit (not HEAD): a fixup the engine squashes in.
+    const old114 = pick(114).picked_sha; const old115 = pick(115).picked_sha;
+    edit2(wt, 'Foo.java', 9, 'line 9 fixed for the branch'); sh(wt, 'commit', '-qam', `fixup! ${sh(wt, 'log', '-1', '--format=%s', old114)}`);
+    fs.rmSync(failMark);
+    const res = lane.markResolved(sid, B, 114);
+    assert.deepEqual(res.amended, [114]);
+    assert.doesNotMatch(sh(wt, 'log', '--format=%s', `origin/${B}..HEAD`), /fixup!/);
+    assert.notEqual(pick(114).picked_sha, old114); assert.notEqual(pick(115).picked_sha, old115);
+    assert.equal(pick(115).picked_sha, sh(wt, 'rev-parse', 'HEAD'));
+    assert.match(sh(wt, 'show', `${pick(114).picked_sha}:mod/src/main/java/Foo.java`), /line 9 fixed/);
+    assert.equal(pick(115).detail.build.ok, true, 'a pick that was only rewritten keeps its check');
+    const d = lane.pickAll(sid, B, { log: () => {} });
+    assert.deepEqual(d.results.map((x) => x.status), ['built', 'done'], 'the amended pick is checked again');
+  } finally { delete process.env.BPT_MVN; }
 });
 
 function edit2(dir, f, i, text) { const p = path.join(dir, 'mod/src/main/java', f); const a = fs.readFileSync(p, 'utf8').split('\n'); a[i - 1] = text; fs.writeFileSync(p, a.join('\n')); }

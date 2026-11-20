@@ -537,6 +537,10 @@ function renderPicks(branch) {
     else if (det.resolvedAt) extra.push(h('div', { class: 'small muted' }, 'Resolved without reported tests'));
     if (det.outOfOrder) extra.push(h('div', { class: 'small muted' }, `Out of master order: ${det.outOfOrder}`));
     if (det.check && !det.check.ok) extra.push(h('pre', { class: 'check' }, det.check.output));
+    const bc = det.build;
+    if (bc) extra.push(h('div', { class: 'small muted' }, bc.skipped ? `Build check skipped: ${bc.skipped}`
+      : `Build check ${bc.ok ? 'passed' : bc.accepted ? `failed, accepted: ${bc.accepted}` : `failed (${bc.stage})`}: ${bc.modules.join(', ')}${bc.tests ? `; tests ${bc.tests.replaceAll('+', '+\u200b')}` : '; no changed tests'}`));
+    if (bc && !bc.ok && !bc.accepted) extra.push(h('pre', { class: 'check' }, bc.output));
     const B = [];
     const b = (label, action, args, opts = {}) => B.push(h('button', { class: opts.cls, onclick: () => act(action, branch, args, opts.confirm) }, label));
     // A job already working on this pick (a resolver, queued, running or waiting for an answer).

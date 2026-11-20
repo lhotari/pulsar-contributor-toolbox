@@ -46,7 +46,7 @@ export function advance(sid, { force = false } = {}) {
           if (!blocked && !l.attention) { lane.setPhase(sid, b, 'picking'); }
           break;
         }
-        if (attemptsFor(sid, b, 'resolve', { pr: p.pr }) >= 2 && !force) { say(`#${p.pr}: two resolve attempts failed; waits for the user`); break; }
+        if (lane.resolveAttempts(sid, b, p.pr) >= 2 && !force) { say(`#${p.pr}: two resolve attempts failed; waits for the user`); break; }
         jobs.enqueue(sid, b, 'resolve', { pr: p.pr }); say(`resolve #${p.pr}`); break;
       }
       case 'picked': lane.setPhase(sid, b, 'verifying'); jobs.enqueue(sid, b, 'verify'); say('verify build'); break;
