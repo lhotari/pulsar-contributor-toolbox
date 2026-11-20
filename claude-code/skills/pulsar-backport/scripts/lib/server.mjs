@@ -10,6 +10,7 @@ import * as plan from './plan.mjs';
 import * as lane from './lane.mjs';
 import * as jobs from './jobs.mjs';
 import * as autopilot from './autopilot.mjs';
+import * as control from './control.mjs';
 
 const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'web');
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
@@ -47,7 +48,9 @@ function sessionSummary(sid) {
     .map((j) => ({ ...j, args: db.J(j.args, {}), result: db.J(j.result) }));
   const comments = { pending: plan.pendingComments(sid).length,
     posted: db.get(`SELECT COUNT(*) n FROM items WHERE session_id = ? AND json_extract(comment_state, '$.status') = 'posted'`, sid).n };
-  return { ...s, lanes, decisions, verdicts, openDeps, activeJobs, review, comments };
+  let needed = [];
+  try { needed = control.list(sid); } catch (e) { needed = [{ key: 'error', kind: 'error', title: 'Could not compute the open decisions', text: e.message, options: [] }]; }
+  return { ...s, lanes, decisions, verdicts, openDeps, activeJobs, review, comments, needed };
 }
 
 const ACTIONS = {
@@ -66,6 +69,11 @@ const ACTIONS = {
     db.event(sid, 'Backporting started'); return { steps: autopilot.advance(sid) };
   },
   'stop-backport': (sid) => { db.run(`UPDATE sessions SET status = 'planning' WHERE id = ?`, sid); plan.saveConfig(sid, { autopilot: false }); return {}; },
+  // Reset every lane not yet pushed and return to planning; runs as an engine job (it closes test PRs).
+  'abort-backport': (sid, b, a) => {
+    db.run(`UPDATE sessions SET status = 'planning', updated_at = ? WHERE id = ?`, db.now(), sid); plan.saveConfig(sid, { autopilot: false });
+    return { job: jobs.enqueue(sid, null, 'abort', { reason: a.reason || undefined }) };
+  },
   advance: (sid, b, a) => ({ steps: autopilot.advance(sid, { force: !!a.force }) }),
   // lane actions
   start: (sid, b) => ({ job: jobs.enqueue(sid, b, 'start-lane') }),
@@ -73,6 +81,10 @@ const ACTIONS = {
   resolve: (sid, b, a) => ({ job: jobs.enqueue(sid, b, 'resolve', { pr: Number(a.pr), instructions: a.instructions }) }),
   resolved: (sid, b, a) => lane.markResolved(sid, b, Number(a.pr)),
   skip: (sid, b, a) => { lane.skipPick(sid, b, Number(a.pr), a.reason || 'skipped from the UI'); return {}; },
+  // A committed pick too: the lane is rebuilt from it, later picks re-applied from their lane commits.
+  drop: (sid, b, a) => { control.settle(sid, b, `#${a.pr} dropped`); return lane.dropPick(sid, b, Number(a.pr), a.reason || 'dropped from the UI'); },
+  'add-dep': (sid, b, a) => { control.settle(sid, b, `#${a.dep} added before #${a.pr}`); return lane.addDependency(sid, b, Number(a.pr), Number(a.dep), a.detail || 'added in the UI while backporting'); },
+  'out-of-order': (sid, b, a) => { lane.pickOutOfOrder(sid, b, Number(a.pr), a.reason); return {}; },
   unblock: (sid, b, a) => ({ ok: lane.unblock(sid, b, Number(a.pr)) }),
   sync: (sid, b) => lane.syncPicks(sid, b),
   verify: (sid, b, a) => { lane.setPhase(sid, b, 'verifying'); return { job: jobs.enqueue(sid, b, 'verify', { instructions: a.instructions }) }; },
@@ -177,6 +189,8 @@ export function serve({ port = 8765, open = false } = {}) {
           return send(200, { ok: true, pulledIn: p.added, notOnMaster: p.missing });
         }
         if (what === 'config' && m === 'POST') return send(200, plan.saveConfig(sid, await body(req)));
+        if (what === 'control' && m === 'GET') return send(200, control.list(sid));
+        if (what === 'control' && m === 'POST') { const a = await body(req); const r = control.apply(sid, a.key, a.option, a.text); tick(); return send(200, r ?? {}); }
         if (what === 'action' && m === 'POST') {
           const a = await body(req); const fn = ACTIONS[a.action];
           if (!fn) return send(400, { error: `unknown action ${a.action}` });

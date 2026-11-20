@@ -115,7 +115,8 @@ function laneCard(l, sum) {
   const ciLine = (kind) => { const c = ci[kind]; if (!c) return null; return h('span', {}, `${kind === 'final' ? 'final' : 'test'} CI `, chip(c.state, c.state), c.failed?.length ? ` ${c.failed.length} failed` : '', c.reruns ? ` · ${c.reruns} rerun(s)` : ''); };
   return h('div', { class: 'lane' },
     h('div', { class: 'laneHead' }, h('b', {}, l.branch), l.release ? chip(l.release, '') : null, l.reuse_from ? h('span', { class: 'small muted' }, `reuses ${l.reuse_from}`) : null,
-      h('span', { class: 'grow' }), h('span', { class: 'small muted' }, l.phase)),
+      h('span', { class: 'grow' }), (sum.needed || []).some((d) => d.branch === l.branch) ? chip(`${sum.needed.filter((d) => d.branch === l.branch).length} decision(s) needed`, 'blocked') : null,
+      h('span', { class: 'small muted' }, l.phase)),
     steps(l),
     l.attention ? h('div', { class: 'attention small' }, l.attention) : null,
     h('div', { class: 'laneStats' },
@@ -128,8 +129,31 @@ function laneCard(l, sum) {
     laneButtons(l, sum));
 }
 
+// ---------- decisions needed while backporting ----------
+async function choose(d, o) {
+  let text;
+  if (o.input) { text = prompt(`${d.title}\n\n${o.label}: ${o.input}`, ''); if (text === null || (!text && !o.optional)) return; }
+  if (o.confirm && !confirm(o.confirm)) return;
+  try {
+    const r = await api(`sessions/${S.sid}/control`, { key: d.key, option: o.id, text: text || undefined });
+    const extra = [r.dropped?.length ? `dropped ${r.dropped.map((x) => `#${x}`).join(', ')}` : '', r.replayed?.length ? `re-applying ${r.replayed.map((x) => `#${x}`).join(', ')}` : '',
+      r.rebuilt?.replayed?.length ? `rebuilt: re-applying ${r.rebuilt.replayed.map((x) => `#${x}`).join(', ')}` : '', r.pulledIn?.length ? `pulled in ${r.pulledIn.map((x) => `#${x}`).join(', ')}` : '', r.job ? `queued job ${r.job}` : ''].filter(Boolean);
+    toast(`${o.label}${extra.length ? `: ${extra.join('; ')}` : ''}`); S.plan = null; await refresh(true);
+  } catch (e) { toast(e.message, true); }
+}
+function renderNeeded(s) {
+  const box = $('#needed'); const list = s.needed || [];
+  box.hidden = !list.length; if (!list.length) { box.replaceChildren(); return; }
+  box.replaceChildren(h('h2', {}, `Decisions needed (${list.length})`), ...list.map((d) => h('div', { class: 'need' },
+    h('div', {}, d.branch ? chip(d.branch, '') : null, ' ', d.pr ? prLink(d.pr) : null, ' ', h('b', {}, d.pr ? d.title.replace(`#${d.pr} `, '') : d.title),
+      d.job ? h('a', { href: '#', class: 'small', onclick: (e) => { e.preventDefault(); openLog(d.job); } }, ` job ${d.job} log`) : null),
+    d.text ? h('div', { class: 'small needText' }, d.text) : null,
+    h('div', { class: 'laneButtons' }, d.options.map((o) => h('button', { class: o.cls || (o.recommended ? 'primary' : ''), title: o.input || '', onclick: () => choose(d, o) }, o.label))))));
+}
+
 function renderSession() {
   const s = S.summary; if (!s) return;
+  renderNeeded(s);
   $('#sTitle').textContent = s.title;
   const v = (b) => Object.fromEntries(s.verdicts.filter((x) => x.branch === b).map((x) => [x.verdict, x.n]));
   const d = (b) => s.decisions.filter((x) => x.branch === b).reduce((o, x) => { o[x.decision] = (o[x.decision] || 0) + x.n; return o; }, {});
@@ -153,7 +177,12 @@ function renderSession() {
   btn('Report → VS Code', () => act('report'), 'ghost');
   if (s.comments?.pending) btn(`Post ${s.comments.pending} comment(s) now`, () => act('post-comments', null, null, `Post the ${s.comments.pending} queued PR comment(s) on GitHub now, before the backport is finished?`), 'ghost');
   if (s.status === 'planning') btn('Start backporting', () => act('start-backport', null, null, 'Start backporting with the current decisions? Lanes start in order; later lanes wait for the lanes they reuse.'), 'primary');
-  else { btn('Next step', () => act('advance', null, { force: true }), 'primary'); btn('Back to planning', () => act('stop-backport', null, null, 'Pause backporting? Running jobs continue; nothing new is started.'), 'ghost'); }
+  else { btn('Next step', () => act('advance', null, { force: true }), 'primary'); btn('Pause (back to planning)', () => act('stop-backport', null, null, 'Pause backporting? Running jobs continue; nothing new is started. The lanes keep their picks.'), 'ghost'); }
+  const resettable = s.lanes.filter((l) => !['not-started', 'final-ci', 'final-ci-failed', 'done'].includes(l.phase));
+  if (resettable.length) btn('Abort backporting…', () => {
+    const reason = prompt(`Abort backporting and start again after revisiting the decisions?\n\nResets ${resettable.map((l) => l.branch).join(', ')}: cancels their jobs, deletes the lane worktrees and picks, and closes their test PRs. Lanes already pushed to the real branch are kept. The plan and its decisions stay.\n\nReason (shown on the closed test PRs):`, 'revisiting the backport decisions');
+    if (reason !== null) act('abort-backport', null, { reason });
+  }, 'ghost danger');
   $('#sessionActions').replaceChildren(...A);
   $('#lanes').replaceChildren(...s.lanes.map((l) => laneCard(l, s)));
   renderTabs();
@@ -445,6 +474,7 @@ async function setDep(id, status) { try { depToast(await api(`sessions/${S.sid}/
 function renderPicks(branch) {
   const d = S.lanePicks[branch]; const body = $('#tabBody');
   if (!d) { body.replaceChildren(h('p', { class: 'muted' }, 'Loading…')); return; }
+  const pushed = ['final-ci', 'final-ci-failed', 'done'].includes(d.phase);
   const titles = new Map((S.plan?.items || []).map((it) => [it.pr, it.title]));
   const rows = d.picks.map((p, i) => {
     const det = p.detail || {};
@@ -454,13 +484,25 @@ function renderPicks(branch) {
     if (det.unmet?.length) extra.push(h('div', { class: 'small' }, 'Blocked on: ', ...det.unmet.map((u) => h('span', {}, prLink(u.depends_on), ` ${u.source}: ${u.detail || ''} `))));
     if (det.newDeps?.length) extra.push(h('div', { class: 'small' }, 'Found while backporting: ', ...det.newDeps.map((u) => h('span', {}, prLink(u.depends_on), ` ${u.detail} `))));
     if (det.warnings?.length) extra.push(h('div', { class: 'small muted' }, det.warnings.join('; ')));
-    if (det.reason) extra.push(h('div', { class: 'small muted' }, `Skipped: ${det.reason}`));
+    if (det.reason) extra.push(h('div', { class: 'small muted' }, `${det.dropped ? 'Dropped' : 'Skipped'}: ${det.reason}`));
+    if (det.replay && p.status === 'pending') extra.push(h('div', { class: 'small muted' }, `Re-applied from the lane's earlier commit ${short(p.source_sha)}${det.extras?.length ? ` with ${det.extras.length} fixup(s)` : ''}`));
+    if (det.outOfOrder) extra.push(h('div', { class: 'small muted' }, `Out of master order: ${det.outOfOrder}`));
     if (det.check && !det.check.ok) extra.push(h('pre', { class: 'check' }, det.check.output));
     const B = [];
     const b = (label, action, args, opts = {}) => B.push(h('button', { class: opts.cls, onclick: () => act(action, branch, args, opts.confirm) }, label));
     if (['conflict', 'needs-fix'].includes(p.status)) { b('Resolve with Claude', 'resolve', { pr: p.pr }, { cls: 'primary' }); b('I resolved it', 'resolved', { pr: p.pr }); }
     if (p.status === 'blocked') { b('Re-check', 'unblock', { pr: p.pr }); }
     if (['pending', 'conflict', 'blocked'].includes(p.status)) b('Skip', 'skip', { pr: p.pr, reason: '' }, { cls: 'ghost', confirm: `Skip #${p.pr} on ${branch}? Its decision becomes "skip".` });
+    if (['picked', 'needs-fix'].includes(p.status) && !pushed) B.push(h('button', { class: 'ghost danger', onclick: () => {
+      const reason = prompt(`Drop #${p.pr} from ${branch}? Its decision becomes "skip".\n\nThe lane is rebuilt from its commit: later picks are re-applied from their lane commits (resolutions and fixups kept), then verified and tested again. A pushed test PR is replaced by a new one.\n\nReason:`, '');
+      if (reason !== null) act('drop', branch, { pr: p.pr, reason: reason || 'dropped from the UI' });
+    } }, 'Drop'));
+    if (p.status !== 'skipped' && !pushed) B.push(h('button', { class: 'ghost', onclick: () => {
+      const dep = prompt(`#${p.pr} needs another PR first on ${branch}? PR number of the dependency (it is backported in master order; the lane is rebuilt if later commits are already in):`, '');
+      if (!dep || !/^\d+$/.test(dep.trim())) return;
+      const detail = prompt('Why (optional):', '') || undefined;
+      act('add-dep', branch, { pr: p.pr, dep: Number(dep.trim()), detail });
+    } }, 'Add dependency…'));
     return h('tr', { class: 'pickRow' }, h('td', { class: 'muted small' }, i + 1), h('td', {}, prLink(p.pr), ' ', strip(titles.get(p.pr) || ''), det.reused ? h('span', { class: 'small muted' }, ' (reused)') : null, ...extra),
       h('td', {}, chip(p.status, p.status)), h('td', { class: 'mono' }, short(p.picked_sha) || h('span', { class: 'muted' }, short(p.source_sha))), h('td', {}, h('div', { class: 'laneButtons' }, B)));
   });

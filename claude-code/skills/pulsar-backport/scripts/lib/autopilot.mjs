@@ -23,6 +23,11 @@ export function advance(sid, { force = false } = {}) {
     const b = l.branch;
     if (jobs.activeJob(sid, b)) continue;
     const say = (note) => steps.push({ branch: b, note });
+    // Past picking, a pick added late or a pick no longer wanted needs the user's decision before anything moves on.
+    if (lane.POST_PICK.includes(l.phase)) {
+      const hold = lane.holds(sid, b);
+      if (hold.length) { say(`waits for a decision on ${hold.map((x) => `#${x.pr}`).join(', ')}`); continue; }
+    }
     switch (l.phase) {
       case 'not-started': {
         if (l.reuse_from) {

@@ -10,7 +10,7 @@ import { sessionDir } from './plan.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const BPT = path.resolve(HERE, '..', 'bpt.mjs');
-export const ENGINE = ['discover', 'start-lane', 'pick-all', 'push-test', 'rerun', 'squash', 'finalize', 'push-final-fix', 'apply-labels', 'post-comments'];
+export const ENGINE = ['discover', 'start-lane', 'pick-all', 'push-test', 'rerun', 'squash', 'finalize', 'push-final-fix', 'apply-labels', 'post-comments', 'abort'];
 export const CLAUDE = ['triage', 'resolve', 'verify', 'fix-ci'];
 export const ACTIVE = ['queued', 'running', 'waiting'];
 
@@ -65,9 +65,10 @@ Job ${j.id}: ${j.type}${j.branch ? ` on ${j.branch}` : ''}, session ${j.session_
 Engine: node ${BPT}
 Start with: node ${BPT} job show ${j.id}
 End with exactly one of: job done ${j.id} --summary "...", job fail ${j.id} --reason "...", or job ask ${j.id} --question "..." (when only the user can decide).
+With job ask, add --propose with the actions you recommend, so the user can approve one with a click: dep:<pr>:<dependency> (backport that PR first, in master order), drop:<pr> (leave a pick out; the lane is rebuilt without it), rerun, reset. Comma separated, recommended first.
 Never push, never open or edit PRs, never change labels: the engine and the user do that.`;
   const extra = {
-    resolve: `Resolve pick #${j.args.pr} with the pulsar-cherry-pick skill's per-commit loop (conflicts, slog→slf4j, Gradle→Maven, compile the module, run the changed tests). Commit with git cherry-pick --continue (or amend for a needs-fix pick), then run: node ${BPT} lane resolved ${j.session_id} ${j.branch} ${j.args.pr}. If the pick needs another PR first, record it with: node ${BPT} dep add ${j.session_id} ${j.args.pr} <dep-pr> --branch ${j.branch} --detail "why", leave the cherry-pick in place, and finish with job ask.`,
+    resolve: `Resolve pick #${j.args.pr} with the pulsar-cherry-pick skill's per-commit loop (conflicts, slog→slf4j, Gradle→Maven, compile the module, run the changed tests). Commit with git cherry-pick --continue (or amend for a needs-fix pick), then run: node ${BPT} lane resolved ${j.session_id} ${j.branch} ${j.args.pr}. If the pick needs another PR first, do not add it yourself: leave the cherry-pick in place and finish with job ask ${j.id} --question "<what it needs and why>" --propose dep:${j.args.pr}:<dep-pr>. If the pick cannot work on this branch, propose drop:${j.args.pr}.`,
     verify: `Verify the whole lane builds: compile every module the picks touched (install shared modules first), run the tests each pick added or changed, and fix problems with fixup! commits (git commit --fixup=<pick commit>). When it builds and the tests pass, run node ${BPT} lane phase ${j.session_id} ${j.branch} verified.`,
     'fix-ci': `CI ${j.args.kind === 'final' ? `on ${j.branch} itself` : 'on the test PR'} failed. Investigate with the investigate-ci skill. A flaky or pre-existing failure: run node ${BPT} ci rerun ${j.session_id} ${j.branch}. A real failure caused by a pick: fix it locally${j.args.kind === 'final' ? ' as a new commit on top of HEAD (the branch is already pushed; the user pushes the fix from the UI)' : ` with a fixup! commit for that pick, run the affected tests, then node ${BPT} lane phase ${j.session_id} ${j.branch} verified (the engine pushes it)`}.`,
     triage: `Triage the untriaged PRs of the plan: follow the pulsar-backport-plan skill's "Triage" section (export batches, run evaluator subagents, import the verdicts).`,

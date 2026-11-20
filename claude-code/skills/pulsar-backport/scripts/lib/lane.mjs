@@ -8,12 +8,17 @@ import { fileURLToPath } from 'node:url';
 import * as db from './db.mjs';
 import * as g from './git.mjs';
 import * as gh from './gh.mjs';
-import { remote, remoteRef, depOnBranch } from './plan.mjs';
+import { remote, remoteRef, depOnBranch, saveConfig, pullInDependencies } from './plan.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const PHASES = ['not-started', 'picking', 'needs-attention', 'picked', 'verifying', 'verified', 'testing', 'ci-failed',
   'ci-green', 'ready', 'final-ci', 'final-ci-failed', 'done'];
 const REUSABLE = ['ready', 'final-ci', 'final-ci-failed', 'done'];
+/** Picking finished; a pick added now waits for a decision instead of being applied on top. */
+export const POST_PICK = ['picked', 'verifying', 'verified', 'testing', 'ci-failed', 'ci-green', 'ready'];
+/** Pushed to the real branch: the batch can no longer be rebuilt. */
+export const PUSHED = ['final-ci', 'final-ci-failed', 'done'];
+const COMMITTED = ['picked', 'needs-fix'];
 
 function checkPickScript() {
   for (const p of [path.resolve(HERE, '../../../pulsar-cherry-pick/scripts/check-pick.sh'),
@@ -25,8 +30,9 @@ function checkPickScript() {
 
 export function worktreeDir(sid, branch) { return path.join(db.BPT_HOME, 'worktrees', sid, branch); }
 export const localBranch = (sid, branch) => `bpt/${sid}/${branch}`;
-export function testBranchName(cfg, sid, branch) {
-  return (cfg.testBranchPattern || '{branch}-backports-{id}').replaceAll('{branch}', branch).replaceAll('{id}', sid);
+export function testBranchName(cfg, sid, branch, round = 1) {
+  const name = (cfg.testBranchPattern || '{branch}-backports-{id}').replaceAll('{branch}', branch).replaceAll('{id}', sid);
+  return round > 1 ? `${name}-r${round}` : name;
 }
 const picks = (sid, branch) => db.all('SELECT * FROM picks WHERE session_id = ? AND branch = ? ORDER BY seq, pr', sid, branch)
   .map((p) => ({ ...p, detail: db.J(p.detail, {}) }));
@@ -71,11 +77,11 @@ export function startLane(sid, branch, { log = console.log } = {}) {
 /** Align the pick list with the plan's decisions (backport, not already on the branch), in master order. */
 export function syncPicks(sid, branch) {
   const l = db.lane(sid, branch);
+  if (PUSHED.includes(l.phase)) return { added: 0, removed: 0, total: picks(sid, branch).length };
   const want = db.all(`SELECT i.pr, i.sha, i.master_order FROM items i JOIN targets t ON t.session_id = i.session_id AND t.pr = i.pr
                         WHERE i.session_id = ? AND t.branch = ? AND t.decision = 'backport' AND t.on_branch = 0 ORDER BY i.master_order`, sid, branch);
   const have = new Map(picks(sid, branch).map((p) => [p.pr, p]));
   const reuse = l.reuse_from ? new Map(picks(sid, l.reuse_from).filter((p) => p.status === 'picked').map((p) => [p.pr, p.picked_sha])) : new Map();
-  const lastPicked = Math.max(-1, ...[...have.values()].filter((p) => p.status !== 'pending').map((p) => p.seq));
   let added = 0; let removed = 0;
   for (const w of want) {
     if (have.has(w.pr)) continue;
@@ -83,14 +89,20 @@ export function syncPicks(sid, branch) {
     db.run(`INSERT INTO picks (session_id, branch, pr, seq, source_sha, status, detail, updated_at) VALUES (?,?,?,?,?,?,?,?)`,
       sid, branch, w.pr, w.master_order, src || w.sha, 'pending', db.S({ reused: !!src, master: w.sha }), db.now());
     added++;
-    if (w.master_order < lastPicked) db.event(sid, `#${w.pr} was added after later commits were already picked; it will be picked out of master order`, { branch, level: 'warn' });
   }
   const wanted = new Set(want.map((w) => w.pr));
   for (const p of have.values()) {
     if (wanted.has(p.pr)) continue;
     if (p.status === 'pending' || p.status === 'blocked') { db.run('DELETE FROM picks WHERE session_id = ? AND branch = ? AND pr = ?', sid, branch, p.pr); removed++; }
-    else if (p.status !== 'skipped') db.event(sid, `#${p.pr} is no longer decided "backport" but is already ${p.status}; reset it by hand if it must go`, { branch, level: 'warn' });
+    else if (COMMITTED.includes(p.status) && !p.detail.unwantedNoted) {
+      setPick(sid, branch, p.pr, { detail: { ...p.detail, unwantedNoted: true } });
+      db.event(sid, `#${p.pr} is no longer decided "backport" but is already ${p.status}; drop it or keep it under Decisions needed`, { branch, level: 'attention' });
+    }
   }
+  // Picks added while picking go in at their master position (pickNext rebuilds the lane if needed).
+  // After picking finished they wait for a decision: rebuilding restarts verification and CI.
+  if (added && ['needs-attention', 'picked'].includes(l.phase)) db.updateLane(sid, branch, { phase: 'picking', attention: null });
+  else if (added && POST_PICK.includes(l.phase)) attention(sid, branch, `${added} PR(s) were added after picking finished; decide under Decisions needed how they go in`);
   return { added, removed, total: picks(sid, branch).length };
 }
 
@@ -107,10 +119,22 @@ export function unmetDeps(sid, branch, pick) {
 export function pickNext(sid, branch) {
   const s = db.session(sid); const cfg = s.config; const l = db.lane(sid, branch);
   const dir = l.worktree;
+  let list = picks(sid, branch);
+  // Master commit order is the rule: a pick that belongs before commits already in the lane (a dependency
+  // accepted late, a decision changed while backporting) rebuilds the lane from that point, unless the user
+  // approved putting it on top.
+  const first = list.find((p) => p.status === 'pending');
+  if (first && !first.detail.outOfOrder) {
+    const later = list.filter((p) => p.seq > first.seq && [...COMMITTED, 'conflict', 'blocked'].includes(p.status));
+    if (later.length) {
+      const r = rewind(sid, branch, { before: first.seq, reason: `#${first.pr} goes before ${later.map((p) => `#${p.pr}`).join(', ')} in master order` });
+      return { status: 'rewound', pr: first.pr, replay: r.replayed };
+    }
+  }
   const st = g.state(dir);
   if (st.cherryPicking || st.rebasing) return { status: 'in-progress', head: st.head };
   if (st.dirty) { attention(sid, branch, 'The lane worktree has uncommitted changes; commit or discard them before picking continues'); return { status: 'dirty' }; }
-  const list = picks(sid, branch);
+  list = picks(sid, branch);
   const stuck = list.find((p) => ['conflict', 'needs-fix', 'blocked'].includes(p.status));
   if (stuck) { db.updateLane(sid, branch, { phase: 'needs-attention' }); return { status: stuck.status, pr: stuck.pr }; }
   const next = list.find((p) => p.status === 'pending');
@@ -119,10 +143,11 @@ export function pickNext(sid, branch) {
     db.event(sid, `All ${list.filter((p) => p.status === 'picked').length} picks applied; ready for build verification`, { branch });
     return { status: 'done' };
   }
-  const detail = { ...next.detail };
+  const detail = { ...next.detail, startHead: st.head };
   // Re-run the dependency analysis against this lane: a dependency may have surfaced only now
   // (a skip decision, a branch-specific gap, or a dependency on another pick of this batch).
-  if (!detail.reused) {
+  // A replayed pick (the lane was rebuilt) was analysed when it was first picked.
+  if (!detail.reused && !detail.replay) {
     const item = db.get('SELECT * FROM items WHERE session_id = ? AND pr = ?', sid, next.pr);
     const all = db.all('SELECT pr, sha, master_order FROM items WHERE session_id = ?', sid);
     const r = remote(cfg); const branchRef = `${r}/${branch}`;
@@ -142,7 +167,8 @@ export function pickNext(sid, branch) {
     return { status: 'blocked', pr: next.pr, unmet: detail.unmet };
   }
   if (unmet.length) detail.warnings = unmet.map((d) => `applies cleanly although it builds on #${d.depends_on} (${d.detail})`);
-  const res = g.cherryPick(dir, next.source_sha, { trailer: !detail.reused });
+  // A replayed pick is the lane's earlier commit (resolution included) followed by its fixups.
+  const res = g.cherryPick(dir, [next.source_sha, ...(detail.extras || [])], { trailer: !detail.reused && !detail.replay });
   if (res.empty) {
     setPick(sid, branch, next.pr, { status: 'empty', detail: { ...detail, note: 'the change is already on the branch' } });
     db.event(sid, `#${next.pr} is already on the branch (empty cherry-pick), skipped`, { branch, level: 'warn' });
@@ -158,15 +184,183 @@ export function pickNext(sid, branch) {
   }
   const check = runCheck(dir, next.detail.master || next.source_sha);
   detail.check = check;
-  setPick(sid, branch, next.pr, { status: check.ok ? 'picked' : 'needs-fix', picked_sha: res.sha, detail });
+  const pickedSha = detail.extras?.length ? pickCommit(dir, st.head, next) : res.sha;
+  setPick(sid, branch, next.pr, { status: check.ok ? 'picked' : 'needs-fix', picked_sha: pickedSha, detail });
   db.updateLane(sid, branch, { head_sha: res.sha });
   if (!check.ok) {
     db.updateLane(sid, branch, { phase: 'needs-attention' });
     attention(sid, branch, `#${next.pr} applied, but the post-pick check found leftover slog, markers or unguarded debug logging`);
     return { status: 'needs-fix', pr: next.pr };
   }
-  db.event(sid, `#${next.pr} picked as ${g.short(res.sha)}${detail.warnings ? ` (${detail.warnings.length} dependency warning(s))` : ''}`, { branch });
-  return { status: 'picked', pr: next.pr, sha: res.sha, warnings: detail.warnings };
+  db.event(sid, `#${next.pr} ${detail.replay ? 're-applied' : 'picked'} as ${g.short(pickedSha)}${detail.warnings ? ` (${detail.warnings.length} dependency warning(s))` : ''}`, { branch });
+  return { status: 'picked', pr: next.pr, sha: pickedSha, warnings: detail.warnings };
+}
+
+/** The commit of `pick` among from..HEAD (its fixups may follow it). */
+function pickCommit(dir, from, pick) {
+  const master = pick.detail.master || pick.source_sha;
+  for (const c of g.git(dir, ['log', '--format=%H%x1f%B%x1e', `${from}..HEAD`]).split('\x1e')) {
+    const [sha, body] = c.trim().split('\x1f');
+    if (sha && body && !/^(fixup|squash|amend)! /.test(body) && (body.includes(master) || body.split('\n')[0].includes(`(#${pick.pr})`))) return sha;
+  }
+  return null;
+}
+
+/** The lane's commits from its base, each mapped to its pick (by the cherry-pick trailer, else the PR number). */
+function laneCommits(sid, branch) {
+  const l = db.lane(sid, branch); const list = picks(sid, branch);
+  const byMaster = new Map(list.map((p) => [p.detail.master || p.source_sha, p]));
+  const byPr = new Map(list.map((p) => [p.pr, p]));
+  const out = [];
+  for (const line of g.git(l.worktree, ['log', '--reverse', '--format=%H%x1f%B%x1e', `${l.base_sha}..HEAD`]).split('\x1e')) {
+    const [sha, body = ''] = line.trim().split('\x1f'); if (!sha) continue;
+    const subject = body.split('\n')[0];
+    const fixup = /^(fixup|squash|amend)! /.test(subject);
+    const m = body.match(/cherry picked from commit ([0-9a-f]{40})/g);
+    const pm = subject.match(g.PR_RE);
+    const pick = fixup ? null : (m && byMaster.get(m.at(-1).slice(-40))) || (pm && byPr.get(Number(pm[1]))) || null;
+    out.push({ sha, subject, fixup, pick });
+  }
+  return out;
+}
+
+/** Bookkeeping for a test branch that can no longer be fast-forwarded: the next push opens a new round. */
+function retireTest(l, reason) {
+  if (!l.test_branch) return { ...l.ci, test: undefined, squash: undefined, rebase: undefined };
+  return { round: (l.ci.round || 1) + 1, retired: [...(l.ci.retired || []), { branch: l.test_branch, pr: l.test_pr, reason }] };
+}
+
+/** Close the test PRs of earlier rounds and delete their branches (test branches only, never a release branch). */
+export function closeRetired(sid, branch) {
+  const cfg = db.session(sid).config; const l = db.lane(sid, branch);
+  const left = [];
+  for (const t of l.ci.retired || []) {
+    try {
+      if (t.pr) gh.closePr(t.pr, `Superseded: ${t.reason || 'the backport batch was rebuilt'}. The rebuilt batch is tested in a new PR.`);
+      g.git(cfg.repo, ['push', remote(cfg), '--delete', t.branch], { allowFail: true });
+      db.event(sid, `Closed the earlier test PR${t.pr ? ` #${t.pr}` : ''} and deleted ${t.branch}`, { branch });
+    } catch (e) { left.push(t); db.event(sid, `Could not close the earlier test PR #${t.pr}: ${e.message}`, { branch, level: 'warn' }); }
+  }
+  if ((l.ci.retired || []).length) db.updateLane(sid, branch, { ci: { ...l.ci, retired: left } });
+}
+
+/**
+ * Rebuild the lane from the first commit that has to change: `drop` removes picks, `before` lets a pick that was
+ * added late go in at its master position (every pick with a later master position is replayed after it).
+ * Replayed picks are re-applied from their lane commits, so conflict resolutions are kept, and fixups ride along
+ * with the pick they follow; fixups of a dropped pick go with it. Local only: a pushed test branch cannot be
+ * rewritten (no force-push), so it is retired and the next push opens a new test PR.
+ */
+export function rewind(sid, branch, { drop = [], before = null, reason = '' } = {}) {
+  const l = db.lane(sid, branch);
+  if (PUSHED.includes(l.phase)) throw new Error(`${branch} is already pushed to the real branch; a change now needs a new commit on top`);
+  if (l.phase === 'not-started' || !l.worktree) throw new Error(`the ${branch} lane has not started`);
+  const dir = l.worktree;
+  let st = g.state(dir);
+  if (st.rebasing) throw new Error('a rebase is in progress in the lane worktree; finish or abort it first');
+  if (st.cherryPicking) g.git(dir, ['cherry-pick', '--abort'], { allowFail: true });
+  st = g.state(dir);
+  if (st.dirty) throw new Error('the lane worktree has uncommitted changes; commit or discard them first');
+  const dropSet = new Set(drop.map(Number));
+  const commits = laneCommits(sid, branch);
+  const cut = commits.findIndex((c) => c.pick && (dropSet.has(c.pick.pr) || (before != null && c.pick.seq > before)));
+  const replayed = []; const dropped = [];
+  if (cut >= 0) {
+    const target = (c) => { const ref = c.subject.replace(/^(fixup|squash|amend)! /, ''); return commits.find((x) => x.pick && (x.sha.startsWith(ref) || x.subject === ref)) || null; };
+    // Every other commit keeps its place: it rides with the nearest kept pick before it (fixups usually sit at the
+    // top of the lane, so they stay last and autosquash moves them later). A fixup of a dropped pick goes with it.
+    const groups = []; const orphans = [];
+    for (const c of commits.slice(cut)) {
+      if (c.pick) { groups.push({ pick: c.pick, shas: [c.sha] }); continue; }
+      if (c.fixup && dropSet.has(target(c)?.pick?.pr)) continue;
+      const owner = groups.findLast((x) => !dropSet.has(x.pick.pr));
+      if (owner) owner.shas.push(c.sha); else orphans.push(c.sha);
+    }
+    const head0 = st.head;
+    g.git(dir, ['reset', '--quiet', '--hard', cut === 0 ? l.base_sha : commits[cut - 1].sha]);
+    // Commits with no kept pick before them (a fixup of an earlier pick after only dropped ones) go right back on.
+    if (orphans.length) {
+      const rr = g.cherryPick(dir, orphans, { trailer: false });
+      if (!rr.ok) {
+        g.git(dir, ['cherry-pick', '--abort'], { allowFail: true }); g.git(dir, ['reset', '--quiet', '--hard', head0]);
+        throw new Error(`cannot rebuild the lane: ${orphans.map(g.short).join(', ')} no longer applies${rr.empty ? ' (empty)' : ''} once ${[...dropSet].map((x) => `#${x}`).join(', ')} is dropped; restored ${g.short(head0)}`);
+      }
+    }
+    for (const { pick: p, shas } of groups) {
+      if (dropSet.has(p.pr)) continue;
+      const { check, conflicts, conflictDeps, error, unmet, startHead, ...keep } = p.detail;
+      setPick(sid, branch, p.pr, { status: 'pending', picked_sha: null, source_sha: shas[0], detail: { ...keep, replay: true, extras: shas.slice(1) } });
+      replayed.push(p.pr);
+    }
+  }
+  // Picks that were not committed: a stopped cherry-pick or a blocked pick is tried again.
+  for (const p of picks(sid, branch)) {
+    if (!['conflict', 'blocked'].includes(p.status) || dropSet.has(p.pr)) continue;
+    const { conflicts, conflictDeps, error, unmet, ...keep } = p.detail;
+    setPick(sid, branch, p.pr, { status: 'pending', detail: keep });
+  }
+  for (const pr of dropSet) {
+    const p = picks(sid, branch).find((x) => x.pr === pr); if (!p) continue;
+    setPick(sid, branch, pr, { status: 'skipped', picked_sha: null, detail: { ...p.detail, reason: reason || 'dropped while backporting', dropped: true } });
+    db.run(`UPDATE targets SET decision = 'skip', decision_source = 'user', decision_note = ?, decided_at = ? WHERE session_id = ? AND pr = ? AND branch = ?`,
+      `dropped while backporting${reason ? `: ${reason}` : ''}`, db.now(), sid, pr, branch);
+    dropped.push(pr);
+  }
+  const head = g.rev(dir, 'HEAD');
+  const rebuilt = cut >= 0;
+  db.updateLane(sid, branch, { phase: 'picking', head_sha: head, squashed_sha: null, attention: null,
+    ...(rebuilt ? { ci: retireTest(l, reason), test_branch: null, test_pr: null, test_pr_url: null } : {}) });
+  db.event(sid, `Lane rebuilt from ${rebuilt ? g.short(commits[cut].sha) : 'its head'}${dropped.length ? `; dropped ${dropped.map((x) => `#${x}`).join(', ')}` : ''}${replayed.length ? `; re-applying ${replayed.map((x) => `#${x}`).join(', ')}` : ''}${reason ? ` (${reason})` : ''}`,
+    { branch, level: 'warn' });
+  if (rebuilt && l.test_branch) db.event(sid, `${l.test_branch} cannot be fast-forwarded any more; the next test push opens a new PR`, { branch });
+  const reusing = db.all(`SELECT branch FROM lanes WHERE session_id = ? AND reuse_from = ? AND phase != 'not-started'`, sid, branch);
+  if (rebuilt && reusing.length) db.event(sid, `${reusing.map((x) => x.branch).join(', ')} already reuses the earlier ${branch} commits; reset ${reusing.length > 1 ? 'those lanes' : 'that lane'} to pick up the rebuilt batch`, { branch, level: 'attention' });
+  return { dropped, replayed, head };
+}
+
+/** Remove a pick from the lane. A committed pick rebuilds the lane from it; the decision becomes "skip". */
+export function dropPick(sid, branch, pr, reason) {
+  const p = picks(sid, branch).find((x) => x.pr === pr);
+  if (!p) throw new Error(`#${pr} is not a pick of ${branch}`);
+  if (COMMITTED.includes(p.status)) return rewind(sid, branch, { drop: [pr], reason: reason || `#${pr} dropped` });
+  skipPick(sid, branch, pr, reason || 'dropped while backporting');
+  return { dropped: [pr], replayed: [] };
+}
+
+/** Let a pending pick go on top of the lane although later master commits are already in it. */
+export function pickOutOfOrder(sid, branch, pr, reason) {
+  const p = picks(sid, branch).find((x) => x.pr === pr);
+  if (!p || p.status !== 'pending') throw new Error(`#${pr} is not a pending pick of ${branch}`);
+  if (!reason) throw new Error('say why it should not go in master order');
+  setPick(sid, branch, pr, { detail: { ...p.detail, outOfOrder: reason } });
+  db.updateLane(sid, branch, { phase: 'picking', attention: null });
+  db.event(sid, `#${pr} goes on top, out of master order: ${reason}`, { branch, level: 'warn' });
+}
+
+/** Put the lane's pending picks in at their master position, rebuilding it if later commits are already in. */
+export function placeInOrder(sid, branch) {
+  const l = db.lane(sid, branch); const list = picks(sid, branch);
+  const pending = list.filter((p) => p.status === 'pending' && !p.detail.outOfOrder);
+  if (!pending.length) return null;
+  const first = Math.min(...pending.map((p) => p.seq));
+  if (list.some((p) => p.seq > first && COMMITTED.includes(p.status))) return rewind(sid, branch, { before: first, reason: `${pending.map((p) => `#${p.pr}`).join(', ')} added in master order` });
+  if (l.phase !== 'picking') db.updateLane(sid, branch, { phase: 'picking', attention: null });
+  return { dropped: [], replayed: [] };
+}
+
+/**
+ * What keeps a lane past picking from moving on: picks added after picking finished, and committed picks whose
+ * decision is no longer "backport". Autopilot waits and finalize refuses while any are open.
+ */
+export function holds(sid, branch) {
+  const l = db.lane(sid, branch); const list = picks(sid, branch); const out = [];
+  if (l.phase === 'not-started' || PUSHED.includes(l.phase)) return out;
+  const committedMax = Math.max(-Infinity, ...list.filter((p) => COMMITTED.includes(p.status)).map((p) => p.seq));
+  if (POST_PICK.includes(l.phase)) for (const p of list.filter((x) => x.status === 'pending')) out.push({ kind: 'added', pr: p.pr, inOrder: p.seq > committedMax });
+  const unwanted = db.all(`SELECT p.pr FROM picks p JOIN targets t ON t.session_id = p.session_id AND t.pr = p.pr AND t.branch = p.branch
+     WHERE p.session_id = ? AND p.branch = ? AND p.status IN ('picked', 'needs-fix') AND t.decision != 'backport'`, sid, branch);
+  for (const u of unwanted) out.push({ kind: 'unwanted', pr: u.pr });
+  return out;
 }
 
 function awaitBlame(sid, repo, item, all, onB, branch) {
@@ -220,7 +414,7 @@ export function pickAll(sid, branch, { log = console.log, max = 1000 } = {}) {
     const r = pickNext(sid, branch);
     results.push(r);
     log(`${r.status}${r.pr ? ` #${r.pr}` : ''}${r.sha ? ` ${g.short(r.sha)}` : ''}`);
-    if (!['picked', 'empty'].includes(r.status)) return { last: r, results };
+    if (!['picked', 'empty', 'rewound'].includes(r.status)) return { last: r, results };
   }
   return { last: results.at(-1), results };
 }
@@ -232,12 +426,14 @@ export function markResolved(sid, branch, pr) {
   const st = g.state(l.worktree);
   if (st.cherryPicking || st.rebasing) throw new Error('a cherry-pick or rebase is still in progress; finish it with git cherry-pick --continue first');
   if (st.dirty) throw new Error('uncommitted changes in the lane worktree');
-  const msg = g.git(l.worktree, ['log', '-1', '--format=%B', 'HEAD']);
   const master = p.detail.master || p.source_sha;
-  if (!msg.includes(master) && !msg.includes(`(#${pr})`)) throw new Error(`HEAD ${g.short(st.head)} does not look like the pick of #${pr} (no trailer or PR number)`);
+  // A replayed pick may be followed by its fixups: the pick's own commit is somewhere after the head it started from.
+  const own = p.detail.startHead && p.detail.startHead !== st.head && g.isAncestor(l.worktree, p.detail.startHead, st.head) ? pickCommit(l.worktree, p.detail.startHead, p) : null;
+  const msg = g.git(l.worktree, ['log', '-1', '--format=%B', 'HEAD']);
+  if (!own && !msg.includes(master) && !msg.includes(`(#${pr})`)) throw new Error(`HEAD ${g.short(st.head)} does not look like the pick of #${pr} (no trailer or PR number)`);
   const check = runCheck(l.worktree, master);
   const detail = { ...p.detail, check, resolvedAt: db.now() };
-  setPick(sid, branch, pr, { status: 'picked', picked_sha: st.head, detail });
+  setPick(sid, branch, pr, { status: 'picked', picked_sha: own || st.head, detail });
   db.updateLane(sid, branch, { head_sha: st.head, phase: 'picking', attention: null });
   db.event(sid, `#${pr} resolved as ${g.short(st.head)}${check.ok ? '' : ' (check-pick still reports findings)'}`, { branch });
   return { ok: true, check };
@@ -246,16 +442,14 @@ export function markResolved(sid, branch, pr) {
 export function skipPick(sid, branch, pr, reason) {
   const l = db.lane(sid, branch); const p = picks(sid, branch).find((x) => x.pr === pr);
   if (!p) throw new Error(`#${pr} is not a pick of ${branch}`);
-  if (['picked', 'needs-fix'].includes(p.status)) throw new Error(`#${pr} is already committed (${g.short(p.picked_sha)}); drop it with an interactive rebase by hand or reset the lane`);
-  const st = g.state(l.worktree);
-  if (st.cherryPicking) {
-    const cph = g.git(l.worktree, ['rev-parse', 'CHERRY_PICK_HEAD'], { allowFail: true }).out;
-    if (cph === p.source_sha) g.git(l.worktree, ['cherry-pick', '--abort']);
-  }
+  if (COMMITTED.includes(p.status)) throw new Error(`#${pr} is already committed (${g.short(p.picked_sha)}); drop it instead (the lane is rebuilt from it)`);
+  if (l.worktree && p.status === 'conflict' && g.state(l.worktree).cherryPicking) g.git(l.worktree, ['cherry-pick', '--abort']);
   setPick(sid, branch, pr, { status: 'skipped', detail: { ...p.detail, reason } });
   db.run(`UPDATE targets SET decision = 'skip', decision_source = 'user', decision_note = ?, decided_at = ? WHERE session_id = ? AND pr = ? AND branch = ?`,
     `skipped while backporting: ${reason}`, db.now(), sid, pr, branch);
-  db.updateLane(sid, branch, { phase: 'picking', attention: null });
+  // Leaving out a PR added after picking finished changes nothing that was built or tested.
+  if (!POST_PICK.includes(l.phase) || p.status !== 'pending') db.updateLane(sid, branch, { phase: 'picking', attention: null });
+  else if (!holds(sid, branch).length) db.updateLane(sid, branch, { attention: null });
   db.event(sid, `#${pr} skipped: ${reason}`, { branch, level: 'warn' });
 }
 
@@ -305,8 +499,9 @@ Fixes for CI failures are added as \`fixup!\` commits and squashed into the matc
 
 /** Push the lane to its test branch on apache/pulsar (never forced) and open or reuse the test PR. */
 export function pushTest(sid, branch) {
+  closeRetired(sid, branch);
   const s = db.session(sid); const cfg = s.config; const l = db.lane(sid, branch); const r = remote(cfg);
-  const tb = l.test_branch || testBranchName(cfg, sid, branch);
+  const tb = l.test_branch || testBranchName(cfg, sid, branch, l.ci.round || 1);
   const head = g.rev(l.worktree, 'HEAD');
   const remoteHead = g.git(cfg.repo, ['ls-remote', r, `refs/heads/${tb}`]).split(/\s/)[0];
   if (remoteHead && remoteHead !== head) {
@@ -374,14 +569,9 @@ export function squash(sid, branch) {
   }
   const after = g.rev(dir, 'HEAD');
   // Map the final commits back to their picks.
-  const list = picks(sid, branch); const byMaster = new Map(list.map((p) => [p.detail.master || p.source_sha, p]));
   const extra = [];
-  for (const line of g.git(dir, ['log', '--reverse', '--format=%H%x1f%B%x1e', `${l.base_sha}..HEAD`]).split('\x1e')) {
-    const [sha, body] = line.trim().split('\x1f'); if (!sha) continue;
-    const m = (body || '').match(/cherry picked from commit ([0-9a-f]{40})/g);
-    const src = m ? m.at(-1).slice(-40) : null;
-    const p = src && byMaster.get(src);
-    if (p) setPick(sid, branch, p.pr, { picked_sha: sha }); else extra.push({ sha, subject: body.split('\n')[0] });
+  for (const c of laneCommits(sid, branch)) {
+    if (c.pick) setPick(sid, branch, c.pick.pr, { picked_sha: c.sha }); else extra.push({ sha: c.sha, subject: c.subject });
   }
   const ci = { ...l.ci, squash: { tested: before, squashed: after, extra } };
   db.updateLane(sid, branch, { squashed_sha: after, head_sha: after, phase: 'ready', ci,
@@ -397,6 +587,8 @@ export function squash(sid, branch) {
 export function finalize(sid, branch, { allowRebase = false } = {}) {
   const s = db.session(sid); const cfg = s.config; const l = db.lane(sid, branch); const r = remote(cfg);
   if (l.phase !== 'ready') throw new Error(`lane is ${l.phase}; finalize needs "ready"`);
+  const open = holds(sid, branch);
+  if (open.length) throw new Error(`decisions are open for ${open.map((x) => `#${x.pr}`).join(', ')}; settle them under Decisions needed first`);
   g.fetch(cfg.repo, r, [branch]);
   const target = g.rev(cfg.repo, `${r}/${branch}`);
   let head = l.squashed_sha;
@@ -477,12 +669,62 @@ export function setDep(sid, id, status) {
 export function lanePicks(sid, branch) { return picks(sid, branch); }
 
 /** Remove the lane's worktree and local branch and forget its picks. The remote test branch is left alone. */
-export function resetLane(sid, branch) {
+export function resetLane(sid, branch, reason = 'the lane was reset') {
   const s = db.session(sid); const l = db.lane(sid, branch);
   if (['final-ci', 'final-ci-failed', 'done'].includes(l.phase)) throw new Error('the lane was already pushed to the real branch');
   if (l.worktree && fs.existsSync(l.worktree)) g.git(s.config.repo, ['worktree', 'remove', '--force', l.worktree], { allowFail: true });
   if (l.local_branch) g.git(s.config.repo, ['branch', '-D', l.local_branch], { allowFail: true });
   db.run('DELETE FROM picks WHERE session_id = ? AND branch = ?', sid, branch);
-  db.updateLane(sid, branch, { phase: 'not-started', worktree: null, local_branch: null, base_sha: null, head_sha: null, squashed_sha: null, attention: null, ci: {} });
-  db.event(sid, 'Lane reset', { branch, level: 'warn' });
+  // The pushed test branch stays until the next push (or an abort) closes it; the next round gets a new one.
+  const { round, retired } = retireTest(l, reason);
+  db.updateLane(sid, branch, { phase: 'not-started', worktree: null, local_branch: null, base_sha: null, head_sha: null, squashed_sha: null, attention: null,
+    test_branch: null, test_pr: null, test_pr_url: null, ci: { round, retired } });
+  db.event(sid, `Lane reset: ${reason}`, { branch, level: 'warn' });
+}
+
+/**
+ * Abort backporting to revisit the decisions: every lane that has not reached the real branch is reset (jobs
+ * cancelled, worktree removed, test PR closed) and the session returns to planning. Start backporting again later.
+ */
+export function abortBackport(sid, { reason = 'backporting was aborted to revisit the decisions', cancel = () => {} } = {}) {
+  db.run(`UPDATE sessions SET status = 'planning', updated_at = ? WHERE id = ?`, db.now(), sid);
+  saveConfig(sid, { autopilot: false });
+  const out = { reset: [], kept: [] };
+  for (const { branch, phase } of db.all('SELECT branch, phase FROM lanes WHERE session_id = ? ORDER BY seq DESC', sid)) {
+    if (PUSHED.includes(phase)) { out.kept.push(branch); continue; }
+    for (const j of db.all(`SELECT id FROM jobs WHERE session_id = ? AND branch = ? AND status IN ('queued', 'running', 'waiting')`, sid, branch)) cancel(j.id);
+    if (phase !== 'not-started') resetLane(sid, branch, reason);
+    closeRetired(sid, branch);
+    out.reset.push(branch);
+  }
+  db.event(sid, `Backporting aborted: ${out.reset.length ? `reset ${out.reset.join(', ')}` : 'nothing to reset'}${out.kept.length ? `; ${out.kept.join(', ')} already pushed, kept` : ''}. Revisit the plan and start again`, { level: 'attention' });
+  return out;
+}
+
+/**
+ * The user (or a worker's proposal the user approved) says `pr` needs `dep` on this branch: record it, bring the
+ * dependency into the plan if it merged before the range, decide it "backport" and put it in at its master
+ * position. A lane past picking is rebuilt right away; that is what the approval was for.
+ */
+export function addDependency(sid, branch, pr, dep, detail = 'added while backporting') {
+  if (pr === dep) throw new Error('a PR cannot depend on itself');
+  db.run(`INSERT OR IGNORE INTO deps (session_id, pr, depends_on, branch, source, detail, phase, created_at) VALUES (?,?,?,?,?,?,?,?)`,
+    sid, pr, dep, branch, 'manual', detail, 'backport', db.now());
+  const d = db.get(`SELECT id FROM deps WHERE session_id = ? AND pr = ? AND depends_on = ? AND IFNULL(branch, '') = IFNULL(?, '') AND source = 'manual'`, sid, pr, dep, branch);
+  const pulled = pullInDependencies(sid);
+  if (pulled.missing.includes(dep)) throw new Error(`#${dep} is not a merged master PR`);
+  setDep(sid, d.id, 'accepted');
+  const t = db.get('SELECT on_branch FROM targets WHERE session_id = ? AND pr = ? AND branch = ?', sid, dep, branch);
+  const l = db.lane(sid, branch);
+  const rebuilt = POST_PICK.includes(l.phase) ? placeInOrder(sid, branch) : null;
+  return { pulledIn: pulled.added, onBranch: !!t?.on_branch, rebuilt };
+}
+
+/** Accept recorded dependencies on this lane; one merged before the plan's range joins the plan first. */
+export function acceptDeps(sid, branch, ids) {
+  for (const id of ids) setDep(sid, id, 'accepted');
+  const pulled = pullInDependencies(sid);
+  if (pulled.added.length) syncPicks(sid, branch);
+  const l = db.lane(sid, branch);
+  return { pulledIn: pulled.added, rebuilt: POST_PICK.includes(l.phase) ? placeInOrder(sid, branch) : null };
 }

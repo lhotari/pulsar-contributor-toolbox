@@ -71,11 +71,17 @@ node "$BPT" job fail <job> --reason "why it cannot be done"
 node "$BPT" job ask  <job> --question "the decision only the user can make"
 ```
 
-`job ask` is right when the fix needs a product decision, a dependency the user hasn't approved, or a non-mechanical rewrite. The user answers in the UI and your session is resumed with the answer.
+`job ask` is right when the fix needs a product decision, a dependency the user hasn't approved, or a non-mechanical rewrite. Add `--propose` with the actions you recommend (recommended first), so the user approves one with a click instead of typing an answer:
+
+```bash
+node "$BPT" job ask <job> --question "#27214 calls ManagedLedgerConfig#getFoo, added by #26925" --propose dep:27214:26925,drop:27214
+```
+
+Proposals: `dep:<pr>:<dependency>` (backport the dependency first, in master order), `drop:<pr>` (leave the pick out; the lane is rebuilt without it), `rerun`, `reset`. An approved proposal finishes your job; a typed reply resumes your session with it.
 
 ### resolve (`conflict` or `needs-fix` pick)
 Follow the **pulsar-cherry-pick** skill's per-commit loop for this one commit: read the source commit, resolve with zdiff3 (take the commit's logic, re-skin to the branch: slf4j, Maven, Java 8 on 4.0 client modules), run `scripts/check-pick.sh <master-sha>` from that skill, compile the module (`./mvnw -q -pl <module> test-compile …`; install shared modules first), run the commit's changed test methods. Then `git add` and `git -c core.editor=true cherry-pick --continue` (for `needs-fix`: `git commit --amend --no-edit`), and `node "$BPT" lane resolved <session> <branch> <pr>`.
-If the conflict shows the pick needs an earlier PR (the conflict hints list candidates): `node "$BPT" dep add <session> <pr> <dep> --branch <branch> --detail "<symbol/file it needs>"`, `git cherry-pick --abort`, and `job ask` with the recommendation. Do not pull in other PRs on your own.
+If the conflict shows the pick needs an earlier PR (the conflict hints list candidates, but it may also be a PR merged before the plan's range): leave the cherry-pick as it is and `job ask` with `--propose dep:<pr>:<dep>` and the symbol or file it needs in the question. Do not pull in other PRs on your own; the engine adds the approved dependency in master order.
 
 ### verify (all picks applied)
 `ctx.modules` lists the touched modules. Build them (`./mvnw -q -T 1C -pl <modules> -am install -DskipTests -Dspotbugs.skip=true -Dcheckstyle.skip=true -Dlicense.skip=true` once, then `test-compile`), and run the added/modified test methods of each pick (`git show <picked> --stat`; `-Dtest='Class#m1+m2'`). Fix problems with `git commit --fixup=<picked sha>` so they squash into the right pick later. Run checkstyle on touched modules (branch-4.2 needs `initialize`: `./mvnw -pl <m> initialize checkstyle:check`). When green: `node "$BPT" lane phase <session> <branch> verified`, then `job done`.
@@ -84,19 +90,42 @@ If the conflict shows the pick needs an earlier PR (the conflict hints list cand
 `ctx.lane.ci.<kind>.failed` lists failed checks with links. Use the **investigate-ci** skill. Decide per failure:
 - **Flaky or pre-existing** (fails on the branch without these picks, known flaky, infrastructure): `node "$BPT" ci rerun <session> <branch>`.
 - **Caused by a pick**: reproduce locally in the lane worktree, fix, run the affected tests. Test lane: `git commit --fixup=<that pick's sha>` then `node "$BPT" lane phase <session> <branch> verified` (the engine pushes). Final lane: a normal commit on top of HEAD with a `[fix][<component>]` subject; the user pushes it from the UI.
-- **A pick is wrong for this branch and cannot be adapted**: `job ask` recommending to skip it (the user resets or skips).
+- **A pick is wrong for this branch and cannot be adapted**: `job ask` with `--propose drop:<pr>`; approved, the lane is rebuilt without it and tested again.
+- **A pick needs another PR**: `job ask` with `--propose dep:<pr>:<dep>`.
 Finish with `job done` summarising each failure and what you did.
 
 ### triage
 Follow the pulsar-backport-plan skill's *Triage* section for the session.
+
+## Changing course while backporting
+
+Decisions made during planning can turn out wrong, and dependencies show up only when the picks meet the branch. Nothing has to be fixed by hand: the UI's **Decisions needed** panel (and `node "$BPT" decisions <id>`) lists every point where the backport waits for the user, each with the options that carry it on (the recommended one first). Autopilot stops at each one.
+
+| Situation | Options |
+|---|---|
+| A pick is blocked on a dependency | backport the dependency first · pick without it · leave the pick out |
+| A pick conflicts or fails the post-pick check | resolve with Claude (again, with instructions) · backport a conflict hint first · I resolved it · leave it out |
+| A worker asks (`job ask`) | its proposals · reply · cancel the job |
+| A PR was decided "backport" after picking finished | re-pick in master order · pick on top, out of order (needs a reason) · leave it out |
+| A picked PR is no longer decided "backport" | drop it · keep it |
+| Verification failed twice, CI still fails after a fix | try again with instructions · mark verified / re-run |
+| A lane is tested and squashed | Finalize |
+
+**Master commit order is the rule.** A pick that belongs before commits already in the lane (a dependency accepted late, a decision changed mid-way) makes the engine *rebuild* the lane from that point: it resets the lane to the commit before the first affected pick and re-applies the later picks from their lane commits, so conflict resolutions and `fixup!` commits are kept. While picking, this happens automatically; after picking finished it is the recommended option of a decision, because verification and test CI start over. Only an explicit "pick on top" with a reason deviates from master order. Make fixups with `git commit --fixup=<sha>` (subject form), which survive a rebuild.
+
+Other controls:
+- **Drop** (picks tab, `lane drop`): removes any pick, also one already committed; the lane is rebuilt without it and its fixups, and its decision becomes "skip".
+- **Add dependency…** (picks tab, `lane add-dep <id> <branch> <pr> <dep>`): another PR is needed first. A PR merged before the plan's range joins the plan; it is decided "backport" and goes in at its master position.
+- A rebuilt lane can no longer fast-forward its pushed test branch, and the engine never force-pushes: the next test push opens round 2 (`<test-branch>-r2`) and closes the superseded test PR. A lane that reuses a rebuilt lane keeps the old commits until it is reset (an event says so).
+- **Abort backporting…** (`abort <id>`): cancels the lanes' jobs, resets every lane not yet pushed to its real branch, closes their test PRs and returns the session to planning with its decisions kept. Revisit the plan and click Start backporting again. **Pause** (back to planning) only stops starting new work and keeps the lanes.
 
 ## Status and recovery
 
 - `node "$BPT" session show <id>` — lanes, phases, attention messages, test PRs.
 - `node "$BPT" lane show <id> <branch>` — every pick with its status and details.
 - `node "$BPT" job list --session <id>`, `job log <job>`.
-- A lane can be reset (`lane reset`, or the UI) any time before Finalize; it deletes the worktree and local branch and forgets the picks, the remote test branch stays.
-- Decisions changed while a lane runs: the UI syncs the pick list (pending picks drop out or are added; a PR added after later commits were picked is flagged as out of master order).
+- A lane can be reset (`lane reset`, or the UI) any time before Finalize; it deletes the worktree and local branch and forgets the picks. Its test PR is closed on the next push (or by an abort), which opens a new round.
+- Decisions changed while a lane runs: the pick list follows (pending picks drop out or are added in master order; committed picks and picks added after picking finished become Decisions needed).
 
 ## References
 

@@ -206,14 +206,17 @@ export function state(cwd) {
 }
 
 export function cherryPick(cwd, sha, { trailer = true } = {}) {
+  // One commit, or a commit followed by the commits that ride with it (fixups replayed with their pick).
+  // On a conflict git stops the sequence; `cherry-pick --continue` applies the rest.
+  const shas = [sha].flat();
   const args = ['cherry-pick'];
   if (trailer) args.push('-x');
-  const r = git(cwd, [...args, sha], { allowFail: true });
-  if (r.ok) return { ok: true, sha: rev(cwd, 'HEAD') };
-  const unmerged = git(cwd, ['diff', '--name-only', '--diff-filter=U']).split('\n').filter(Boolean);
-  if (!unmerged.length && /now empty|nothing to commit/.test(r.err + r.out)) {
-    git(cwd, ['cherry-pick', '--skip'], { allowFail: true });
-    return { ok: false, empty: true, conflicts: [] };
+  let r = git(cwd, [...args, ...shas], { allowFail: true });
+  for (let i = 0; !r.ok && i <= shas.length; i++) {
+    const unmerged = git(cwd, ['diff', '--name-only', '--diff-filter=U']).split('\n').filter(Boolean);
+    if (unmerged.length || !/now empty|nothing to commit/.test(r.err + r.out)) return { ok: false, conflicts: unmerged, error: r.err };
+    r = git(cwd, ['cherry-pick', '--skip'], { allowFail: true });
+    if (shas.length === 1) return { ok: false, empty: true, conflicts: [] };
   }
-  return { ok: false, conflicts: unmerged, error: r.err };
+  return r.ok ? { ok: true, sha: rev(cwd, 'HEAD') } : { ok: false, conflicts: [], error: r.err };
 }

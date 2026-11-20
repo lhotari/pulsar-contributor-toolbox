@@ -263,3 +263,77 @@ test('a dependency merged before the plan\'s range joins the plan and its group'
   plan.discover(sid, { log: () => {}, blame: false });
   assert.equal(plan.planView(sid).items.find((x) => x.pr === 110).targets['branch-4.2'].on_branch, 0);
 });
+
+test('while backporting: late picks go in master order, drops rebuild the lane, workers propose, abort resets', async () => {
+  const control = await import('../scripts/lib/control.mjs');
+  sh(repo, 'checkout', '-q', 'master'); sh(repo, 'pull', '-q', 'origin', 'master');
+  edit('Foo.java', 8, 'line 8 fixed'); commit('[fix][broker] Fix line eight (#114)');
+  edit('Bar.java', 3, 'line 3 fixed'); commit('[fix][broker] Fix line three (#115)');
+  sh(repo, 'push', '-q', 'origin', 'master');
+  const sid = 'control-session'; const B = 'branch-4.2';
+  plan.createSession({ id: sid, repo, remote: 'origin', sincePr: 111, branches: plan.parseBranches('branch-4.2:4.2.7') });
+  plan.discover(sid, { log: () => {}, blame: false });
+  plan.setDecisions(sid, [[112, 'skip'], [113, 'backport'], [114, 'backport'], [115, 'backport']].map(([pr, decision]) => ({ pr, branch: B, decision })));
+  db.run(`UPDATE sessions SET status = 'backporting' WHERE id = ?`, sid);
+  lane.startLane(sid, B, { log: () => {} });
+  assert.equal(lane.pickAll(sid, B, { log: () => {} }).last.status, 'done');
+  const wt = lane.worktreeDir(sid, B);
+  const subjects = () => sh(wt, 'log', '--format=%s', `origin/${B}..HEAD`).split('\n').map((x) => x.replace('[fix][broker] ', ''));
+  const pick = (pr) => lane.lanePicks(sid, B).find((p) => p.pr === pr);
+  // A verify fix for #113, then the test PR.
+  edit2(wt, 'Foo.java', 6, 'line 6 other, adapted'); sh(wt, 'commit', '-qam', 'x', `--fixup=${pick(113).picked_sha}`);
+  lane.setPhase(sid, B, 'verified'); lane.pushTest(sid, B);
+  const firstTest = db.lane(sid, B).test_branch;
+
+  // #112 is decided "backport" while CI runs: it belongs before #113, so the lane waits for a decision.
+  plan.setDecisions(sid, [{ pr: 112, branch: B, decision: 'backport' }]); lane.syncPicks(sid, B);
+  const added = control.list(sid).find((d) => d.key === `added:${B}:112`);
+  assert.deepEqual(added.options.map((o) => o.id), ['repick', 'on-top', 'skip']);
+  assert.ok(autopilot.advance(sid).some((s) => /waits for a decision on #112/.test(s.note)));
+  // Re-pick in master order: #113..#115 are re-applied after #112, the fixup rides with #113, the test branch is retired.
+  assert.deepEqual(control.apply(sid, added.key, 'repick').replayed, [113, 114, 115]);
+  assert.equal(db.lane(sid, B).phase, 'picking'); assert.equal(db.lane(sid, B).test_branch, null); assert.equal(db.lane(sid, B).ci.round, 2);
+  const r = lane.pickAll(sid, B, { log: () => {} });
+  assert.deepEqual([r.last.status, r.last.pr], ['conflict', 112], '#112 needs #110, which is not on the branch');
+
+  // A worker asks, proposing the dependency; approving it pulls #110 into the plan and puts it first.
+  const jid = jobs.enqueue(sid, B, 'resolve', { pr: 112 });
+  jobs.finish(jid, 'waiting', { question: '#112 builds on #110', proposals: control.parseProposals('dep:110', 112) });
+  const q = control.list(sid).find((d) => d.key === `job:${jid}`);
+  assert.equal(q.options[0].label, 'Backport #110 before #112 (master order)');
+  assert.deepEqual(control.apply(sid, q.key, 'p0').pulledIn, [110]);
+  assert.equal(jobs.job(jid).status, 'done');
+  assert.equal(lane.pickAll(sid, B, { log: () => {} }).last.status, 'done');
+  assert.equal(pick(115).picked_sha, sh(wt, 'rev-parse', 'HEAD~1'), 'the pick commit, not the fixup riding with it');
+  assert.deepEqual(subjects(), ['fixup! Another fix (#113)', 'Fix line three (#115)', 'Fix line eight (#114)', 'Another fix (#113)',
+    'Fix on top of the prerequisite (#112)', '[improve][broker] Prerequisite (#110)']);
+
+  // Dropping a committed pick rebuilds the lane without it and without its fixup.
+  assert.deepEqual(lane.dropPick(sid, B, 113, 'not needed on 4.2'), { dropped: [113], replayed: [114, 115], head: sh(wt, 'rev-parse', 'HEAD') });
+  assert.equal(lane.pickAll(sid, B, { log: () => {} }).last.status, 'done');
+  assert.deepEqual(subjects(), ['Fix line three (#115)', 'Fix line eight (#114)', 'Fix on top of the prerequisite (#112)', '[improve][broker] Prerequisite (#110)']);
+  assert.equal(db.get('SELECT decision FROM targets WHERE session_id = ? AND pr = 113 AND branch = ?', sid, B).decision, 'skip');
+  assert.doesNotMatch(sh(wt, 'show', 'HEAD:mod/src/main/java/Foo.java'), /line 6 other/);
+
+  // The next test push opens round 2 and closes the superseded test PR (no force-push).
+  lane.setPhase(sid, B, 'verified');
+  assert.equal(lane.pushTest(sid, B).testBranch, `${firstTest}-r2`);
+  assert.equal(sh(origin, 'branch', '--list', firstTest), '');
+  assert.match(fs.readFileSync(ghLog, 'utf8'), /pr close 9001/);
+
+  // A picked PR decided "skip" again holds the lane until dropped or kept.
+  plan.setDecisions(sid, [{ pr: 114, branch: B, decision: 'skip' }]); lane.syncPicks(sid, B);
+  assert.throws(() => { db.updateLane(sid, B, { phase: 'ready' }); lane.finalize(sid, B); }, /decisions are open for #114/);
+  control.apply(sid, `unwanted:${B}:114`, 'keep');
+  assert.equal(lane.holds(sid, B).length, 0);
+
+  // Abort: the lane is reset, its test PR closed and its branch deleted; the session is back in planning.
+  const out = lane.abortBackport(sid, { cancel: (id) => jobs.cancel(id) });
+  assert.deepEqual(out, { reset: [B], kept: [] });
+  assert.equal(db.lane(sid, B).phase, 'not-started'); assert.equal(db.lane(sid, B).ci.round, 3);
+  assert.equal(fs.existsSync(wt), false); assert.equal(db.session(sid).status, 'planning');
+  assert.equal(sh(origin, 'branch', '--list', `${firstTest}-r2`), '');
+  assert.equal(db.get('SELECT decision FROM targets WHERE session_id = ? AND pr = 110 AND branch = ?', sid, B).decision, 'backport', 'decisions stay');
+});
+
+function edit2(dir, f, i, text) { const p = path.join(dir, 'mod/src/main/java', f); const a = fs.readFileSync(p, 'utf8').split('\n'); a[i - 1] = text; fs.writeFileSync(p, a.join('\n')); }

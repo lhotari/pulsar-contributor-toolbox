@@ -10,6 +10,7 @@ import * as plan from './lib/plan.mjs';
 import * as lane from './lib/lane.mjs';
 import * as jobs from './lib/jobs.mjs';
 import * as autopilot from './lib/autopilot.mjs';
+import * as control from './lib/control.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SKILLS = path.resolve(HERE, '..', '..');
@@ -33,12 +34,19 @@ const HELP = `bpt — apache/pulsar backport sessions (state: ${db.DB_PATH})
   plan show <id> [--pr N] | report <id> [--out FILE] | labels <id> [--apply] [--removals]
   dep add <id> <pr> <depends-on> [--branch B] [--detail T] | dep set <id> <dep-id> <open|accepted|dismissed>
   lane <start|pick|pick-all|show|push-test|poll|squash|reset|push-final-fix> <id> <branch>
-  lane resolved|unblock <id> <branch> <pr>  |  lane skip <id> <branch> <pr> --reason T
+  lane resolved|unblock <id> <branch> <pr>  |  lane skip|drop <id> <branch> <pr> --reason T   (drop: also a committed pick; the lane is rebuilt)
+  lane add-dep <id> <branch> <pr> <dep> [--detail T]   backport <dep> before <pr>, in master order (rebuilds the lane if needed)
+  lane out-of-order <id> <branch> <pr> --reason T      let a late pick go on top instead of in master order
+  lane rewind <id> <branch> --before <master-order>    re-apply every pick after that position
+  decisions <id>                                    what the backport waits for, with the options
+  decisions <id> apply <key> <option> [--text T]    choose an option (the UI does the same)
+  abort <id> [--reason T]                           reset every lane not yet pushed, close test PRs, back to planning
   lane phase <id> <branch> <phase>  |  lane finalize <id> <branch> [--allow-rebase]
   ci rerun <id> <branch>
   advance <id> [--force]                            one autopilot step
   job list [--session ID] | show|run|log|cancel <job> | claim [--session ID] [--wait SECONDS]
-  job done <job> --summary T | fail <job> --reason T | ask <job> --question T | reply <job> <text>
+  job done <job> --summary T | fail <job> --reason T | reply <job> <text>
+  job ask <job> --question T [--propose dep:<pr>:<dep>,drop:<pr>,rerun,reset]   ask the user; proposals become one-click options
 `;
 
 function parse(argv) {
@@ -104,6 +112,7 @@ function runEngineJob(id) {
       case 'push-final-fix': lane.pushFinalFix(sid, b); summary = 'pushed'; break;
       case 'post-comments': { const r = plan.postComments(sid); summary = `${r.posted} posted, ${r.failed} failed`; if (r.failed) throw new Error(summary); break; }
       case 'apply-labels': { const r = plan.applyLabels(sid, { removals: !!j.args.removals }); summary = `${r.added} added, ${r.removed} removed`; break; }
+      case 'abort': { const r = lane.abortBackport(sid, { reason: j.args.reason || undefined, cancel: (jid) => jobs.cancel(jid) }); summary = `reset ${r.reset.join(', ') || 'nothing'}${r.kept.length ? `; kept ${r.kept.join(', ')}` : ''}`; break; }
       default: throw new Error(`not an engine job: ${j.type}`);
     }
     jobs.finish(id, 'done', { summary });
@@ -206,6 +215,10 @@ async function main() {
         case 'resolved': return out(lane.markResolved(sid, branch, Number(need(arg, 'pr'))));
         case 'unblock': return out(lane.unblock(sid, branch, Number(need(arg, 'pr'))));
         case 'skip': lane.skipPick(sid, branch, Number(need(arg, 'pr')), need(opt.reason, '--reason')); return out('ok');
+        case 'drop': return out(lane.dropPick(sid, branch, Number(need(arg, 'pr')), need(opt.reason, '--reason')));
+        case 'add-dep': return out(lane.addDependency(sid, branch, Number(need(arg, 'pr')), Number(need(pos[3], 'dependency PR')), typeof opt.detail === 'string' ? opt.detail : undefined));
+        case 'out-of-order': lane.pickOutOfOrder(sid, branch, Number(need(arg, 'pr')), need(opt.reason, '--reason')); return out('ok');
+        case 'rewind': return out(lane.rewind(sid, branch, { before: Number(need(opt.before, '--before')), reason: typeof opt.reason === 'string' ? opt.reason : 'rewound from the CLI' }));
         case 'phase': lane.setPhase(sid, branch, need(arg, 'phase'), opt.note); return out('ok');
         case 'push-test': return out(lane.pushTest(sid, branch));
         case 'poll': return out(lane.pollCi(sid, branch));
@@ -226,6 +239,15 @@ async function main() {
       break;
     }
     case 'advance': return out(autopilot.advance(need(sub, 'session id'), { force: !!opt.force }));
+    case 'decisions': {
+      const sid = need(sub, 'session id');
+      if (pos[0] === 'apply') return out(control.apply(sid, need(pos[1], 'decision key'), need(pos[2], 'option'), typeof opt.text === 'string' ? opt.text : undefined));
+      return out(control.list(sid));
+    }
+    case 'abort': {
+      const sid = need(sub, 'session id');
+      return out(lane.abortBackport(sid, { reason: typeof opt.reason === 'string' ? opt.reason : undefined, cancel: (jid) => jobs.cancel(jid) }));
+    }
     case 'job': {
       switch (sub) {
         case 'list': return out(db.all(`SELECT id, session_id, branch, type, runner, status, created_at, finished_at FROM jobs ${opt.session ? 'WHERE session_id = ?' : ''} ORDER BY id DESC LIMIT 50`, ...(opt.session ? [opt.session] : [])));
@@ -246,7 +268,8 @@ async function main() {
         case 'fail': jobs.finish(Number(pos[0]), 'failed', { error: need(opt.reason, '--reason') }); return out('ok');
         case 'ask': {
           const id = Number(pos[0]); const j = jobs.job(id);
-          jobs.finish(id, 'waiting', { question: need(opt.question, '--question') });
+          const proposals = control.parseProposals(opt.propose === true ? '' : opt.propose, j.args.pr);
+          jobs.finish(id, 'waiting', { question: need(opt.question, '--question'), proposals });
           if (j.branch) db.updateLane(j.session_id, j.branch, { attention: `Job ${id} asks: ${opt.question}` });
           return out('ok');
         }

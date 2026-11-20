@@ -13,6 +13,7 @@ pulsar-backport/scripts/bpt.mjs    CLI (both skills, the workers and the server 
   lib/lane.mjs      cherry-pick engine, dependency gate, test push, CI, squash, finalize
   lib/jobs.mjs      job queue; launches engine jobs and headless Claude Code workers
   lib/autopilot.mjs lane state machine (next job per lane)
+  lib/control.mjs   decisions needed while backporting: every wait point with its options; apply runs one
   lib/server.mjs    127.0.0.1 HTTP API + static UI + 10 s tick (autopilot, CI polls, dispatch)
   web/              vanilla JS UI (no build step)
 test/engine.test.mjs  end-to-end test on a throwaway repo with a fake gh: node --test test/engine.test.mjs
@@ -49,8 +50,15 @@ Three sources, one table (`deps`):
 
 Gate: open or accepted-but-missing dependencies block the pick, except blame hints on a pick that applies cleanly (recorded as warnings). Accept = mark the dependency PR `backport` on that branch and insert it into the pick list (master order); Dismiss = proceed. Dependencies accepted on a source lane are carried to reusing lanes as open questions.
 
+## Rebuilding a lane
+
+`lane.rewind` is the one primitive behind drop, late dependencies and re-picking in master order. It maps the lane's commits to picks (cherry-pick trailer, else the PR number), finds the first commit that must change (a dropped pick, or a pick after the insertion point), resets the worktree to the commit before it, and marks every later pick `pending` with `detail.replay`: its `source_sha` becomes its own lane commit and `detail.extras` the non-pick commits (fixups) that ride with it, so `pickNext` re-applies resolution and fixups as one cherry-pick sequence without adding a trailer. Fixups whose target is dropped go with it. A stopped cherry-pick is aborted and blocked picks are re-checked. `pickNext` calls it on its own when the first pending pick has committed picks after it in master order (unless `detail.outOfOrder`); past picking, `holds()` turns the same situation into a decision and autopilot and finalize wait.
+
+Pushed test branches are never rewritten: a rebuild or reset moves the test PR to `ci.retired` and bumps `ci.round`; the next `pushTest` closes the retired PRs, deletes their branches and pushes `<test-branch>-r<round>`.
+
 ## Extending
 
 - New job type: add it to `ENGINE` or `CLAUDE` in `jobs.mjs`, a case in `runEngineJob` (bpt.mjs) or a prompt in `workerPrompt`, a transition in `autopilot.advance`, and a button in `web/app.js`.
+- New wait point: add an item with options to `control.pending`; the UI panel and `bpt decisions` render it without changes. A new worker proposal type goes in `parseProposals` and `runProposal`.
 - Other target branches or repos: `--branches` accepts any list; `BPT_REPO_SLUG` changes the GitHub repo, `--remote` the git remote.
 - Final CI workflows: session config `finalWorkflows` (array of workflow file names).
