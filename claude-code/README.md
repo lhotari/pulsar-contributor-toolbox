@@ -59,31 +59,28 @@ session (`bpt job claim`). Design notes: [references/design.md](skills/pulsar-ba
 
 ### Reviewing pull requests
 
-Two skills that work together:
-
+* [`pr-review-desk`](skills/pr-review-desk/) — the review workflow, across repositories, with a local web UI and a
+  SQLite state in `~/.claude/pr-review-desk`. Sync ranks open PRs with explained scores (committers, review requests
+  and fixes first), sorts them into lanes (backlog, your check, staged on GitHub, follow-up, waiting, security hold…),
+  and a deterministic security scan red-flags malicious PRs before anything from them can run. AI drafts come from
+  `pr-review` on Claude Code workers; you read each comment next to its code, edit or drop it, add your own in the
+  diff, stage the review as a pending GitHub review (and keep adding comments on GitHub), then submit with the verdict
+  you choose. **Only your click in the UI posts** — which keeps a human accountable for every review, as the
+  [ASF Generative Tooling guidance](https://www.apache.org/legal/generative-tooling.html) requires.
 * [`pr-review`](skills/pr-review/) — reviews one PR. Claude Opus 5.5 and Codex
   `gpt-6.2-astra` review independently, the main session synthesizes, both
   cross-validate the result, and a short Fable 5.2 check reads the finished
   review when the budget allows. Terminal output only; it never posts to GitHub.
-* [`pr-review-track`](skills/pr-review-track/) — keeps up with a *backlog* of
-  PRs. Tracks every in-progress review under `~/.claude/pr-review-track`,
-  works out whether each author actually addressed earlier feedback, and drafts
-  the reply, inline comments and review resolution into a markdown file.
-  **Nothing reaches GitHub until you set `Status: ready` on line 1** — which is
-  also what keeps a human accountable for every review, as the
-  [ASF Generative Tooling guidance](https://www.apache.org/legal/generative-tooling.html)
-  requires.
+* [`pr-review-track`](skills/pr-review-track/) — retired markdown-file workflow; its library is what the desk uses
+  for GitHub I/O. `prd import-prt` moves open drafts to the desk.
 
 ```shell
-# ranked PRs I have not looked at yet; merlimat first, then ASF members
-node ~/.claude/skills/pr-review-track/scripts/prt.mjs latest
-
-# what my in-progress reviews are waiting on
-node ~/.claude/skills/pr-review-track/scripts/prt.mjs sync && node ~/.claude/skills/pr-review-track/scripts/prt.mjs board
+# from any clone: sync, scan and rank its PRs, then open the UI
+node ~/.claude/skills/pr-review-desk/scripts/prd.mjs triage && node ~/.claude/skills/pr-review-desk/scripts/prd.mjs ui --open
 ```
 
-In Claude Code: `/pr-review-track re-review`, `/pr-review-track show-latest`,
-`/pr-review-track review latest`, `/pr-review-track cleanup`.
+In Claude Code: `/pr-review-desk` (triage the repo you are in), `/pr-review-desk 27123` (review one PR),
+`/pr-review-desk import-prt`.
 
 ## MCP servers
 

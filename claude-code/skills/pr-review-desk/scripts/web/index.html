@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PR review desk</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="#/">PR review desk</a>
+  <select id="repoPick" aria-label="Repository"></select>
+  <label class="toggle" id="autoWrap" title="Queue AI reviews automatically using this repository's rules. Nothing is ever posted without you."><input type="checkbox" id="autopilot"> Autopilot</label>
+  <button id="syncBtn" class="ghost" title="Fetch PRs from GitHub now">Sync</button>
+  <span class="grow"></span>
+  <span id="budget" class="chip" title="Quota reading from review-budget.sh"></span>
+  <span id="jobsChip" class="chip"></span>
+  <nav class="topnav">
+    <a href="#/" data-nav="board">Board</a>
+    <a href="#/jobs" data-nav="jobs">Jobs</a>
+    <a href="#/activity" data-nav="activity">Activity</a>
+    <a href="#/settings" data-nav="settings">Rules &amp; repos</a>
+  </nav>
+  <span id="conn" class="muted small"></span>
+</header>
+
+<main id="main"></main>
+
+<dialog id="submitDialog" class="wide">
+  <form method="dialog" id="submitForm">
+    <h2>Submit review</h2>
+    <div id="submitSummary" class="small"></div>
+    <fieldset class="events">
+      <legend>Verdict (yours to choose)</legend>
+      <label><input type="radio" name="event" value="COMMENT" checked> Comment</label>
+      <label><input type="radio" name="event" value="REQUEST_CHANGES"> Request changes</label>
+      <label><input type="radio" name="event" value="APPROVE"> Approve</label>
+    </fieldset>
+    <label class="block">Review body (posted as the review's top comment)
+      <textarea name="body" rows="8"></textarea>
+    </label>
+    <div id="submitLints"></div>
+    <label class="toggle" id="movedWrap" hidden><input type="checkbox" name="allowMovedHead"> <span id="movedText"></span></label>
+    <menu>
+      <button value="cancel" class="ghost">Cancel</button>
+      <button value="ok" class="primary" id="submitGo">Submit to GitHub</button>
+    </menu>
+  </form>
+</dialog>
+
+<dialog id="logDialog" class="wide">
+  <div class="logHead"><h2 id="logTitle"></h2><span class="grow"></span><button id="logClose" class="ghost">Close</button></div>
+  <pre id="logBody" class="log"></pre>
+</dialog>
+
+<div id="toast" class="toast" hidden></div>
+<script src="app.js" type="module"></script>
+</body>
+</html>

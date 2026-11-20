@@ -550,10 +550,19 @@ export function askQuoteLint(parsed, { run = 12, whole = 6 } = {}) {
 
 export function securityLint(parsed) {
   if (parsed.doc['security-reviewed'] === 'yes') return [];
+  return securityHitsInTexts(outgoingTexts(parsed).map(([, t]) => t));
+}
+
+/**
+ * The security-disclosure patterns over plain strings, for callers that hold
+ * outgoing text without an action file (pr-review-desk). Same patterns, same
+ * output shape as `securityLint`.
+ */
+export function securityHitsInTexts(texts) {
   const hits = new Set();
-  for (const [, t] of outgoingTexts(parsed)) {
+  for (const t of texts) {
     for (const re of SECURITY_PATTERNS) {
-      const m = re.exec(t);
+      const m = re.exec(String(t ?? ''));
       if (m) hits.add(`"${m[0]}"`);
     }
   }
@@ -729,10 +738,19 @@ const TOOLING_PHRASES = [
  * still trips, instead of all-or-nothing.
  */
 export function toolingLint(parsed) {
-  const excused = new Set(excusedLabels(parsed.doc?.['tooling-reviewed']));
-  const phrases = TOOLING_PHRASES.filter(([label]) => !excused.has(label));
+  return toolingHitsInTexts(outgoingTexts(parsed), excusedLabels(parsed.doc?.['tooling-reviewed']));
+}
+
+/**
+ * The pipeline-mechanics phrases over `[where, text]` pairs, for callers that
+ * hold outgoing text without an action file (pr-review-desk). `excused` is the
+ * list of labels the human acknowledged.
+ */
+export function toolingHitsInTexts(pairs, excused = []) {
+  const skip = new Set(excused);
+  const phrases = TOOLING_PHRASES.filter(([label]) => !skip.has(label));
   const found = new Map();
-  for (const [where, text] of outgoingTexts(parsed)) {
+  for (const [where, text] of pairs) {
     for (const [label, re] of phrases) {
       if (!re.test(text)) continue;
       if (!found.has(label)) found.set(label, { label, where: [] });

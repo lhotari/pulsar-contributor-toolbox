@@ -1,12 +1,18 @@
 ---
 name: pr-review-track
-description: Track GitHub PR reviews across many PRs and rounds, especially apache/pulsar. Use for re-review, reviewing latest PRs, revising drafts, checking pending feedback, and archiving reviews. Invokes pr-review for analysis, verifies whether earlier feedback was addressed, and prepares local review drafts that a human edits and arms before posting. Adapts models and effort to live usage. Codex defaults to Codex-only review but honors explicit requests for a Claude Code time-boxed review.
+description: RETIRED — superseded by pr-review-desk (web UI + SQLite); use this only when the user explicitly asks for prt or the markdown action-file workflow. Track GitHub PR reviews across many PRs and rounds, especially apache/pulsar. Use for re-review, reviewing latest PRs, revising drafts, checking pending feedback, and archiving reviews. Invokes pr-review for analysis, verifies whether earlier feedback was addressed, and prepares local review drafts that a human edits and arms before posting. Adapts models and effort to live usage. Codex defaults to Codex-only review but honors explicit requests for a Claude Code time-boxed review.
 argument-hint: |
   re-review [N...] | show-latest | approved | review-latest [--limit 10] | revisit-draft [N] [instructions] | ask [N] | sync | board | submit | watch | cleanup | archive [N...] | unarchive [N...] | open [N...]
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, Agent, Monitor, Skill
 ---
 
 # PR review tracking
+
+> **Retired.** `pr-review-desk` replaces this workflow: the same review pipeline and
+> GitHub library (`scripts/lib`, which the desk imports), with a SQLite state, lanes,
+> triage rules, a security pre-scan and a web UI for checking, staging and submitting.
+> `prd import-prt` migrates open drafts. Use this skill only when the user asks for
+> `prt` by name.
 
 A review backlog manager for a maintainer who reviews a lot of PRs and wants to
 stay in control of every word that reaches GitHub.

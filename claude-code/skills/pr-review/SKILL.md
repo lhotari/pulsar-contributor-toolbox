@@ -426,15 +426,16 @@ working tree of the PR. This holds for every reviewer and every round. Never run
 tests or any other PR-controlled code when the security gate is suspicious or
 inconclusive.
 
-Posting is deliberately somebody else's job. The **`pr-review-track`** skill turns a
-review into a markdown file a human edits and arms; its `prt submit` is the only thing
-in this toolbox that writes to GitHub. If the user wants the review posted, hand off to
-that skill rather than reaching for `gh` yourself.
+Posting is deliberately somebody else's job. The **`pr-review-desk`** skill imports
+`findings.json` into a draft the human checks in its web UI, stages as a pending GitHub
+review and submits; that UI is the only thing in this toolbox that writes reviews to
+GitHub. If the user wants the review posted, hand off to that skill rather than reaching
+for `gh` yourself. (`pr-review-track`, the earlier markdown-file workflow, is retired.)
 
 ### 8. Machine-readable output (`--out <dir>`)
 
-When `--out` is given, also write `<dir>/findings.json` — the contract `pr-review-track`
-consumes to build an action file. Terminal output is unchanged; this is in addition to it.
+When `--out` is given, also write `<dir>/findings.json` — the contract `pr-review-desk`
+imports as a draft review (`prd review import`). Terminal output is unchanged; this is in addition to it.
 
 The full schema lives in `../pr-review-track/references/findings-schema.md`. In short:
 
