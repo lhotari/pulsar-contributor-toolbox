@@ -431,7 +431,8 @@ export async function submit(reviewId, { event, body } = {}) {
     if (!res.ok) after.push(`resolve ${c.thread_id}: ${res.error}`);
   }
   db.event(rv.repo, rv.number, `#${rv.number}: review submitted (${event})${after.length ? `; follow-up errors: ${after.join('; ')}` : ''}`, { level: after.length ? 'warn' : 'info' });
-  refreshItem(rv.repo, rv.number);
+  // Re-read the PR so the desk knows about the review it just posted (lane: approved / waiting for author).
+  try { await track(rv.repo, rv.number); } catch { refreshItem(rv.repo, rv.number); }
   return { url: r.review.html_url, event, errors: after };
 }
 

@@ -364,21 +364,36 @@ async function showPr(repo, number, tab) {
   if (tab) S.tab = tab;
   const fresh = !S.pr || S.pr.pr.repo !== repo || S.pr.pr.number !== number;
   if (fresh) { S.sel = null; S.newAt = null; S.editing.clear(); $('#main').replaceChildren(h('div', { class: 'empty' }, 'Loading…')); }
+  // The user may navigate away while a request is in flight (a submit takes seconds): then nothing here may
+  // touch the page or S.pr, which by then belongs to another view.
+  const stillHere = () => onPrRoute(repo, number);
+  let view; let diff = S.diff;
   try {
-    S.pr = await api(`pr?repo=${encodeURIComponent(repo)}&number=${number}`);
-    const sha = S.pr.review?.head_sha || S.pr.pr.head_sha;
-    if (!S.diff || S.diff.sha !== sha || fresh) S.diff = await api(`diff?repo=${encodeURIComponent(repo)}&number=${number}&sha=${sha}`).catch(() => null);
-  } catch (e) { $('#main').replaceChildren(h('div', { class: 'empty' }, e.message)); return; }
+    view = await api(`pr?repo=${encodeURIComponent(repo)}&number=${number}`);
+    const sha = view.review?.head_sha || view.pr.head_sha;
+    if (!diff || diff.sha !== sha || fresh) diff = await api(`diff?repo=${encodeURIComponent(repo)}&number=${number}&sha=${sha}`).catch(() => null);
+  } catch (e) { if (stillHere()) $('#main').replaceChildren(h('div', { class: 'empty' }, e.message)); return; }
+  if (!stillHere()) return;
+  S.pr = view; S.diff = diff;
   renderPr();
   clearInterval(prTimer);
   prTimer = setInterval(() => {
-    if (!location.hash.startsWith(`#/pr/${repo}/${number}`)) { clearInterval(prTimer); return; }
+    if (!onPrRoute(repo, number)) { clearInterval(prTimer); return; }
     if (S.editing.size || ['TEXTAREA', 'INPUT'].includes(document.activeElement?.tagName)) return;
     const busy = S.pr?.jobs.some((j) => ['queued', 'running'].includes(j.status)) || S.pr?.review?.status === 'staged';
     if (busy) showPr(repo, number);
   }, 6000);
 }
-const reloadPr = () => showPr(S.pr.pr.repo, S.pr.pr.number);
+function onPrRoute(repo, number) {
+  const p = location.hash.replace(/^#\/?/, '').split('/');
+  return p[0] === 'pr' && `${p[1]}/${p[2]}` === repo && Number(p[3]) === number;
+}
+/** Reload the PR page, but only while it is still the page being shown. */
+const reloadPr = () => {
+  const cur = S.pr?.pr;
+  if (cur && onPrRoute(cur.repo, cur.number)) return showPr(cur.repo, cur.number);
+  return undefined;
+};
 
 function renderPr() {
   const { pr, item, review } = S.pr;
@@ -637,8 +652,12 @@ function openSubmit() {
         await action('ack', { review: review.id, labels: acks.map((a) => a.value) });
       }
       const r = await action('submit', { review: review.id, event: f.event.value, body: f.body.value });
-      toast(r.submittedOnGitHub ? 'It had already been submitted on GitHub' : `Submitted (${r.event})${r.errors?.length ? ` with follow-up errors: ${r.errors.join('; ')}` : ''}`, !!r.errors?.length);
-      reloadPr(); refreshState();
+      toast(r.submittedOnGitHub ? `#${pr.number} had already been submitted on GitHub`
+        : `#${pr.number}: review submitted (${r.event.toLowerCase().replace('_', ' ')})${r.errors?.length ? ` with follow-up errors: ${r.errors.join('; ')}` : ''}`, !!r.errors?.length);
+      // Back to the lane the PR was opened from, unless the user has already gone somewhere else meanwhile.
+      const back = onPrRoute(pr.repo, pr.number);
+      await refreshState();
+      if (back && onPrRoute(pr.repo, pr.number)) location.hash = `#/lane/${S.lane}`;
     } catch (e) {
       toast(e.message, true);
       if (e.code === 'STALE') reloadPr();

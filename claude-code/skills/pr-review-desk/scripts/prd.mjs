@@ -140,7 +140,7 @@ async function main() {
       return out(s ? `UI: ${s.url}` : 'UI: run `prd ui` (or the skill starts it)');
     }
     case 'track': {
-      const refs = [sub, ...rest].filter((x) => x && !x.startsWith('--'));
+      const refs = o._;   // positional arguments only (option values such as --repo's are not refs)
       for (const ref of refs) {
         const p = parsePrRef(ref);
         const slug = p.repo ? addRepo(p.repo).slug : await repoOf(o);
