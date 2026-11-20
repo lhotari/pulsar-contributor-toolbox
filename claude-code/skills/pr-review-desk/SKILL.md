@@ -48,7 +48,7 @@ Backlog → Queued → AI reviewing → **Drafts to check** → **Staged on GitH
 
 **Priority** is prt's ranking (priority authors, review requested, ASF membership, nobody reviewed it, size, CI, recency, fix titles; for follow-ups: author waiting on me, threads resolved without change, new commits) plus the repo's weights: committers (+150: org MEMBER/OWNER/COLLABORATOR or write permission per the collaborators API), category (`[fix]` up, docs down), labels, paths. Every point has a reason the UI shows.
 
-**Autopilot** (per repo, off by default) applies `auto.review` / `auto.reReview` rules on each sync: score threshold, committers-only, size, drafts, per-day and concurrency limits, once per head for re-reviews, paused when the Claude tier or Codex budget (review-budget.sh) is in the configured state. It only queues drafts. Rules live in the UI (Rules & repos) or `prd repo config`.
+**Autopilot** (per repo, off by default) applies `auto.review` / `auto.reReview` rules on each sync: score threshold, committers-only, size, drafts, per-day and concurrency limits, once per head for re-reviews, paused when the Claude tier or Codex budget (review-budget.sh) is in the configured state. With `auto.review.maxPerDay: "budget"` there is no daily count: reviews continue while every Claude and Codex usage window is below `auto.budget.maxPercent` (default 85) and, if set, burns no faster than `auto.budget.maxPace`; the reading is refreshed every 10 minutes in this mode. Cancelled automatic reviews never count toward the daily limit. It only queues drafts. Rules live in the UI (Rules & repos) or `prd repo config`.
 
 ## Security model
 

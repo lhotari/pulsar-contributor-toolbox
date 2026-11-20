@@ -47,9 +47,11 @@ export function execAllowed(repo, number, sha) {
 
 let budgetCache = null;
 /** Live quota reading from pr-review-track's review-budget.sh, cached 30 minutes. */
-export function budget({ fresh = false } = {}) {
-  const stored = budgetCache || db.J(db.meta('budget'));
-  if (!fresh && stored && Date.now() - Date.parse(stored.at) < 30 * 60_000) return (budgetCache = stored);
+export function budget({ fresh = false, maxAgeMinutes = 30 } = {}) {
+  // The stored reading wins when it is newer (another process, e.g. the CLI, refreshed it).
+  const m = db.J(db.meta('budget'));
+  const stored = m && (!budgetCache || m.at > budgetCache.at) ? m : budgetCache;
+  if (!fresh && stored && Date.now() - Date.parse(stored.at) < maxAgeMinutes * 60_000) return (budgetCache = stored);
   const sh = path.join(SKILLS, 'pr-review-track', 'scripts', 'review-budget.sh');
   let reading = { available: false, at: db.now() };
   try {

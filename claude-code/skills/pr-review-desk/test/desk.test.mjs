@@ -32,6 +32,7 @@ const review = await import('../scripts/lib/review.mjs');
 const jobs = await import('../scripts/lib/jobs.mjs');
 const autopilot = await import('../scripts/lib/autopilot.mjs');
 const ci = await import('../scripts/lib/ci.mjs');
+const cfgm = await import('../scripts/lib/config.mjs');
 db.meta('budget', JSON.stringify({ available: false, at: new Date().toISOString() }));
 
 test('sync scores committers up and red-flags the malicious PR', async () => {
@@ -57,6 +58,35 @@ test('a flagged PR never gets a checkout, and the rules do not queue it', async 
   db.run(`UPDATE repos SET config = ? WHERE slug = 'o/r'`, JSON.stringify({ auto: { review: { minScore: -10000 } } }));
   const c = autopilot.ruleCandidates('o/r');
   assert.deepEqual(c.map((x) => x.number), [1]);
+});
+
+test('budget mode: no daily count, reviews continue until a usage window reaches maxPercent', () => {
+  let tick = 0; // each reading newer than the last, as a refreshed one would be
+  const reading = (claude, codex) => db.meta('budget', JSON.stringify({ available: true, at: new Date(Date.now() + 1000 * ++tick).toISOString(),
+    claude: { available: true, tier: 'full', windows: [{ window: 'weekly 7d', percent: claude, pace: 0.5, counts: true, resets: '2026-11-21T00:00:00Z' }] },
+    codex: { available: true, budget: 'rich', windows: [{ window: 'weekly', percent: codex, pace: 0.2, counts: true }] } }));
+  // A full day of automatic reviews: the fixed cap is used up.
+  for (let i = 0; i < 3; i++) { const id = jobs.enqueue('o/r', 3, 'review', { auto: 1 }); db.run(`UPDATE jobs SET status = 'done' WHERE id = ?`, id); }
+  db.run(`UPDATE repos SET config = ? WHERE slug = 'o/r'`, JSON.stringify({ auto: { review: { minScore: -10000, maxPerDay: 3 } } }));
+  let c = autopilot.ruleCandidates('o/r');
+  assert.equal(c[0].slot, false); assert.match(c[0].wait, /daily limit reached: 3/);
+  // Budget mode ignores the count while the windows have room.
+  db.run(`UPDATE repos SET config = ? WHERE slug = 'o/r'`, JSON.stringify({ auto: { review: { minScore: -10000, maxPerDay: 'budget' }, budget: { maxPercent: 80 } } }));
+  reading(40, 10);
+  c = autopilot.ruleCandidates('o/r');
+  assert.equal(c[0].slot, true);
+  // A window at the threshold stops it, and says which one.
+  reading(81, 10);
+  c = autopilot.ruleCandidates('o/r');
+  assert.equal(c[0].slot, false); assert.match(c[0].wait, /budget limit: Claude weekly 7d at 81%/);
+  // maxPace stops a window that burns too fast even below maxPercent.
+  db.run(`UPDATE repos SET config = ? WHERE slug = 'o/r'`, JSON.stringify({ auto: { review: { minScore: -10000, maxPerDay: 'budget' }, budget: { maxPercent: 95, maxPace: 0.4 } } }));
+  reading(40, 10);
+  assert.match(autopilot.ruleCandidates('o/r')[0].wait, /pace 0.5/);
+  assert.throws(() => cfgm.apply({}, { auto: { review: { maxPerDay: 'lots' } } }), /number or "budget"/);
+  db.run(`UPDATE jobs SET status = 'cancelled' WHERE repo = 'o/r' AND number = 3`);
+  db.run(`UPDATE repos SET config = '{}' WHERE slug = 'o/r'`);
+  db.meta('budget', JSON.stringify({ available: false, at: new Date(Date.now() + 1000 * ++tick).toISOString() }));
 });
 
 let rid;

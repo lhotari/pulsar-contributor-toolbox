@@ -247,7 +247,18 @@ async function showBoard() {
 
 async function previewRules() {
   const c = await run(null, () => api(`rules?repo=${encodeURIComponent(S.repo)}`));
-  toast(c.length ? `Rules match: ${c.map((x) => `#${x.number} ${x.type}${x.slot ? '' : ' (no free slot)'}`).join(', ')}` : 'No PR matches the auto-review rules right now');
+  if (!c.length) { toast('No PR matches the auto-review rules right now'); return; }
+  // A dialog, not a toast: the reasons a PR waits are worth reading.
+  const now = c.filter((x) => x.slot); const later = c.filter((x) => !x.slot);
+  const reasons = [...new Set(later.map((x) => x.wait).filter(Boolean))].map((w) => w.replace(/\d{4}-\d\d-\d\dT[\d:.]+Z/, (t) => new Date(t).toLocaleString()));
+  const line = (x) => `#${x.number} ${x.type} (score ${x.score}${x.why ? `, ${x.why}` : ''})`;
+  $('#logTitle').textContent = 'What autopilot would queue';
+  $('#logBody').textContent = [
+    now.length ? `Queued on the next tick:\n${now.map((x) => `  ${line(x)}`).join('\n')}` : 'Nothing gets queued on the next tick.',
+    later.length ? `\nMatching, waiting for a slot:\n${later.map((x) => `  ${line(x)}`).join('\n')}\n\nWhy they wait:\n${reasons.map((r) => `  ${r}`).join('\n')}` : '',
+    '\nThe limits are in Rules & repos: auto.review.maxQueued, auto.reReview.maxQueued, and auto.review.maxPerDay (a number, or "budget" to keep going while auto.budget.maxPercent of every Claude and Codex window is left).',
+  ].join('\n');
+  $('#logDialog').showModal();
 }
 
 function rowActions(it) {

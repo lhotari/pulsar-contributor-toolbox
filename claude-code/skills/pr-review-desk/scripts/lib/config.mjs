@@ -24,7 +24,7 @@ export const DEFAULTS = {
     review: {                           // initial AI reviews, only while the repo's Autopilot switch is on
       minScore: 250,
       maxQueued: 2,                     // queued + running review jobs for the repo
-      maxPerDay: 8,
+      maxPerDay: 8,                     // automatic reviews + re-reviews in 24 h, or "budget": no count, auto.budget decides
       committersOnly: false,
       skipDrafts: true,
       maxLines: 3000,
@@ -38,6 +38,10 @@ export const DEFAULTS = {
     // Budget gate: pause automatic reviews when either quota is in this state.
     pauseWhenClaudeTier: ['codex'],
     pauseWhenCodexBudget: ['critical'],
+    // With review.maxPerDay "budget": keep queuing while every usage window (Claude session/weekly, Codex weekly)
+    // is below maxPercent, and, when maxPace is set, while no window burns faster than that pace
+    // (1.0 = on schedule to use exactly the allowance by its reset).
+    budget: { maxPercent: 85, maxPace: null },
   },
   // Claude Code workers.
   runner: 'headless',                   // headless (claude -p) | interactive (a Claude Code session claims jobs)
@@ -61,6 +65,11 @@ export function apply(stored, patch) {
   const next = merge(stored || {}, patch || {});
   const eff = effective(next);
   if (!['headless', 'interactive'].includes(eff.runner)) throw new Error(`runner must be headless or interactive`);
+  const mpd = eff.auto.review.maxPerDay;
+  if (!(mpd === 'budget' || (Number.isInteger(mpd) && mpd >= 0))) throw new Error('auto.review.maxPerDay must be a number or "budget"');
+  const bp = eff.auto.budget;
+  if (!(bp.maxPercent > 0 && bp.maxPercent <= 100)) throw new Error('auto.budget.maxPercent must be in (0, 100]');
+  if (!(bp.maxPace == null || bp.maxPace > 0)) throw new Error('auto.budget.maxPace must be a positive number or null');
   for (const re of [...eff.ignoreTitle, ...eff.weights.paths.map((p) => p.pattern)]) {
     try { new RegExp(re); } catch (e) { throw new Error(`bad regex ${re}: ${e.message}`); }
   }
