@@ -101,41 +101,10 @@ export function discover(sid, { log = console.log, blame = true } = {}) {
   for (const [i, c] of commits.entries()) {
     const m = meta.get(c.pr) || { labels: [], body: '' };
     if (m.body) fs.writeFileSync(path.join(bodies, `${c.pr}.md`), m.body);
-    const cls = classify(c.title);
     const isNew = !known.has(c.pr);
-    const stats = g.commitFiles(repo, c.sha);
-    db.run(`INSERT INTO items (session_id, pr, sha, master_order, title, merged_at, kind, excluded, labels, stats, round)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)
-            ON CONFLICT (session_id, pr) DO UPDATE SET sha = excluded.sha, master_order = excluded.master_order,
-              title = excluded.title, labels = excluded.labels, merged_at = excluded.merged_at, kind = excluded.kind,
-              stats = json_patch(items.stats, excluded.stats),
-              excluded = CASE json_extract(items.stats, '$.include') WHEN 1 THEN NULL WHEN 0 THEN 'manual exclude' ELSE excluded.excluded END`,
-      sid, c.pr, c.sha, i, c.title, m.mergedAt || c.date, cls.kind, cls.excluded, db.S(m.labels),
-      db.S({ comp: cls.comp, files: stats.files.length, main: stats.main.length, add: stats.add, del: stats.del }),
-      isNew ? round : known.get(c.pr));
+    const cls = upsertCommit(sid, { repo, branches, onBranch, equivs, heads, newlyPicked }, c, i, m, isNew ? round : known.get(c.pr));
     if (isNew) added++;
-    for (const b of branches) {
-      let on = onBranch[b].prs.has(c.pr) || onBranch[b].shas.has(c.sha) ? 1 : 0;
-      const prev = db.get('SELECT on_branch, dryrun, equiv FROM targets WHERE session_id = ? AND pr = ? AND branch = ?', sid, c.pr, b);
-      let equiv = null;
-      const e = !on && equivs[b].get(c.pr);
-      if (e) {
-        const was = db.J(prev?.equiv);
-        if (was?.rejected && was.commit === e.commit) equiv = was; // the user said it is not the same change
-        else { equiv = e; on = 2; }
-      }
-      if (prev && !prev.on_branch && on) newlyPicked.push(`#${c.pr} → ${b}${on === 2 ? ' (equivalent)' : ''}`);
-      let dryrun = prev?.dryrun ?? null;
-      const item = db.get('SELECT excluded FROM items WHERE session_id = ? AND pr = ?', sid, c.pr);
-      if (!on && !item.excluded) {
-        const d = g.dryPick(repo, heads[b], c.sha);
-        dryrun = db.S({ state: g.dryState(d), head: g.short(heads[b]), conflicts: d.conflicts.map((x) => ({ file: x.file.split('/').pop(), path: x.file, test: x.test, hunks: x.hunks })) });
-        dry++;
-      }
-      db.run(`INSERT INTO targets (session_id, pr, branch, on_branch, dryrun, equiv) VALUES (?,?,?,?,?,?)
-              ON CONFLICT (session_id, pr, branch) DO UPDATE SET on_branch = excluded.on_branch, dryrun = excluded.dryrun, equiv = excluded.equiv`,
-        sid, c.pr, b, on, dryrun, equiv ? db.S(equiv) : null);
-    }
+    dry += cls.dry;
     if (blame && !cls.excluded && branches.some((b) => !(onBranch[b].prs.has(c.pr) || onBranch[b].shas.has(c.sha)))) {
       const st = db.J(db.get('SELECT stats FROM items WHERE session_id = ? AND pr = ?', sid, c.pr).stats, {});
       if (!st.blamed) {
@@ -145,11 +114,107 @@ export function discover(sid, { log = console.log, blame = true } = {}) {
     }
     if (i % 50 === 49) log(`  ${i + 1}/${commits.length}`);
   }
+  const pulled = pullInDependencies(sid, { log, refresh: true });
   saveConfig(sid, { round, lastDiscover: db.now(), masterHead: g.short(g.rev(repo, masterRef)),
     heads: Object.fromEntries(branches.map((b) => [b, g.short(heads[b])])) });
-  const summary = { round, total: commits.length, added, dryRuns: dry, newlyPicked };
+  const summary = { round, total: commits.length, added, dryRuns: dry, newlyPicked, pulledIn: pulled.added, depsNotOnMaster: pulled.missing };
   db.event(sid, `Discover round ${round}: ${commits.length} PRs, ${added} new, ${newlyPicked.length} newly on a branch`, { data: summary });
   return summary;
+}
+
+/**
+ * One master commit into the plan: the item (pre-filter class, labels, file stats) and a target per branch
+ * (on the branch, an equivalent branch commit, or a dry-run cherry-pick). Returns the class plus the dry-run count.
+ */
+function upsertCommit(sid, ctx, c, order, m, round, extraStats = {}) {
+  const { repo, branches, onBranch, equivs, heads, newlyPicked } = ctx;
+  const cls = classify(c.title);
+  const stats = g.commitFiles(repo, c.sha);
+  db.run(`INSERT INTO items (session_id, pr, sha, master_order, title, merged_at, kind, excluded, labels, stats, round)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?)
+          ON CONFLICT (session_id, pr) DO UPDATE SET sha = excluded.sha, master_order = excluded.master_order,
+            title = excluded.title, labels = excluded.labels, merged_at = excluded.merged_at, kind = excluded.kind,
+            stats = json_patch(items.stats, excluded.stats),
+            excluded = CASE json_extract(items.stats, '$.include') WHEN 1 THEN NULL WHEN 0 THEN 'manual exclude' ELSE excluded.excluded END`,
+    sid, c.pr, c.sha, order, c.title, m.mergedAt || c.date, cls.kind, extraStats.include === 1 ? null : cls.excluded, db.S(m.labels),
+    db.S({ comp: cls.comp, files: stats.files.length, main: stats.main.length, add: stats.add, del: stats.del, ...extraStats }), round);
+  let dry = 0;
+  for (const b of branches) {
+    let on = onBranch[b].prs.has(c.pr) || onBranch[b].shas.has(c.sha) ? 1 : 0;
+    const prev = db.get('SELECT on_branch, dryrun, equiv FROM targets WHERE session_id = ? AND pr = ? AND branch = ?', sid, c.pr, b);
+    let equiv = null;
+    const e = !on && equivs[b].get(c.pr);
+    if (e) {
+      const was = db.J(prev?.equiv);
+      if (was?.rejected && was.commit === e.commit) equiv = was; // the user said it is not the same change
+      else { equiv = e; on = 2; }
+    }
+    if (prev && !prev.on_branch && on) newlyPicked.push(`#${c.pr} → ${b}${on === 2 ? ' (equivalent)' : ''}`);
+    let dryrun = prev?.dryrun ?? null;
+    const item = db.get('SELECT excluded FROM items WHERE session_id = ? AND pr = ?', sid, c.pr);
+    if (!on && !item.excluded) {
+      const d = g.dryPick(repo, heads[b], c.sha);
+      dryrun = db.S({ state: g.dryState(d), head: g.short(heads[b]), conflicts: d.conflicts.map((x) => ({ file: x.file.split('/').pop(), path: x.file, test: x.test, hunks: x.hunks })) });
+      dry++;
+    }
+    db.run(`INSERT INTO targets (session_id, pr, branch, on_branch, dryrun, equiv) VALUES (?,?,?,?,?,?)
+            ON CONFLICT (session_id, pr, branch) DO UPDATE SET on_branch = excluded.on_branch, dryrun = excluded.dryrun, equiv = excluded.equiv`,
+      sid, c.pr, b, on, dryrun, equiv ? db.S(equiv) : null);
+  }
+  return { ...cls, dry };
+}
+
+/**
+ * Dependencies that point outside the plan: a PR merged on master before the plan's first PR is not an item, so
+ * it could never join a dependency group or be picked. Pull such PRs in (in master order, before the range) when a
+ * dependency that counts for grouping names them — evaluator, follow-up, manual, conflict or an accepted hint — for a
+ * PR that may still go in (a manual or accepted dependency always counts), and they are merged on master. An accepted dependency also marks them "backport". Works on the refs already fetched.
+ */
+export function pullInDependencies(sid, { log = () => {}, refresh = false } = {}) {
+  const s = db.session(sid); const cfg = s.config; const repo = cfg.repo; const r = remote(cfg);
+  const masterRef = `${r}/${cfg.source}`;
+  const edges = db.all(`SELECT d.* FROM deps d WHERE d.session_id = ? AND d.status != 'dismissed' AND (d.source != 'blame' OR d.status = 'accepted')
+                        AND NOT EXISTS (SELECT 1 FROM items i WHERE i.session_id = d.session_id AND i.pr = d.depends_on
+                                        AND NOT (? = 1 AND json_extract(i.stats, '$.pulledIn') IS NOT NULL))`, sid, refresh ? 1 : 0);
+  // A hint for a PR that is skipped everywhere (or already on every branch) does not need its dependency.
+  const needed = (e) => e.source === 'manual' || e.status === 'accepted'
+    || !!db.get(`SELECT 1 FROM targets WHERE session_id = ? AND pr = ? AND (? IS NULL OR branch = ?) AND on_branch = 0 AND decision != 'skip'`, sid, e.pr, e.branch, e.branch);
+  const want = new Map(); for (const e of edges.filter(needed)) (want.get(e.depends_on) || want.set(e.depends_on, []).get(e.depends_on)).push(e);
+  const out = { added: [], missing: [] };
+  if (!want.size) return out;
+  const branches = db.all('SELECT * FROM lanes WHERE session_id = ? ORDER BY seq', sid).map((l) => l.branch);
+  const onBranch = Object.fromEntries(branches.map((b) => [b, g.pickedOnBranch(repo, `${r}/${b}`, masterRef)]));
+  const heads = Object.fromEntries(branches.map((b) => [b, g.rev(repo, `${r}/${b}`)]));
+  const meta = gh.prMeta([...want.keys()]);
+  const newlyPicked = [];
+  const found = [];
+  for (const [pr, es] of want) {
+    const hits = g.git(repo, ['log', '--first-parent', '--fixed-strings', `--grep=(#${pr})`, '--format=%H%x1f%s%x1f%cI', masterRef], { allowFail: true });
+    const c = (hits.ok ? hits.out : '').split('\n').filter(Boolean).map((l) => { const [sha, subject, date] = l.split('\x1f'); const mm = subject.match(g.PR_RE); return { sha, subject, date, pr: mm ? Number(mm[1]) : null, title: subject.replace(g.PR_RE, '').trim() }; })
+      .find((x) => x.pr === pr);
+    if (c) found.push([c, es]); else out.missing.push(pr);
+  }
+  if (!found.length) return out;
+  const equivs = Object.fromEntries(branches.map((b) => [b, findEquivalents(cfg, `${r}/${b}`, masterRef, found.map(([c]) => c), meta, onBranch[b], b, { patchIds: false })]));
+  for (const [c, es] of found) {
+    const pr = c.pr;
+    // Before the range: order by distance from the plan's first commit, so picks keep master order.
+    const order = -Number(g.git(repo, ['rev-list', '--first-parent', '--count', `${c.sha}..${cfg.sinceSha}`]));
+    const via = [...new Set(es.map((e) => e.pr))];
+    const isNew = !db.get('SELECT 1 FROM items WHERE session_id = ? AND pr = ?', sid, pr);
+    upsertCommit(sid, { repo, branches, onBranch, equivs, heads, newlyPicked }, c, order, meta.get(pr) || { labels: [] }, cfg.round || 1,
+      { pulledIn: via, include: 1 });   // named as a dependency: never pre-filtered out
+    if (!isNew) continue;   // refreshed (branch presence, dry runs); decided and announced when it came in
+    for (const e of es.filter((x) => x.status === 'accepted')) {
+      db.run(`UPDATE targets SET decision = 'backport', decision_source = 'user', decision_note = COALESCE(decision_note, ?), decided_at = ?
+              WHERE session_id = ? AND pr = ? AND (? IS NULL OR branch = ?) AND on_branch = 0`, `dependency of #${e.pr}`, db.now(), sid, pr, e.branch, e.branch);
+    }
+    out.added.push(pr);
+    db.event(sid, `#${pr} added to the plan: merged before the plan's range, needed as a dependency of ${via.map((x) => `#${x}`).join(', ')}`);
+    log(`pulled in #${pr} (dependency of ${via.map((x) => `#${x}`).join(', ')})`);
+  }
+  if (out.added.length) db.touchSession(sid);
+  return out;
 }
 
 /**
@@ -159,7 +224,7 @@ export function discover(sid, { log = console.log, blame = true } = {}) {
  * a newer upgrade of the same dependency, or a cherry-picked/<branch> label on the master PR.
  * Returns Map<masterPr, {via, commit, subject, branchPr, detail}>.
  */
-export function findEquivalents(cfg, branchRef, masterRef, commits, meta, onB, branch) {
+export function findEquivalents(cfg, branchRef, masterRef, commits, meta, onB, branch, { patchIds = true } = {}) {
   const repo = cfg.repo;
   const out = new Map();
   const todo = commits.filter((c) => !(onB.prs.has(c.pr) || onB.shas.has(c.sha)));
@@ -169,11 +234,13 @@ export function findEquivalents(cfg, branchRef, masterRef, commits, meta, onB, b
   const bcommits = g.commitsWithBodies(repo, `${mb}..${branchRef}`)
     .filter((b) => !b.pr || !masterPrs.has(b.pr) || /\[branch-/.test(b.subject));
   const hit = (pr, via, b, detail) => { if (!out.has(pr)) out.set(pr, { via, commit: b.sha, subject: b.subject, branchPr: b.pr, detail }); };
-  // 1. patch-id
+  // 1. patch-id (skipped for a single pulled-in commit: it reads every diff on the branch, minutes on an old branch)
+  if (patchIds) {
   const mPid = new Map([...g.patchIds(repo, `${cfg.sinceSha}..${masterRef}`, { firstParent: true })].map(([pid, sha]) => [sha, pid]));
   const bPid = g.patchIds(repo, `${mb}..${branchRef}`);
   for (const c of todo) { const pid = mPid.get(c.sha); const bsha = pid && bPid.get(pid); const b = bsha && bcommits.find((x) => x.sha === bsha);
     if (b) hit(c.pr, 'patch-id', b, 'identical diff'); }
+  }
   // 2. explicit references in branch commit messages and in the branch PRs' descriptions
   const cutoff = Date.parse(g.git(repo, ['log', '-1', '--format=%cI', cfg.sinceSha])) - 45 * 864e5;
   const recent = bcommits.filter((b) => Date.parse(b.date) >= cutoff);

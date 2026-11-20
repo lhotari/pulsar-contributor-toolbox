@@ -228,3 +228,38 @@ test('queued PR comments are posted once every lane is done', () => {
   assert.equal(plan.pendingComments(SID).length, 0);
   assert.throws(() => plan.setComment(SID, 104, 'again'), /already posted/);
 });
+
+test('a dependency merged before the plan\'s range joins the plan and its group', () => {
+  // Fresh master commits: #110 lands before the new plan's first PR (#111) and is on no branch.
+  sh(repo, 'checkout', '-q', 'master'); sh(repo, 'pull', '-q', 'origin', 'master');
+  edit('Bar.java', 12, 'line 12 prerequisite'); commit('[improve][broker] Prerequisite (#110)');
+  edit('Bar.java', 18, 'line 18 since'); commit('[fix][broker] Since point (#111)');
+  edit('Bar.java', 12, 'line 12 prerequisite and fixed'); commit('[fix][broker] Fix on top of the prerequisite (#112)');
+  edit('Foo.java', 6, 'line 6 other'); commit('[fix][broker] Another fix (#113)');
+  sh(repo, 'push', '-q', 'origin', 'master');
+  const sid = 'pull-in-session';
+  plan.createSession({ id: sid, repo, remote: 'origin', sincePr: 111, branches: plan.parseBranches('branch-4.2:4.2.6,branch-4.0:4.0.15<branch-4.2') });
+  plan.discover(sid, { log: () => {}, blame: false });
+  assert.equal(db.get('SELECT 1 x FROM items WHERE session_id = ? AND pr = 110', sid), undefined);
+  // An evaluator hint for a PR skipped everywhere does not pull anything in.
+  const dep = (pr, on, source) => db.run(`INSERT INTO deps (session_id, pr, depends_on, branch, source, detail, phase, created_at) VALUES (?,?,?,?,?,?,?,?)`, sid, pr, on, null, source, 'x', 'plan', db.now());
+  dep(113, 110, 'evaluator');
+  plan.setDecisions(sid, ['branch-4.2', 'branch-4.0'].map((branch) => ({ pr: 113, branch, decision: 'skip' })));
+  assert.deepEqual(plan.pullInDependencies(sid).added, []);
+  // A manual dependency does: in master order before the range, never pre-filtered, grouped with its dependent.
+  dep(112, 110, 'manual');
+  assert.deepEqual(plan.pullInDependencies(sid), { added: [110], missing: [] });
+  const v = plan.planView(sid); const it = v.items.find((x) => x.pr === 110);
+  assert.ok(it.master_order < 0 && v.items[0].pr === 110, 'ordered before the range');
+  assert.deepEqual(it.stats.pulledIn, [112]);
+  assert.equal(it.targets['branch-4.2'].on_branch, 0); assert.equal(it.targets['branch-4.2'].dryrun.state, 'clean');
+  // Once in the plan, #110 groups through every grouping edge (the evaluator's from #113 too).
+  assert.deepEqual([...plan.dependencyGroups(sid).get('branch-4.2').get(112)].sort(), [110, 112, 113]);
+  // Idempotent; a number that is not a merged master PR is reported, not invented.
+  assert.deepEqual(plan.pullInDependencies(sid), { added: [], missing: [] });
+  dep(112, 4242, 'manual');
+  assert.deepEqual(plan.pullInDependencies(sid).missing, [4242]);
+  // The next discover keeps it and refreshes it.
+  plan.discover(sid, { log: () => {}, blame: false });
+  assert.equal(plan.planView(sid).items.find((x) => x.pr === 110).targets['branch-4.2'].on_branch, 0);
+});

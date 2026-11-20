@@ -255,6 +255,7 @@ function planRow(it, lanes, mode, inGroup) {
   const tr = h('tr', { class: `row${inGroup ? ' inGroup' : ''}${it.reviewed_at ? ' reviewed' : ''}`, onclick: () => { S.open.has(it.pr) ? S.open.delete(it.pr) : S.open.add(it.pr); renderPlan(); } },
     h('td', { class: 'title' }, prLink(it.pr), ' ', it.round === S.summary.config.round && S.summary.config.round > 1 ? chip('new', 'new') : null, ' ', strip(it.title),
       it.kind === 'flaky' ? h('span', {}, ' ', chip('flaky', '')) : null,
+      it.stats?.pulledIn?.length ? h('span', { title: `Merged before the plan's first PR; added because ${it.stats.pulledIn.map((x) => `#${x}`).join(', ')} depend(s) on it` }, ' ', chip(`dependency of ${it.stats.pulledIn.map((x) => `#${x}`).join(', ')}`, 'maybe')) : null,
       it.comment ? h('span', { title: it.comment }, ' ', commentChip(it)) : null,
       it.excluded ? h('div', { class: 'small muted' }, `excluded: ${it.excluded}`) : null,
       a.impact ? h('div', { class: 'small muted' }, a.impact) : null),
@@ -428,11 +429,17 @@ function planDetail(it, lanes) {
     commentEditor(it),
     h('div', { class: 'deps' }, ...it.deps.map(depRow),
       h('div', { class: 'dep small' }, 'Add dependency: #', h('input', { size: 7, id: `dep-${it.pr}`, onclick: (e) => e.stopPropagation() }),
-        h('button', { onclick: async (e) => { e.stopPropagation(); const v = Number($(`#dep-${it.pr}`).value); if (!v) return; await api(`sessions/${S.sid}/deps`, { pr: it.pr, dependsOn: v }); S.plan = null; refresh(true); } }, 'Add'),
+        h('button', { onclick: async (e) => { e.stopPropagation(); const v = Number($(`#dep-${it.pr}`).value); if (!v) return; try { depToast(await api(`sessions/${S.sid}/deps`, { pr: it.pr, dependsOn: v }), `Dependency #${it.pr} → #${v} added`); } catch (err) { toast(err.message, true); } S.plan = null; refresh(true); } }, 'Add'),
         h('span', { class: 'grow' }),
         h('button', { class: 'ghost', onclick: (e) => { e.stopPropagation(); api(`sessions/${S.sid}/include`, { pr: it.pr, include: !!it.excluded }).then(() => { S.plan = null; refresh(true); }); } }, it.excluded ? 'Include in scope' : 'Exclude from scope'))));
 }
-async function setDep(id, status) { try { await api(`sessions/${S.sid}/deps`, { id, status }); toast(`Dependency ${status}`); S.plan = null; await refresh(true); } catch (e) { toast(e.message, true); } }
+// Says when a dependency brought a PR from before the plan's range into the plan, or names one not found on master.
+function depToast(r, msg) {
+  const extra = [r?.pulledIn?.length ? `${r.pulledIn.map((x) => `#${x}`).join(', ')} added to the plan (merged before its range)` : '',
+    r?.notOnMaster?.length ? `${r.notOnMaster.map((x) => `#${x}`).join(', ')} is not a merged PR on master` : ''].filter(Boolean);
+  toast(extra.length ? `${msg}; ${extra.join('; ')}` : msg, !!r?.notOnMaster?.length);
+}
+async function setDep(id, status) { try { depToast(await api(`sessions/${S.sid}/deps`, { id, status }), `Dependency ${status}`); S.plan = null; await refresh(true); } catch (e) { toast(e.message, true); } }
 
 // ---------- picks ----------
 function renderPicks(branch) {

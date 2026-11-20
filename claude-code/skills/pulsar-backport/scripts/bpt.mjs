@@ -179,15 +179,21 @@ async function main() {
       break;
     }
     case 'dep': {
+      // A dependency merged before the plan's range joins the plan (and the started lanes' picks).
+      const pullIn = (sid) => {
+        const p = plan.pullInDependencies(sid);
+        if (p.added.length) for (const l of db.all(`SELECT branch FROM lanes WHERE session_id = ? AND phase != 'not-started'`, sid)) lane.syncPicks(sid, l.branch);
+        return p.added.length || p.missing.length ? { ok: true, pulledIn: p.added, notOnMaster: p.missing } : 'ok';
+      };
       const sid = need(pos[0], 'session id');
       if (sub === 'add') {
         const [, pr, dep] = pos.map(Number);
         db.run(`INSERT OR IGNORE INTO deps (session_id, pr, depends_on, branch, source, detail, phase, created_at) VALUES (?,?,?,?,?,?,?,?)`,
           sid, pr, dep, opt.branch || null, 'manual', opt.detail || null, 'backport', db.now());
         db.event(sid, `Dependency recorded: #${pr} needs #${dep}${opt.detail ? ` (${opt.detail})` : ''}`, { branch: opt.branch || null, level: 'attention' });
-        return out('ok');
+        return out(pullIn(sid));
       }
-      if (sub === 'set') { lane.setDep(sid, Number(pos[1]), pos[2]); return out('ok'); }
+      if (sub === 'set') { lane.setDep(sid, Number(pos[1]), pos[2]); return out(pullIn(sid)); }
       break;
     }
     case 'lane': {

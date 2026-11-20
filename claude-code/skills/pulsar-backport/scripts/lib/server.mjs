@@ -171,7 +171,10 @@ export function serve({ port = 8765, open = false } = {}) {
             db.run(`INSERT OR IGNORE INTO deps (session_id, pr, depends_on, branch, source, detail, phase, created_at) VALUES (?,?,?,?,?,?,?,?)`,
               sid, Number(a.pr), Number(a.dependsOn), a.branch || null, 'manual', a.detail || 'added in the UI', 'plan', db.now());
           }
-          return send(200, { ok: true });
+          // A dependency merged before the plan's range is not an item yet: pull it in so it can group and be picked.
+          const p = plan.pullInDependencies(sid);
+          if (p.added.length) for (const l of db.all(`SELECT branch FROM lanes WHERE session_id = ? AND phase != 'not-started'`, sid)) lane.syncPicks(sid, l.branch);
+          return send(200, { ok: true, pulledIn: p.added, notOnMaster: p.missing });
         }
         if (what === 'config' && m === 'POST') return send(200, plan.saveConfig(sid, await body(req)));
         if (what === 'action' && m === 'POST') {
