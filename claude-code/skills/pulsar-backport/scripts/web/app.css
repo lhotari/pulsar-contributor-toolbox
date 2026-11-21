@@ -191,3 +191,7 @@ tr.groupEnd > td { border-bottom: 2px solid var(--accent); }
 
 button.copy { display: inline-flex; align-items: center; vertical-align: middle; padding: 2px 4px; margin-left: 4px; border: 1px solid transparent; background: none; color: var(--muted); cursor: pointer; border-radius: 4px; }
 button.copy:hover { color: var(--accent); border-color: var(--line, var(--soft)); background: var(--soft); }
+
+/* A finished session is read-only: its action buttons are hidden (the server refuses changes anyway). */
+body.finished .laneButtons button, body.finished #needed button, body.finished #needed input, body.finished #needed select { display: none; }
+.finishedNote { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }

@@ -18,6 +18,7 @@ function attemptsFor(sid, branch, type, key) {
 /** One step for every lane of the session. Returns what was done, for the UI. */
 export function advance(sid, { force = false } = {}) {
   const s = db.session(sid); const cfg = s.config;
+  if (s.status === 'finished') return [{ note: 'the session is finished (read-only)' }];
   if (s.status !== 'backporting') return [{ note: 'the session is still planning; start backporting first' }];
   const steps = [];
   const lanes = db.all('SELECT * FROM lanes WHERE session_id = ? ORDER BY seq', sid).map((l) => ({ ...l, ci: db.J(l.ci, {}) }));
@@ -107,6 +108,14 @@ export function advance(sid, { force = false } = {}) {
   if (lanes.length && lanes.every((l) => db.get('SELECT phase FROM lanes WHERE session_id = ? AND branch = ?', sid, l.branch).phase === 'done')
       && plan.pendingComments(sid).some((c) => c.state.status === 'pending') && !jobs.activeJob(sid, null)) {
     jobs.enqueue(sid, null, 'post-comments'); steps.push({ note: 'post queued PR comments' });
+  }
+  // Nothing left to do: every lane is done, nothing runs, every queued comment is posted. The session is finished
+  // and read-only from now on (a comment whose post failed keeps it open until it is posted or cleared).
+  const allDone = lanes.length && db.all('SELECT phase FROM lanes WHERE session_id = ?', sid).every((l) => l.phase === 'done');
+  if (allDone && !db.get(`SELECT 1 FROM jobs WHERE session_id = ? AND status IN ('queued','running','waiting')`, sid)) {
+    const left = plan.pendingComments(sid);
+    if (!left.length) { plan.finishSession(sid, 'every lane is done and every queued PR comment is posted'); steps.push({ note: 'session finished' }); }
+    else if (left.every((c) => c.state.status === 'failed')) steps.push({ note: `waits: posting the comment on ${left.map((c) => `#${c.pr}`).join(', ')} failed; post it again or clear it` });
   }
   return steps;
 }

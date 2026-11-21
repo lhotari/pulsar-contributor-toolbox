@@ -68,6 +68,8 @@ function sessionSummary(sid) {
   return { ...s, lanes, decisions, verdicts, openDeps, activeJobs, review, comments, needed };
 }
 
+/** Actions that do not change a session: allowed on a finished one (reports, their files and gists). */
+const READ_ONLY_ACTIONS = ['report', 'report-open', 'report-gist'];
 const ACTIONS = {
   discover: (sid) => ({ job: jobs.enqueue(sid, null, 'discover') }),
   triage: (sid, b, a) => ({ job: jobs.enqueue(sid, null, 'triage', { instructions: a.instructions }) }),
@@ -165,6 +167,8 @@ export function serve({ port = null, open = false } = {}) {
       }
       if (parts[0] === 'sessions' && parts[1]) {
         const sid = parts[1]; const what = parts[2];
+        // A finished session is read-only; its report actions (below) still work.
+        if (m === 'POST' && what !== 'action') db.assertEditable(sid);
         if (!what && m === 'GET') return send(200, sessionSummary(sid));
         if (what === 'plan' && m === 'GET') return send(200, plan.planView(sid));
         if (what === 'labels' && m === 'GET') return send(200, plan.labelPlan(sid));
@@ -221,6 +225,7 @@ export function serve({ port = null, open = false } = {}) {
         if (what === 'action' && m === 'POST') {
           const a = await body(req); const fn = ACTIONS[a.action];
           if (!fn) return send(400, { error: `unknown action ${a.action}` });
+          if (!READ_ONLY_ACTIONS.includes(a.action)) db.assertEditable(sid);
           const r = fn(sid, a.branch || null, a.args || {});
           tick();
           return send(200, r ?? {});

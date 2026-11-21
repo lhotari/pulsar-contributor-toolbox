@@ -59,6 +59,7 @@ const HELP = `bpt — apache/pulsar backport sessions (state: ${db.DB_PATH})
   decisions <id> recommended                        choose the recommended option wherever it needs no input
   abort <id> [--reason T]                           reset every lane not yet pushed, delete test branches, back to planning
   lane phase <id> <branch> <phase>  |  lane finalize <id> <branch> [--allow-rebase]
+  session reopen <id> --reason T                    make a finished (read-only) session editable again (autopilot off)
   ci rerun <id> <branch>
   advance <id> [--force]                            one autopilot step
   job list [--session ID] | show|run|log|cancel <job> | claim [--session ID] [--wait SECONDS]
@@ -148,9 +149,26 @@ function runEngineJob(id) {
   }
 }
 
+/**
+ * The session a command changes, or null when it only reads (or names no session). A finished session refuses
+ * every change; its plan, picks, diffs and reports (files and gists) stay readable.
+ */
+function sessionChangedBy(cmd, sub, pos, opt) {
+  const readOnly = {
+    session: ['list', 'create', 'show', 'reopen'], plan: ['show', 'report', 'comments', ...(opt.apply ? [] : ['labels'])],
+    lane: ['show'], pick: ['diff'], report: true, decisions: pos[0] === undefined, job: true,
+  }[cmd];
+  if (readOnly === true || (Array.isArray(readOnly) && readOnly.includes(sub))) return null;
+  if (['session', 'plan', 'dep', 'lane', 'pick', 'ci'].includes(cmd)) return pos[0] || null;
+  if (['decisions', 'advance', 'abort'].includes(cmd)) return sub || null;
+  return null;
+}
+
 async function main() {
   const [cmd, sub, ...rest] = process.argv.slice(2);
   const { pos, opt } = parse(rest);
+  const changes = sessionChangedBy(cmd, sub, pos, opt);
+  if (changes && db.get('SELECT 1 FROM sessions WHERE id = ?', changes)) db.assertEditable(changes);
   switch (cmd) {
     case undefined: case 'help': case '--help': return out(HELP);
     case 'doctor': {
@@ -185,6 +203,7 @@ async function main() {
       }
       const sid = need(pos[0], 'session id');
       if (sub === 'show') return out({ ...db.session(sid), lanes: db.all('SELECT branch, release, phase, attention, test_pr_url FROM lanes WHERE session_id = ? ORDER BY seq', sid) });
+      if (sub === 'reopen') { plan.reopenSession(sid, need(opt.reason, '--reason')); return out('ok'); }
       if (sub === 'start-backport') { db.run(`UPDATE sessions SET status = 'backporting', updated_at = ? WHERE id = ?`, db.now(), sid); db.event(sid, 'Backporting started'); return out('ok'); }
       if (sub === 'config') {
         const patch = {};

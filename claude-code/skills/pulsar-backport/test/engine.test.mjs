@@ -320,6 +320,29 @@ test('a pushed lane takes a backport and a revert on top; the report lists both'
   assert.throws(() => lane.revertOnTop(SID, B, 101, { reason: 'x' }), /not a committed pick/);
 });
 
+test('autopilot finishes the session when everything is done; a finished session is read-only, its reports are not', async () => {
+  for (const b of ['branch-4.2', 'branch-4.0']) assert.equal(db.lane(SID, b).phase, 'done');
+  db.run(`UPDATE jobs SET status = 'done' WHERE session_id = ? AND status IN ('queued','running','waiting')`, SID);
+  assert.deepEqual(plan.pendingComments(SID), []);
+  assert.ok(autopilot.advance(SID).some((x) => x.note === 'session finished'));
+  assert.equal(db.session(SID).status, 'finished');
+  assert.deepEqual(autopilot.advance(SID), [{ note: 'the session is finished (read-only)' }]);
+  assert.throws(() => jobs.enqueue(SID, null, 'discover'), /finished and read-only/);
+  const cli = (...args) => execFileSync(process.execPath, [path.join(path.dirname(new URL(import.meta.url).pathname), '../scripts/bpt.mjs'), ...args], { encoding: 'utf8', stdio: 'pipe' });
+  assert.throws(() => cli('plan', 'decide', SID, '101', 'branch-4.2', 'skip'), /finished and read-only/);
+  assert.throws(() => cli('lane', 'revert', SID, 'branch-4.2', '102', '--reason', 'x'), /finished and read-only/);
+  // Reading and the reports still work.
+  assert.match(cli('report', SID, 'branch-4.2'), /^# Backports to branch-4.2/);
+  assert.ok(JSON.parse(cli('lane', 'show', SID, 'branch-4.2')).picks.length);
+  const { laneReport } = await import('../scripts/lib/report.mjs');
+  assert.match(laneReport(SID, 'branch-4.0'), /## Cherry-picks/);
+  // The escape hatch: CLI only, with a reason; autopilot stays off until it is turned on again.
+  assert.throws(() => cli('session', 'reopen', SID), /--reason/);
+  cli('session', 'reopen', SID, '--reason', 'correct a lane');
+  assert.equal(db.session(SID).status, 'backporting');
+  assert.equal(db.session(SID).config.autopilot, false);
+});
+
 test('while backporting: late picks go in master order, drops rebuild the lane, workers propose, abort resets', async () => {
   const control = await import('../scripts/lib/control.mjs');
   sh(repo, 'checkout', '-q', 'master'); sh(repo, 'pull', '-q', 'origin', 'master');

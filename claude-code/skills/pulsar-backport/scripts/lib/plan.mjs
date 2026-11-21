@@ -567,6 +567,35 @@ export function separateBackportText(sid, pr) {
   return `This PR would need to be separately backported to ${lanes.join(' & ') || 'the release branches'}.`;
 }
 
+/**
+ * Mark a backport session finished: every lane done, nothing running or queued, every queued PR comment posted.
+ * From then on the session is read-only (db.assertEditable); `reopenSession` is the CLI-only way back.
+ */
+export function finishSession(sid, reason) {
+  const s = db.session(sid);
+  if (s.status === 'finished') return false;
+  const lanes = db.all('SELECT branch, phase FROM lanes WHERE session_id = ?', sid);
+  const notDone = lanes.filter((l) => l.phase !== 'done').map((l) => `${l.branch} (${l.phase})`);
+  const active = db.get(`SELECT COUNT(*) AS n FROM jobs WHERE session_id = ? AND status IN ('queued','running','waiting')`, sid).n;
+  const comments = pendingComments(sid);
+  const why = [!lanes.length ? 'it has no lanes' : null, notDone.length ? `not done: ${notDone.join(', ')}` : null,
+    active ? `${active} job(s) active` : null, comments.length ? `PR comments not posted: ${comments.map((c) => `#${c.pr}`).join(', ')}` : null].filter(Boolean);
+  if (why.length) throw new Error(`session ${sid} cannot be finished: ${why.join('; ')}`);
+  db.run(`UPDATE sessions SET status = 'finished', updated_at = ? WHERE id = ?`, db.now(), sid);
+  db.event(sid, `Session finished${reason ? `: ${reason}` : ''}. It is read-only now; its reports can still be viewed, downloaded and published as gists`, { level: 'attention' });
+  return true;
+}
+
+/** The escape hatch (CLI only): a finished session becomes editable again, e.g. to correct a lane on top. */
+export function reopenSession(sid, reason) {
+  if (!reason) throw new Error('reopening a finished session needs --reason');
+  const s = db.session(sid);
+  if (s.status !== 'finished') throw new Error(`session ${sid} is ${s.status}, not finished`);
+  db.run(`UPDATE sessions SET status = 'backporting', updated_at = ? WHERE id = ?`, db.now(), sid);
+  saveConfig(sid, { autopilot: false });
+  db.event(sid, `Session reopened: ${reason}. Autopilot is off; turn it on to let it finish the session again`, { level: 'warn' });
+}
+
 export function pendingComments(sid) {
   return db.all(`SELECT pr, comment, comment_state FROM items WHERE session_id = ? AND comment IS NOT NULL ORDER BY master_order`, sid)
     .map((r) => ({ pr: r.pr, comment: r.comment, state: db.J(r.comment_state, {}) }))

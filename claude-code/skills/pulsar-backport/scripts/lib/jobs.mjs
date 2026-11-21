@@ -15,6 +15,7 @@ export const CLAUDE = ['triage', 'resolve', 'verify', 'fix-ci', 'review'];
 export const ACTIVE = ['queued', 'running', 'waiting'];
 
 export function enqueue(sid, branch, type, args = {}) {
+  if (sid) db.assertEditable(sid);
   const runner = ENGINE.includes(type) ? 'engine' : CLAUDE.includes(type) ? 'claude' : null;
   if (!runner) throw new Error(`unknown job type ${type}`);
   const dup = db.get(`SELECT id FROM jobs WHERE session_id = ? AND IFNULL(branch,'') = IFNULL(?,'') AND type = ? AND status IN ('queued','running','waiting')`, sid, branch, type);

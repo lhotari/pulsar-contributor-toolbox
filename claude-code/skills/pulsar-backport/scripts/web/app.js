@@ -216,6 +216,18 @@ function renderSession() {
     s.openDeps ? h('div', {}, chip(`${s.openDeps} open dependency hints on PRs that may go in`, 'blocked')) : '',
     s.comments?.pending || s.comments?.posted ? h('div', {}, `PR comments: ${s.comments.pending} queued (posted when every branch is done), ${s.comments.posted} posted`) : '');
   $('#autopilot').checked = !!s.config.autopilot; $('#runner').value = s.config.runner || 'headless'; $('#autoPushTest').checked = s.config.autoPushTest !== false;
+  // A finished session is read-only: no actions, only its reports (the Report tab: download, VS Code, gist).
+  const finished = s.status === 'finished';
+  document.body.classList.toggle('finished', finished);
+  for (const id of ['#autopilot', '#runner', '#autoPushTest']) $(id).disabled = finished;
+  if (finished) {
+    $('#sessionActions').replaceChildren(h('div', { class: 'finishedNote' }, chip('finished', 'done'),
+      ' Read-only: every lane is done and the queued PR comments are posted. The reports stay available (Report tab). To correct something: ',
+      h('code', {}, `bpt session reopen ${S.sid} --reason "…"`)));
+    $('#lanes').replaceChildren(...s.lanes.map((l) => laneCard(l, s)));
+    renderTabs();
+    return;
+  }
   const A = [];
   const btn = (label, fn, cls) => A.push(h('button', { class: cls, onclick: fn }, label));
   btn('Discover new PRs', () => act('discover'));

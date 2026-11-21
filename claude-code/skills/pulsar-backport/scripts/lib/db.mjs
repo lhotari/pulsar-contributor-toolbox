@@ -217,6 +217,15 @@ export function session(id) {
   return { ...s, config: J(s.config, {}) };
 }
 
+/**
+ * A finished session is read-only: every change goes through a guarded entry point (server POST, CLI command that
+ * writes, job queue, autopilot) that calls this. Reading it, its reports and gists of them stay possible.
+ */
+export function assertEditable(id) {
+  const s = get('SELECT status FROM sessions WHERE id = ?', id);
+  if (s?.status === 'finished') throw new Error(`session ${id} is finished and read-only; reopen it only to correct it: bpt session reopen ${id} --reason T`);
+}
+
 export function touchSession(id) { run('UPDATE sessions SET updated_at = ? WHERE id = ?', now(), id); }
 
 export function lane(sessionId, branch) {
