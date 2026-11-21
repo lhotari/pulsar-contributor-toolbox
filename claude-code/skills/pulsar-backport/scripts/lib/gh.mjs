@@ -58,27 +58,43 @@ function summarize(checks) {
 }
 
 /**
- * The workflow_dispatch runs of a pushed commit on one branch (a test branch or the release branch), the latest run
- * per workflow: a test branch and the release branch can point at the same commit, and their runs must not mix.
+ * The workflow_dispatch runs of a pushed commit on one branch (a test branch or the release branch), one per workflow:
+ * a test branch and the release branch can point at the same commit, and their runs must not mix. `tracked`
+ * ({workflow name: run id}) pins the runs seen first, so a later run of the same workflow (dispatched again, or by
+ * someone else) never hides their result; a workflow not tracked yet gets its latest run. Null when gh fails: a
+ * failed listing is not "no runs".
  */
-export function dispatchedRuns(sha, branch, repo = REPO) {
-  const args = ['run', 'list', '-R', repo, '--commit', sha, '--event', 'workflow_dispatch', '--json', 'databaseId,name,status,conclusion,url,event,headBranch,createdAt', '--limit', '100'];
+export function dispatchedRuns(sha, branch, { tracked = {} } = {}, repo = REPO) {
+  const args = ['run', 'list', '-R', repo, '--commit', sha, '--event', 'workflow_dispatch', '--json', 'databaseId,name,status,conclusion,url,event,headBranch,createdAt,attempt', '--limit', '100'];
   if (branch) args.push('--branch', branch);
-  const runs = (gh(args, { json: true, allowFail: true }) || []).filter((r) => !branch || !r.headBranch || r.headBranch === branch);
-  const latest = new Map();
-  for (const r of runs) { const x = latest.get(r.name); if (!x || String(r.createdAt) > String(x.createdAt)) latest.set(r.name, r); }
-  return [...latest.values()];
+  const list = gh(args, { json: true, allowFail: true });
+  if (!Array.isArray(list)) return null;
+  const runs = list.filter((r) => !branch || !r.headBranch || r.headBranch === branch);
+  const pick = new Map();
+  for (const r of runs) {
+    if (tracked[r.name] != null) { if (r.databaseId === tracked[r.name]) pick.set(r.name, r); continue; }
+    const x = pick.get(r.name); if (!x || String(r.createdAt) > String(x.createdAt)) pick.set(r.name, r);
+  }
+  // A tracked run missing from the listing makes the listing incomplete: report it as unknown rather than guess.
+  if (Object.keys(tracked).some((n) => !pick.has(n))) return null;
+  return [...pick.values()];
 }
 
-/** CI state of a pushed commit on a branch, from the workflow runs dispatched there (CI never runs in a PR). */
-export function commitChecks(sha, branch, repo = REPO) {
-  const runs = dispatchedRuns(sha, branch, repo);
+/**
+ * CI state of a pushed commit on a branch, from the workflow runs dispatched there (CI never runs in a PR).
+ * state 'unknown' when the runs could not be listed; `tracked` maps each workflow to the run that counts.
+ */
+export function commitChecks(sha, branch, { tracked = {} } = {}, repo = REPO) {
+  const runs = dispatchedRuns(sha, branch, { tracked }, repo);
+  if (!runs) return { state: 'unknown' };
   const checks = runs.map((r) => ({
     name: r.name, link: r.url, workflow: r.name,
     bucket: r.status !== 'completed' ? 'pending'
       : ['success', 'skipped', 'neutral'].includes(r.conclusion) ? 'pass' : 'fail',
   }));
-  return { ...summarize(checks), runs: runs.map((r) => r.databaseId), links: runs.map((r) => ({ name: r.name, url: r.url })) };
+  return { ...summarize(checks), runs: runs.map((r) => r.databaseId), links: runs.map((r) => ({ name: r.name, url: r.url })),
+    tracked: Object.fromEntries(runs.map((r) => [r.name, r.databaseId])),
+    details: runs.map((r) => ({ id: r.databaseId, name: r.name, status: r.status, conclusion: r.conclusion, url: r.url, attempt: r.attempt, createdAt: r.createdAt })) };
 }
 
 /**
@@ -99,8 +115,8 @@ export function workflowRuns(sha, branch = null, repo = REPO) {
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
-export function failedRunIds(sha, branch, repo = REPO) {
-  return dispatchedRuns(sha, branch, repo).filter((r) => r.status === 'completed' && !['success', 'skipped', 'neutral'].includes(r.conclusion)).map((r) => r.databaseId);
+export function failedRunIds(sha, branch, { tracked = {} } = {}, repo = REPO) {
+  return (dispatchedRuns(sha, branch, { tracked }, repo) || []).filter((r) => r.status === 'completed' && !['success', 'skipped', 'neutral'].includes(r.conclusion)).map((r) => r.databaseId);
 }
 
 /** Pulsar CI has no push trigger: a pushed test branch or release branch gets workflow_dispatch runs. */

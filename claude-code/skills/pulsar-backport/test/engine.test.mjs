@@ -182,6 +182,9 @@ test('test branch CI (dispatched, no PR), squash, finalize, done', () => {
   assert.match(sh(wt, 'log', '-1', '--format=%s', p101.picked_sha), /\(#101\)/);
   assert.ok(sh(origin, 'branch', '--list', 'branch-4.2-backports-test-session'));
   assert.equal(lane.pollCi(SID, 'branch-4.2').phase, 'ci-green');
+  assert.deepEqual(db.all(`SELECT workflow, run_id, ref FROM ci_runs WHERE session_id = ? AND branch = 'branch-4.2' AND kind = 'test' ORDER BY run_id`, SID).map((r) => [r.run_id, r.ref]),
+    [1, 2, 3, 4].map((id) => [id, 'branch-4.2-backports-test-session']), 'the deciding run ids are stored');
+  assert.deepEqual(lane.trackedRuns(SID, 'branch-4.2', 'test', db.lane(SID, 'branch-4.2').ci.test.sha), { 'Pulsar CI': 1, 'Pulsar CI Flaky': 2, 'CI - Go Functions': 3, 'CI - Python Functions': 4 });
   const tested = sh(lane.worktreeDir(SID, 'branch-4.2'), 'rev-parse', 'HEAD^{tree}');
   const sq = lane.squash(SID, 'branch-4.2');
   assert.equal(sq.tested, sq.squashed, 'nothing left to squash');

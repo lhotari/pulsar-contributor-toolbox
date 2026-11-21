@@ -125,8 +125,11 @@ const RESULT = (r) => (r.status !== 'completed' ? `⏳ ${r.status}` : r.conclusi
 /** The lane's latest CI run (the release branch after finalize, else the test branch): its workflow runs, linked, with a summary. */
 export function ciSection(l, ci) {
   const lines = []; let summary;
-  const block = (title, sha, intro, branch) => {
-    const runs = sha ? gh.workflowRuns(sha, branch) : [];
+  const block = (title, sha, intro, branch, kind) => {
+    // The runs that decided the lane's CI (ci_runs); without any recorded, the latest run per workflow.
+    const ids = new Set(db.all('SELECT run_id FROM ci_runs WHERE session_id = ? AND branch = ? AND kind = ? AND sha = ?', l.session_id, l.branch, kind, sha || '').map((r) => r.run_id));
+    let runs = sha ? gh.workflowRuns(sha, ids.size ? null : branch) : [];
+    if (ids.size) runs = runs.filter((r) => ids.has(r.id));
     const done = runs.filter((r) => r.status === 'completed');
     const bad = done.filter((r) => !['success', 'skipped', 'neutral'].includes(r.conclusion));
     const pending = runs.length - done.length;
@@ -143,7 +146,7 @@ export function ciSection(l, ci) {
   lines.push('## CI\n');
   const t = ci.test; const f = ci.final;
   if (f?.sha) {
-    const r = block(`${l.branch} after finalize`, f.sha, `The batch was fast-forwarded to \`${l.branch}\` and CI dispatched there.`, f.branch || l.branch);
+    const r = block(`${l.branch} after finalize`, f.sha, `The batch was fast-forwarded to \`${l.branch}\` and CI dispatched there.`, f.branch || l.branch, 'final');
     summary = `CI on ${l.branch}: ${r.state}.`;
   }
   else if (t?.sha) {
@@ -151,7 +154,7 @@ export function ciSection(l, ci) {
     const where = t.branch ? `[\`${tb}\`](${t.url || `${REPO_URL}/actions`})` : l.test_pr_url || `\`${tb || ''}\``;
     const r = block(`Test branch ${tb || ''}`.trim(), t.sha,
       `The batch was pushed to the test branch \`${tb || ''}\` ${t.branch ? 'and the CI workflows were dispatched on it' : `and tested in a pull request against \`${l.branch}\` (${l.test_pr_url || ''})`}${t.reruns ? ` (failed jobs re-run ${t.reruns} time(s))` : ''}.${ci.squash ? ` The fixups were then squashed: \`${g.short(ci.squash.squashed)}\` has the same tree as the tested \`${g.short(ci.squash.tested)}\`.` : ''}`,
-      t.branch ? tb : null);
+      t.branch ? tb : null, 'test');
     summary = `Test CI: ${r.state} (${where}).`;
   }
   if (!t?.sha && !f?.sha) { lines.push('No CI run for the current batch yet.\n'); summary = 'CI: not run yet for the current batch.'; }

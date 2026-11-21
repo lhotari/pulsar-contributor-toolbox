@@ -813,16 +813,34 @@ export function pushTest(sid, branch) {
   if (remoteHead !== head) g.git(l.worktree, ['push', r, `HEAD:refs/heads/${tb}`]);
   const prev = l.ci.test;
   // The same commit already has runs on this test branch (a repeated push-test): poll those instead of running CI twice.
-  const again = prev?.sha === head && prev.branch === tb && gh.dispatchedRuns(head, tb).length > 0;
+  const again = prev?.sha === head && prev.branch === tb && (gh.dispatchedRuns(head, tb) || []).length > 0;
   const dispatched = again ? prev.dispatched || [] : dispatchWorkflows(sid, branch, tb, testWorkflows(cfg));
   const ci = { ...l.ci, test: { sha: head, branch: tb, state: 'pending', pushedAt: again ? prev.pushedAt : db.now(), dispatched, url: runsUrl(tb),
-    reruns: again ? prev.reruns || 0 : 0 } };
+    reruns: again ? prev.reruns || 0 : 0, ...(again && prev.tracked ? { tracked: prev.tracked } : {}) } };
   db.updateLane(sid, branch, { phase: 'testing', test_branch: tb, test_pr: null, test_pr_url: null, head_sha: head, ci, attention: null });
   db.event(sid, `Pushed ${g.short(head)} to ${r}/${tb}${again ? ' (CI already running there)' : ` and dispatched ${dispatched.join(', ') || 'no workflow'}`}`, { branch, level: dispatched.length ? 'info' : 'attention' });
   return { testBranch: tb, head, dispatched, url: runsUrl(tb) };
 }
 
 const MIN = 60_000;
+
+/** The tracked workflow runs of a lane's CI for one commit: {workflow name: run id}, from the ci_runs table. */
+export function trackedRuns(sid, branch, kind, sha) {
+  return Object.fromEntries(db.all('SELECT workflow, run_id FROM ci_runs WHERE session_id = ? AND branch = ? AND kind = ? AND sha = ?', sid, branch, kind, sha)
+    .map((r) => [r.workflow, r.run_id]));
+}
+
+/** Record the runs a poll saw: a new workflow is tracked from now on, a tracked one gets its latest status. */
+function recordRuns(sid, branch, kind, sha, ref, details = []) {
+  const now = db.now();
+  for (const r of details) {
+    db.run(`INSERT INTO ci_runs (session_id, branch, kind, sha, ref, workflow, run_id, url, status, conclusion, attempt, created_at, seen_at, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT (session_id, branch, kind, sha, workflow) DO UPDATE SET status = excluded.status, conclusion = excluded.conclusion,
+              attempt = excluded.attempt, url = excluded.url, updated_at = excluded.updated_at WHERE run_id = excluded.run_id`,
+    sid, branch, kind, sha, ref, r.name, r.id, r.url, r.status, r.conclusion || null, r.attempt || null, r.createdAt || null, now, now);
+  }
+}
 
 /** Poll CI for the test branch or the final push: the workflow_dispatch runs on that branch. */
 export function pollCi(sid, branch) {
@@ -832,18 +850,28 @@ export function pollCi(sid, branch) {
   const prev = l.ci[kind] || {};
   if (!prev.sha) return { state: 'none' };
   const ref = final ? branch : prev.branch || l.test_branch;
-  let res = gh.commitChecks(prev.sha, ref);
+  // The tracked runs live in ci_runs; a lane polled before that table existed has them in ci.<kind>.tracked.
+  const tracked = { ...(prev.tracked || {}), ...trackedRuns(sid, branch, kind, prev.sha) };
+  let res = gh.commitChecks(prev.sha, ref, { tracked });
+  if (res.state === 'unknown') {
+    // gh failed (network, rate limit) or the listing missed a tracked run: nothing is concluded from it.
+    db.updateLane(sid, branch, { ci: { ...l.ci, [kind]: { ...prev, polledAt: db.now(), lastPollError: db.now() } } });
+    return { kind, state: 'unknown', phase: l.phase };
+  }
   const want = (prev.dispatched || []).length;
   // A dispatched workflow whose run has not shown up yet keeps the state pending.
   if (res.total < want) res = { ...res, state: res.failed.length ? 'failing' : 'pending', missing: want - res.total };
   let extra = {};
   const age = Date.now() - Date.parse(prev.pushedAt || db.now());
-  if (!res.total && age > 10 * MIN && !prev.redispatched) {
+  // Once a run was seen, the runs are tracked and never dispatched again: a later run would hide their result.
+  if (!res.total && !Object.keys(tracked).length && age > 10 * MIN && !prev.redispatched) {
     // No run at all: the dispatch did not take (GitHub had not seen the pushed ref yet, or a transient error). Once more.
     extra = { redispatched: db.now(), dispatched: dispatchWorkflows(sid, branch, ref, final ? finalWorkflows(cfg) : testWorkflows(cfg)) };
     db.event(sid, `No workflow runs on ${ref} for ${g.short(prev.sha)} after 10 minutes; dispatched again`, { branch, level: 'warn' });
   }
-  const ci = { ...l.ci, [kind]: { ...prev, ...res, ...extra, polledAt: db.now() } };
+  recordRuns(sid, branch, kind, prev.sha, ref, res.details);
+  const { details, ...summary } = res;
+  const ci = { ...l.ci, [kind]: { ...prev, ...summary, ...extra, tracked: { ...res.tracked, ...tracked }, polledAt: db.now() } };
   let phase = l.phase;
   if (res.state === 'success') phase = final ? 'done' : 'ci-green';
   else if (res.state === 'failure') phase = final ? 'final-ci-failed' : 'ci-failed';
@@ -862,7 +890,7 @@ export function rerunFailed(sid, branch) {
   const final = l.phase.startsWith('final');
   const kind = final ? 'final' : 'test';
   const c = l.ci[kind]; if (!c?.sha) throw new Error('no CI run to rerun');
-  const ids = gh.failedRunIds(c.sha, final ? branch : c.branch || l.test_branch);
+  const ids = gh.failedRunIds(c.sha, final ? branch : c.branch || l.test_branch, { tracked: { ...(c.tracked || {}), ...trackedRuns(sid, branch, kind, c.sha) } });
   for (const id of ids) gh.rerunFailed(id);
   const ci = { ...l.ci, [kind]: { ...c, state: 'pending', reruns: (c.reruns || 0) + 1 } };
   db.updateLane(sid, branch, { ci, phase: final ? 'final-ci' : 'testing', attention: null });

@@ -147,6 +147,25 @@ CREATE TABLE IF NOT EXISTS analysis (
   created_at TEXT NOT NULL,
   PRIMARY KEY (session_id, pr, branch)
 );
+-- The workflow runs that decide a lane's CI: one per workflow for each pushed commit (test branch or release branch).
+-- The run seen first is kept (tracked); a later run of the same workflow never replaces it, a rerun is a new attempt.
+CREATE TABLE IF NOT EXISTS ci_runs (
+  session_id TEXT NOT NULL,
+  branch TEXT NOT NULL,                        -- the lane
+  kind TEXT NOT NULL,                          -- test | final
+  sha TEXT NOT NULL,
+  ref TEXT NOT NULL,                           -- the branch the run ran on (test branch or release branch)
+  workflow TEXT NOT NULL,                      -- workflow name, as GitHub shows it
+  run_id INTEGER NOT NULL,
+  url TEXT,
+  status TEXT,
+  conclusion TEXT,
+  attempt INTEGER,
+  created_at TEXT,                             -- when GitHub created the run
+  seen_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (session_id, branch, kind, sha, workflow)
+);
 CREATE INDEX IF NOT EXISTS events_session ON events (session_id, id);
 CREATE INDEX IF NOT EXISTS jobs_status ON jobs (status, runner);
 `;
