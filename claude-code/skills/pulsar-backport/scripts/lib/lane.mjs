@@ -846,6 +846,9 @@ function recordRuns(sid, branch, kind, sha, ref, details = []) {
 export function pollCi(sid, branch) {
   const l = db.lane(sid, branch); const cfg = db.session(sid).config;
   const final = ['final-ci', 'final-ci-failed'].includes(l.phase);
+  // Only a lane that waits for CI is polled: a lane that is done (or not tested yet) keeps its phase. Polling a done
+  // lane used to read its old test CI and moved it back to ci-green.
+  if (!final && !['testing', 'ci-failed'].includes(l.phase)) return { state: 'none', phase: l.phase };
   const kind = final ? 'final' : 'test';
   const prev = l.ci[kind] || {};
   if (!prev.sha) return { state: 'none' };

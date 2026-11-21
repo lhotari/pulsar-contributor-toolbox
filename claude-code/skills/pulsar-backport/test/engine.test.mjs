@@ -195,6 +195,8 @@ test('test branch CI (dispatched, no PR), squash, finalize, done', () => {
   assert.equal(sh(origin, 'rev-parse', 'branch-4.2'), sq.squashed);
   assert.equal(sh(repo, 'rev-parse', 'refs/heads/branch-4.2'), sq.squashed, 'the local branch was fast-forwarded and pushed');
   assert.equal(lane.pollCi(SID, 'branch-4.2').phase, 'done');
+  assert.deepEqual(lane.pollCi(SID, 'branch-4.2'), { state: 'none', phase: 'done' }, 'a done lane stays done when polled again');
+  assert.equal(db.lane(SID, 'branch-4.2').phase, 'done');
   const calls = fs.readFileSync(ghLog, 'utf8');
   assert.match(calls, /workflow run pulsar-ci.yaml/);
   assert.match(calls, /--add-label cherry-picked\/branch-4.2 --add-label release\/4.2.6/);
