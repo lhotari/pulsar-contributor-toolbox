@@ -63,6 +63,30 @@ export function record(sid, branch, pr, { verdict, summary, concerns: text = nul
   return review;
 }
 
+export const REASONS = ['bug', 'security', 'divergence', 'dependency', 'test', 'build', 'other'];
+export const COMPAT = ['none', 'behavior', 'breaking'];
+
+/** The committed picks that have no analysis yet (what they fix, why for this branch, compatibility). */
+export function unanalyzed(sid, branch) {
+  const have = new Set(db.all('SELECT pr FROM analysis WHERE session_id = ? AND branch = ?', sid, branch).map((x) => x.pr));
+  return picks(sid, branch).filter((p) => COMMITTED.includes(p.status) && p.picked_sha && !have.has(p.pr)).map((p) => p.pr);
+}
+
+export function analysisOf(sid, branch, pr) {
+  return db.get('SELECT fixes, relevance, reason, compat, compat_note, job_id, created_at FROM analysis WHERE session_id = ? AND branch = ? AND pr = ?', sid, branch, pr) || null;
+}
+
+export function recordAnalysis(sid, branch, pr, { fixes, relevance, reason, compat, compatNote = null, job = null }) {
+  if (!fixes || !relevance) throw new Error('--fixes and --relevance are required');
+  if (!REASONS.includes(reason)) throw new Error(`--reason must be one of ${REASONS.join(', ')}`);
+  if (!COMPAT.includes(compat)) throw new Error(`--compat must be one of ${COMPAT.join(', ')}`);
+  if (compat !== 'none' && !compatNote) throw new Error('a behavior change or breaking change needs --compat-note: what changes and for whom');
+  db.run(`INSERT OR REPLACE INTO analysis (session_id, pr, branch, fixes, relevance, reason, compat, compat_note, job_id, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+    sid, pr, branch, fixes, relevance, reason, compat, compatNote, job, db.now());
+  if (compat === 'breaking') db.event(sid, `#${pr} may be a breaking change on ${branch}: ${compatNote.slice(0, 300)}`, { branch, job, level: 'attention' });
+  return analysisOf(sid, branch, pr);
+}
+
 export function accept(sid, branch, pr, reason) {
   const p = picks(sid, branch).find((x) => x.pr === pr);
   if (p?.detail.review?.verdict !== 'concern') throw new Error(`#${pr} has no review concern`);
@@ -118,13 +142,17 @@ export function pickDiffs(sid, branch, pr) {
       leftOutInReview: left, intent: build?.intent, buildCheck: build ? { ok: build.ok, stage: build.stage, accepted: build.accepted, tests: build.tests } : null,
       checkPick: check ? { ok: check.ok } : null },
     review: review || null, previousReview: p.detail.previousReview || null,
+    analysis: analysisOf(sid, branch, pr),
+    // What other branches recorded for the same PR: what it fixes is the same, the relevance and compatibility may differ.
+    otherAnalyses: db.all('SELECT branch, fixes, relevance, reason, compat, compat_note FROM analysis WHERE session_id = ? AND pr = ? AND branch != ?', sid, pr, branch),
   };
 }
 
 /** The text a reviewer reads for one pick. */
 export function diffText(d) {
   const ctx = Object.entries(d.context).filter(([, v]) => v != null && !(Array.isArray(v) && !v.length)).map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join('\n');
-  const parts = [`#${d.pr} ${d.title || ''}\nmaster ${d.masterSha}  backport ${d.backportSha} (${d.branch})${d.truncated ? '\n(diff truncated)' : ''}\n${ctx}`];
+  const extra = [d.analysis ? `analysis (recorded): ${JSON.stringify(d.analysis)}` : null, ...(d.otherAnalyses || []).map((x) => `analysis on ${x.branch}: ${JSON.stringify(x)}`)].filter(Boolean).join('\n');
+  const parts = [`#${d.pr} ${d.title || ''}\nmaster ${d.masterSha}  backport ${d.backportSha} (${d.branch})${d.truncated ? '\n(diff truncated)' : ''}\n${ctx}${extra ? `\n${extra}` : ''}`];
   for (const f of d.files) {
     parts.push(`\n===== ${f.path} ${f.master ? '' : '(only in the backport)'}${f.backport ? '' : '(not in the backport)'}`);
     if (f.master) parts.push(`----- master (${f.master.status}, +${f.master.added} -${f.master.removed})\n${f.master.diff}`);

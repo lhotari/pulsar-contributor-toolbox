@@ -620,6 +620,38 @@ export function resyncPicks(sid, branch, { builds = {} } = {}) {
   return { mapped, missing, extra };
 }
 
+/**
+ * A lane that reuses another lane's commits (branch-4.0 from branch-4.2) follows the dependency decisions made
+ * there: a pick blocked on a dependency that the source lane accepted gets it too, one dismissed there is picked
+ * without it, and a pick the source lane left out is left out. Returns a note of what was done, or null when the
+ * source lane has no decision for every missing dependency (the user decides).
+ */
+export function followSource(sid, branch, pr) {
+  const src = db.lane(sid, branch)?.reuse_from; if (!src) return null;
+  const p = picks(sid, branch).find((x) => x.pr === pr);
+  if (!p || p.status !== 'blocked') return null;
+  const sp = picks(sid, src).find((x) => x.pr === pr);
+  if (sp?.status === 'skipped') {
+    skipPick(sid, branch, pr, `left out as on ${src}${sp.detail.reason ? ` (${sp.detail.reason})` : ''}`);
+    return `#${pr} left out, as on ${src}`;
+  }
+  const unmet = p.detail.unmet || []; if (!unmet.length) return null;
+  const decided = db.all(`SELECT depends_on, status FROM deps WHERE session_id = ? AND pr = ? AND branch = ? AND status IN ('accepted', 'dismissed')`, sid, pr, src);
+  const onSrc = (dep) => decided.find((d) => d.depends_on === dep)?.status
+    || (picks(sid, src).some((x) => x.pr === dep && ['picked', 'empty'].includes(x.status)) ? 'accepted' : null);
+  const plan = unmet.map((u) => ({ dep: u.depends_on, status: onSrc(u.depends_on) }));
+  if (plan.some((x) => !x.status)) return null;
+  const own = (dep) => db.all(`SELECT id FROM deps WHERE session_id = ? AND pr = ? AND depends_on = ? AND (branch IS NULL OR branch = ?) AND status = 'open'`, sid, pr, dep, branch).map((d) => d.id);
+  for (const x of plan) {
+    if (x.status === 'accepted') { const ids = own(x.dep); if (ids.length) acceptDeps(sid, branch, ids); else addDependency(sid, branch, pr, x.dep, `as on ${src}`); }
+    else for (const id of own(x.dep)) setDep(sid, id, 'dismissed');
+  }
+  unblock(sid, branch, pr);
+  const note = `#${pr}: ${plan.map((x) => `${x.status === 'accepted' ? 'backport' : 'without'} #${x.dep}`).join(', ')}, as decided on ${src}`;
+  db.event(sid, note, { branch });
+  return note;
+}
+
 /** The user accepts a failing build check for a pick (a failure that is not the pick's, e.g. it fails on the branch too). */
 export function acceptBuild(sid, branch, pr, reason) {
   const p = picks(sid, branch).find((x) => x.pr === pr);

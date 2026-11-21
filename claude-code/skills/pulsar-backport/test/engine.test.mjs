@@ -204,10 +204,11 @@ test('branch-4.0 lane reuses the squashed branch-4.2 commits', () => {
   const p42 = Object.fromEntries(lane.lanePicks(SID, 'branch-4.2').map((p) => [p.pr, p.picked_sha]));
   for (const p of picks) { assert.ok(p.detail.reused); assert.equal(p.source_sha, p42[p.pr]); }
   const rr = lane.pickAll(SID, 'branch-4.0', { log: () => {} });
-  assert.equal(rr.last.status, 'blocked', 'the #102 dependency accepted on branch-4.2 is asked again');
+  assert.equal(rr.last.status, 'blocked', 'the #102 dependency is found on branch-4.0 too');
   assert.deepEqual(rr.last.unmet.map((d) => d.depends_on), [102]);
-  const dep = db.get(`SELECT id FROM deps WHERE session_id = ? AND pr = 103 AND depends_on = 102 AND branch = 'branch-4.0'`, SID);
-  lane.setDep(SID, dep.id, 'accepted');
+  // branch-4.2 accepted it, so branch-4.0 (which reuses branch-4.2's commits) follows that decision.
+  assert.match(lane.followSource(SID, 'branch-4.0', 103), /backport #102, as decided on branch-4.2/);
+  assert.equal(db.get(`SELECT status FROM deps WHERE session_id = ? AND pr = 103 AND depends_on = 102 AND branch = 'branch-4.0'`, SID).status, 'accepted');
   assert.equal(lane.pickAll(SID, 'branch-4.0', { log: () => {} }).last.status, 'done');
   const msg = sh(lane.worktreeDir(SID, 'branch-4.0'), 'log', '-1', '--format=%B', 'HEAD~2');
   assert.equal((msg.match(/cherry picked from commit/g) || []).length, 1, 'no second trailer');
@@ -472,9 +473,9 @@ test('diff review: picks are reviewed after picking, a concern holds the squash,
   assert.equal(lane.pickAll(sid, B, { log: () => {} }).last.status, 'done');
   assert.deepEqual(review.unreviewed(sid, B), [114, 115]);
   // After picking, autopilot reviews before it verifies.
-  assert.ok(autopilot.advance(sid).some((s) => /diff review of #114, #115/.test(s.note)));
+  assert.ok(autopilot.advance(sid).some((s) => /review\/analysis of #114, #115/.test(s.note)));
   const j = db.get(`SELECT id, args FROM jobs WHERE session_id = ? AND type = 'review' AND status = 'queued'`, sid);
-  assert.deepEqual(db.J(j.args).prs, [114, 115]);
+  assert.deepEqual(db.J(j.args), { prs: [114, 115], review: [114, 115], analyze: [114, 115] });
   assert.match(jobs.workerPrompt(jobs.job(j.id)), /pick review/);
   // Both sides, file by file.
   const d = review.pickDiffs(sid, B, 114);
@@ -489,7 +490,9 @@ test('diff review: picks are reviewed after picking, a concern holds the squash,
   const dec = control.list(sid).find((x) => x.key === `review:${B}:115`);
   assert.deepEqual(dec.options.map((o) => o.id), ['fix', 'accept', 'drop']);
   db.updateLane(sid, B, { phase: 'ci-green' });
+  plan.saveConfig(sid, { analysis: false }); // the analysis has its own part below
   assert.ok(autopilot.advance(sid).some((s) => /waits for the review concerns of #115/.test(s.note)));
+  plan.saveConfig(sid, { analysis: true });
   control.apply(sid, dec.key, 'accept', 'not a problem on 4.2');
   assert.deepEqual(review.concerns(sid, B), []);
   // A rebuilt lane with the same patch keeps the review; a changed patch is reviewed again.
@@ -498,6 +501,25 @@ test('diff review: picks are reviewed after picking, a concern holds the squash,
   assert.deepEqual(review.unreviewed(sid, B), [114], 'a different patch');
   db.run(`UPDATE picks SET picked_sha = ?, detail = ? WHERE session_id = ? AND branch = ? AND pr = 114`, p114.picked_sha, db.S(p114.detail), sid, B);
   assert.deepEqual(review.unreviewed(sid, B), []);
+  // The backport report: each cherry-pick with why, adaptation and validation, and the CI state.
+  const { laneReport } = await import('../scripts/lib/report.mjs');
+  const md = laneReport(sid, B);
+  assert.match(md, /^# Backports to branch-4\.2 \(4\.2\.10\)/);
+  assert.match(md, /### 1\. \[#114\]\(https:\/\/github\.com\/apache\/pulsar\/pull\/114\) \[fix\]\[broker\] Fix line eight/);
+  assert.match(md, /Diff review: \*\*ok\*\* — same change/);
+  assert.match(md, /Diff review: \*\*concern \(accepted\)\*\*.*Accepted: not a problem on 4\.2/);
+  assert.match(md, /CI: not run yet for the current batch/);
+  assert.match(md, /Compatibility: \*\*0 potential breaking change\(s\)\*\*.*\(2 not analyzed yet\)/);
+  // The analysis is recorded once (review jobs) and the report reads it; a breaking change is highlighted at the top.
+  assert.deepEqual(review.unanalyzed(sid, B), [114, 115]);
+  assert.throws(() => review.recordAnalysis(sid, B, 115, { fixes: 'f', relevance: 'r', reason: 'bug', compat: 'breaking' }), /needs --compat-note/);
+  review.recordAnalysis(sid, B, 114, { fixes: 'Line eight was wrong.', relevance: 'Foo is the same on the branch.', reason: 'divergence', compat: 'none' });
+  review.recordAnalysis(sid, B, 115, { fixes: 'Line three was wrong.', relevance: 'The bug is on the branch.', reason: 'bug', compat: 'breaking', compatNote: 'line three now rejects old input (#4242)' });
+  assert.deepEqual(review.unanalyzed(sid, B), []);
+  const md2 = laneReport(sid, B);
+  assert.match(md2, /## Potential breaking changes\n\n- \[#115\].*line three now rejects old input \(\[#4242\]\(https:\/\/github\.com\/apache\/pulsar\/issues\/4242\)\)/);
+  assert.match(md2, /- \*\*Fixes:\*\* Line eight was wrong\.\n- \*\*Why on this branch:\*\* Foo is the same on the branch\. _\(avoids divergence from master\)_/);
+  assert.match(md2, /\*\*potential breaking change\*\*: line three/);
 });
 
 function edit2(dir, f, i, text) { const p = path.join(dir, 'mod/src/main/java', f); const a = fs.readFileSync(p, 'utf8').split('\n'); a[i - 1] = text; fs.writeFileSync(p, a.join('\n')); }

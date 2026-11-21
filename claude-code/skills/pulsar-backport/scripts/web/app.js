@@ -249,16 +249,77 @@ async function showLabels() {
 }
 
 // ---------- tabs ----------
-function setTab(t) { S.tab = t; try { localStorage.setItem('bpt-tab', t); } catch {} renderTabs(); refresh(); }
+function setTab(t) { if (t === 'report') S.report = null; S.tab = t; try { localStorage.setItem('bpt-tab', t); } catch {} renderTabs(); refresh(); }
 function renderTabs() {
   const s = S.summary;
-  const tabs = [['plan', 'Plan review'], ['all', 'All items'], ...s.lanes.filter((l) => l.phase !== 'not-started').map((l) => [`picks:${l.branch}`, `Picks ${l.branch}`]), ['activity', 'Activity'], ['jobs', 'Jobs']];
+  const started = s.lanes.filter((l) => l.phase !== 'not-started');
+  const tabs = [['plan', 'Plan review'], ['all', 'All items'], ...started.map((l) => [`picks:${l.branch}`, `Picks ${l.branch}`]), ...(started.length ? [['report', 'Report']] : []), ['activity', 'Activity'], ['jobs', 'Jobs']];
   if (!tabs.find(([k]) => k === S.tab)) S.tab = 'plan';
   $('#tabs').replaceChildren(...tabs.map(([k, label]) => h('button', { class: S.tab === k ? 'on' : '', onclick: () => setTab(k) }, label)));
   if (S.tab === 'plan' || S.tab === 'all') renderPlan();
   else if (S.tab.startsWith('picks:')) renderPicks(S.tab.slice(6));
   else if (S.tab === 'activity') renderActivity();
+  else if (S.tab === 'report') renderReport();
   else renderJobs();
+}
+
+// ---------- backport report ----------
+const escHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+/** The Markdown the report uses: headings, paragraphs, lists, tables, **bold**, _em_, `code`, [links](url). */
+function mdInline(s) {
+  return escHtml(s).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>').replace(/(^|\W)_([^_]+)_(?=\W|$)/g, '$1<i>$2</i>')
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+    .replace(/(^|[\s(])(https:\/\/github\.com\/[^\s)<]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+}
+function mdToHtml(md) {
+  const out = []; const lines = String(md).split('\n'); let i = 0;
+  const cells = (l) => l.replace(/^\||\|$/g, '').split(/(?<!\\)\|/).map((c) => mdInline(c.trim().replace(/\\\|/g, '|')));
+  while (i < lines.length) {
+    const l = lines[i];
+    const hm = l.match(/^(#{1,4}) (.*)$/);
+    if (hm) { out.push(`<h${hm[1].length + 1}>${mdInline(hm[2])}</h${hm[1].length + 1}>`); i++; continue; }
+    if (l.startsWith('|')) {
+      const rows = []; while (i < lines.length && lines[i].startsWith('|')) rows.push(lines[i++]);
+      const body = rows.filter((r, k) => k !== 1 || !/^\|[\s|:-]+\|$/.test(r));
+      out.push(`<table><thead><tr>${cells(body[0]).map((c) => `<th>${c}</th>`).join('')}</tr></thead><tbody>${body.slice(1).map((r) => `<tr>${cells(r).map((c) => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table>`);
+      continue;
+    }
+    if (/^- /.test(l)) { const it = []; while (i < lines.length && /^- /.test(lines[i])) it.push(lines[i++].slice(2)); out.push(`<ul>${it.map((x) => `<li>${mdInline(x)}</li>`).join('')}</ul>`); continue; }
+    if (!l.trim()) { i++; continue; }
+    const para = []; while (i < lines.length && lines[i].trim() && !/^(#{1,4} |- |\|)/.test(lines[i])) para.push(lines[i++]);
+    out.push(`<p>${mdInline(para.join(' '))}</p>`);
+  }
+  return out.join('\n');
+}
+async function renderReport() {
+  const lanes = S.summary.lanes.filter((l) => l.phase !== 'not-started');
+  if (!lanes.find((l) => l.branch === S.reportBranch)) S.reportBranch = lanes[0]?.branch;
+  const b = S.reportBranch; const body = $('#tabBody');
+  const cached = S.report?.branch === b ? S.report.markdown : null;
+  // Every request generates the report from the current state: the tab when opened or refreshed, the download, VS Code, the gist.
+  const download = async () => {
+    try {
+      const md = (await api(`sessions/${S.sid}/lanes/${encodeURIComponent(b)}/report`)).markdown; S.report = { branch: b, markdown: md };
+      const a = h('a', { href: URL.createObjectURL(new Blob([md], { type: 'text/markdown' })), download: `${S.sid}-${b}-backports.md` }); document.body.append(a); a.click(); a.remove(); renderReport();
+    } catch (e) { toast(e.message, true); }
+  };
+  const gist = async () => {
+    if (!confirm(`Create a secret GitHub gist of the ${b} backport report with your gh login? Anyone with the link can read a secret gist.`)) return;
+    try { const r = await api(`sessions/${S.sid}/action`, { action: 'report-gist', branch: b }); S.gistUrl = r.url; toast(`Gist created: ${r.url}`); renderReport(); } catch (e) { toast(e.message, true); }
+  };
+  body.replaceChildren(h('div', { class: 'filters' },
+    ...lanes.map((l) => h('button', { class: l.branch === b ? 'primary' : '', onclick: () => { S.reportBranch = l.branch; S.report = null; renderReport(); } }, l.branch)),
+    h('span', { class: 'grow' }),
+    h('button', { onclick: () => { S.report = null; renderReport(); } }, 'Refresh'),
+    h('button', { onclick: download }, 'Download .md'),
+    h('button', { onclick: () => act('report-open', b) }, 'Open in VS Code'),
+    h('button', { onclick: gist }, 'Create secret gist'),
+    S.gistUrl ? h('span', { class: 'small' }, h('a', { href: S.gistUrl, target: '_blank', rel: 'noopener' }, S.gistUrl), copyBtn(S.gistUrl, 'gist URL')) : null),
+  cached ? h('article', { class: 'report', html: mdToHtml(cached) }) : h('p', { class: 'muted' }, 'Loading…'));
+  if (!cached) {
+    try { S.report = { branch: b, markdown: (await api(`sessions/${S.sid}/lanes/${encodeURIComponent(b)}/report`)).markdown }; if (S.tab === 'report') renderReport(); }
+    catch (e) { toast(e.message, true); }
+  }
 }
 
 // ---------- plan ----------
@@ -606,6 +667,10 @@ function renderCompare() {
     r?.summary ? h('div', {}, prose(r.summary)) : null,
     r?.concerns ? h('div', {}, h('b', {}, 'Concerns: '), prose(r.concerns)) : null,
     r?.accepted ? h('div', { class: 'small' }, `Accepted: ${r.accepted}`) : null,
+    d.analysis ? h('div', {}, h('b', {}, 'Fixes: '), ...linkPrs(d.analysis.fixes)) : null,
+    d.analysis ? h('div', {}, h('b', {}, `Why on ${d.branch}: `), ...linkPrs(d.analysis.relevance), h('span', { class: 'muted small' }, ` (${d.analysis.reason})`)) : null,
+    d.analysis ? h('div', {}, h('b', {}, 'Compatibility: '), d.analysis.compat === 'none' ? 'no user-visible change'
+      : h('span', { class: d.analysis.compat === 'breaking' ? 'bad' : '' }, `${d.analysis.compat === 'breaking' ? 'potential breaking change' : 'behavior change'}: `, ...linkPrs(d.analysis.compat_note || ''))) : null,
     ...ctx.map((x) => h('div', { class: 'small muted' }, linkPrs(x))),
     h('div', { class: 'actions' },
       r?.verdict === 'concern' && !r.accepted ? h('button', { class: 'primary', onclick: async () => { const t = prompt('Instructions for the worker (optional):', ''); if (t === null) return; await act('fix-review', b, { pr, instructions: t || undefined }); $('#cmpDialog').close(); } }, 'Fix it with Claude') : null,

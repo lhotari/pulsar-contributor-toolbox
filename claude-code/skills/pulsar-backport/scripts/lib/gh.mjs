@@ -86,6 +86,15 @@ export function commitChecks(sha, repo = REPO) {
   return { ...summarize(checks), runs: runs.map((r) => r.databaseId) };
 }
 
+/** The workflow runs of a commit, for reports: [{id, name, status, conclusion, url, event, attempt, createdAt}]. */
+export function workflowRuns(sha, repo = REPO) {
+  const fields = 'databaseId,name,status,conclusion,url,event,attempt,createdAt';
+  const runs = gh(['run', 'list', '-R', repo, '--commit', sha, '--json', fields, '--limit', '100'], { json: true, allowFail: true })
+    || gh(['run', 'list', '-R', repo, '--commit', sha, '--json', fields.replace(',attempt', ''), '--limit', '100'], { json: true, allowFail: true }) || [];
+  return runs.map((r) => ({ id: r.databaseId, name: r.name, status: r.status, conclusion: r.conclusion, url: r.url, event: r.event, attempt: r.attempt, createdAt: r.createdAt }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
 export function failedRunIds(sha, repo = REPO) {
   const runs = gh(['run', 'list', '-R', repo, '--commit', sha, '--json', 'databaseId,status,conclusion', '--limit', '50'], { json: true, allowFail: true }) || [];
   return runs.filter((r) => r.status === 'completed' && !['success', 'skipped', 'neutral'].includes(r.conclusion)).map((r) => r.databaseId);

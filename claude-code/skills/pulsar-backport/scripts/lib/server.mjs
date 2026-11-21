@@ -12,6 +12,7 @@ import * as jobs from './jobs.mjs';
 import * as autopilot from './autopilot.mjs';
 import * as control from './control.mjs';
 import * as review from './review.mjs';
+import * as report from './report.mjs';
 import { listenConfig, listenAll, allowedHosts, hostOf, urlFor } from './listen.mjs';
 
 const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'web');
@@ -103,6 +104,8 @@ const ACTIONS = {
   'out-of-order': (sid, b, a) => { lane.pickOutOfOrder(sid, b, Number(a.pr), a.reason); return {}; },
   unblock: (sid, b, a) => ({ ok: lane.unblock(sid, b, Number(a.pr)) }),
   sync: (sid, b) => lane.syncPicks(sid, b),
+  'report-open': (sid, b) => { const file = report.reportFile(sid, b); spawn('code', [file], { detached: true, stdio: 'ignore' }).on('error', () => {}).unref(); return { file }; },
+  'report-gist': (sid, b) => report.createGist(sid, b),
   'accept-review': (sid, b, a) => { review.accept(sid, b, Number(a.pr), a.reason); return {}; },
   'fix-review': (sid, b, a) => { const p = lane.lanePicks(sid, b).find((x) => x.pr === Number(a.pr)); return { job: jobs.enqueue(sid, b, 'resolve', { pr: p.pr, concerns: p.detail.review?.concerns, instructions: a.instructions || undefined }) }; },
   'review-again': (sid, b, a) => { const p = lane.lanePicks(sid, b).find((x) => x.pr === Number(a.pr)); db.run('UPDATE picks SET detail = json_remove(detail, \'$.review\') WHERE session_id = ? AND branch = ? AND pr = ?', sid, b, p.pr); return {}; },
@@ -169,6 +172,7 @@ export function serve({ port = null, open = false } = {}) {
         }
         if (what === 'jobs' && m === 'GET') return send(200, db.all('SELECT id, branch, type, runner, status, args, result, created_at, started_at, finished_at FROM jobs WHERE session_id = ? ORDER BY id DESC LIMIT 100', sid).map((j) => ({ ...j, args: db.J(j.args, {}), result: db.J(j.result) })));
         if (what === 'lanes' && parts[3] && parts[4] === 'picks' && parts[5] && parts[6] === 'diff' && m === 'GET') return send(200, review.pickDiffs(sid, parts[3], Number(parts[5])));
+        if (what === 'lanes' && parts[3] && parts[4] === 'report' && m === 'GET') return send(200, { markdown: report.laneReport(sid, parts[3]) });
         if (what === 'lanes' && parts[3] && m === 'GET') return send(200, { ...db.lane(sid, parts[3]), picks: lane.lanePicks(sid, parts[3]) });
         if (what === 'decision' && m === 'POST') {
           const a = await body(req);

@@ -132,6 +132,21 @@ CREATE TABLE IF NOT EXISTS events (
   message TEXT NOT NULL,
   data TEXT
 );
+-- Per PR and branch: what the PR fixes, why it matters for the branch, and its compatibility impact (recorded by
+-- Claude review jobs; the backport report reads it, nothing is analysed again when a report is requested).
+CREATE TABLE IF NOT EXISTS analysis (
+  session_id TEXT NOT NULL,
+  pr INTEGER NOT NULL,
+  branch TEXT NOT NULL,
+  fixes TEXT NOT NULL,                         -- the problem the PR fixes, for a release-notes reader
+  relevance TEXT NOT NULL,                     -- why it matters for this branch
+  reason TEXT NOT NULL,                        -- bug | security | divergence | dependency | test | build | other
+  compat TEXT NOT NULL,                        -- none | behavior | breaking
+  compat_note TEXT,                            -- what changes for users or operators, and how to keep the old behaviour
+  job_id INTEGER,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (session_id, pr, branch)
+);
 CREATE INDEX IF NOT EXISTS events_session ON events (session_id, id);
 CREATE INDEX IF NOT EXISTS jobs_status ON jobs (status, runner);
 `;

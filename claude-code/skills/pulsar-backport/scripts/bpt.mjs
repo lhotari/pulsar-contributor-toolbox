@@ -12,6 +12,7 @@ import * as jobs from './lib/jobs.mjs';
 import * as autopilot from './lib/autopilot.mjs';
 import * as control from './lib/control.mjs';
 import * as review from './lib/review.mjs';
+import * as report from './lib/report.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SKILLS = path.resolve(HERE, '..', '..');
@@ -36,9 +37,11 @@ const HELP = `bpt — apache/pulsar backport sessions (state: ${db.DB_PATH})
   plan show <id> [--pr N] | report <id> [--out FILE] | labels <id> [--apply] [--removals]
   dep add <id> <pr> <depends-on> [--branch B] [--detail T] | dep set <id> <dep-id> <open|accepted|dismissed>
   lane <start|pick|pick-all|show|push-test|poll|squash|reset|push-final-fix> <id> <branch>
+  report <id> <branch> [--out F] [--gist]   the backport report: each cherry-pick with why, adaptation and validation (--gist: a secret gist)
   pick diff <id> <branch> <pr> [--json]    the master commit and the backport, file by file, with the review context
   pick review <id> <branch> <pr> --verdict ok|adapted|concern --summary T [--concerns T]   record a diff review
   pick accept-review <id> <branch> <pr> --reason T   accept a review concern
+  pick analysis <id> <branch> <pr> --fixes T --relevance T --reason bug|security|divergence|dependency|test|build|other --compat none|behavior|breaking [--compat-note T]
   lane build <id> <branch> <pr>   run the build check (changed modules compile, changed tests, checkstyle) for a committed pick
   lane absorb <id> <branch>       squash fixup! commits into the picks they fix and update the pick shas
   lane resync <id> <branch>       point every pick at its commit again after the lane history was rewritten outside the engine
@@ -231,6 +234,12 @@ async function main() {
       if (sub === 'set') { lane.setDep(sid, Number(pos[1]), pos[2]); return out(pullIn(sid)); }
       break;
     }
+    case 'report': {
+      const [sid, branch] = [need(sub, 'session id'), need(pos[0], 'branch')];
+      if (opt.gist) return out(report.createGist(sid, branch));
+      if (opt.out) { fs.writeFileSync(opt.out, report.laneReport(sid, branch)); return out({ file: opt.out }); }
+      console.log(report.laneReport(sid, branch)); return;
+    }
     case 'pick': {
       const [sid, branch, pr] = [need(pos[0], 'session id'), need(pos[1], 'branch'), Number(need(pos[2], 'pr'))];
       switch (sub) {
@@ -238,6 +247,9 @@ async function main() {
         case 'review': return out(review.record(sid, branch, pr, { verdict: need(opt.verdict, '--verdict'), summary: typeof opt.summary === 'string' ? opt.summary : null,
           concerns: typeof opt.concerns === 'string' ? opt.concerns : null, job: process.env.BPT_JOB ? Number(process.env.BPT_JOB) : null }));
         case 'accept-review': review.accept(sid, branch, pr, need(opt.reason, '--reason')); return out('ok');
+        case 'analysis': return out(review.recordAnalysis(sid, branch, pr, { fixes: typeof opt.fixes === 'string' ? opt.fixes : null,
+          relevance: typeof opt.relevance === 'string' ? opt.relevance : null, reason: opt.reason, compat: opt.compat,
+          compatNote: typeof opt['compat-note'] === 'string' ? opt['compat-note'] : null, job: process.env.BPT_JOB ? Number(process.env.BPT_JOB) : null }));
       }
       break;
     }

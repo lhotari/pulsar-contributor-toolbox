@@ -92,6 +92,10 @@ td.title { max-width: 520px; overflow-wrap: anywhere; } /* test names like FooTe
 dialog { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--ink); padding: 18px 20px; width: min(520px, 94vw); }
 dialog.wide { width: min(1100px, 96vw); }
 dialog.full { width: 98vw; max-width: 98vw; height: 94vh; max-height: 94vh; }
+.report { overflow-wrap: anywhere; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 6px 22px 22px; max-width: 1100px; }
+.report h2 { font-size: 20px; margin: 18px 0 8px; } .report h3 { font-size: 16px; margin: 22px 0 6px; border-top: 1px solid var(--line); padding-top: 14px; } .report h4 { font-size: 14px; margin: 14px 0 4px; }
+.report ul { padding-left: 20px; } .report li { margin: 4px 0; } .report code { background: var(--soft); padding: 0 3px; border-radius: 3px; }
+.report table { border-collapse: collapse; width: 100%; } .report td, .report th { border-bottom: 1px solid var(--line); padding: 5px 8px; text-align: left; vertical-align: top; }
 .review { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 10px 0; background: var(--soft); }
 .review.concern { border-color: var(--bad); background: var(--bad-bg); }
 .review.adapted { background: var(--info-bg); }
