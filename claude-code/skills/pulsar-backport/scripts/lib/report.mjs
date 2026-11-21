@@ -56,6 +56,7 @@ export function laneReport(sid, branch) {
 
   w.push(...ciw.lines);
   w.push('## Cherry-picks\n');
+  const issues = fixedIssues(sid, committed.map((p) => p.pr));
   committed.forEach((p, i) => {
     const it = items.get(p.pr) || {}; const a = it.assessment || {}; const t = targets.get(p.pr) || {}; const d = p.detail;
     w.push(`### ${i + 1}. ${prRef(p.pr)} ${title(p.pr)}\n`);
@@ -63,7 +64,9 @@ export function laneReport(sid, branch) {
     w.push(`${p.picked_sha && pushed.has(p.picked_sha) ? commitRef(p.picked_sha) : `\`${g.short(p.picked_sha) || '–'}\``} cherry-picked from ${master ? commitRef(master) : '–'}${p.status === 'empty' ? ' · already on the branch (empty pick)' : ''}${d.reused ? ' · reused from the tested commits of the source lane' : ''}\n`);
     const x = an.get(p.pr);
     const REASON = { bug: 'bug fix', security: 'security fix', divergence: 'avoids divergence from master', dependency: 'dependency of another pick', test: 'test reliability', build: 'build', other: 'other' };
-    w.push(`- **Fixes:** ${x ? one(x.fixes) : a.impact ? `${one(a.impact)} _(plan assessment; not analyzed yet)_` : '_not analyzed yet_'}`);
+    const iss = issues.get(p.pr) || [];
+    const issueText = iss.length ? ` Fixed issue${iss.length > 1 ? 's' : ''}: ${iss.map((x) => `[#${x.number}](${REPO_URL}/issues/${x.number})${x.title ? ` ${one(x.title)}` : ''}`).join('; ')}.` : '';
+    w.push(`- **Fixes:** ${x ? one(x.fixes) : a.impact ? `${one(a.impact)} _(plan assessment; not analyzed yet)_` : '_not analyzed yet_'}${issueText}`);
     // Why
     const why = [];
     if (x) why.push(`${one(x.relevance)} _(${REASON[x.reason] || x.reason})_`);
@@ -150,6 +153,35 @@ export function ciSection(l, ci) {
   }
   if (!t?.sha && !f?.sha) { lines.push('No CI run for the current batch yet.\n'); summary = 'CI: not run yet for the current batch.'; }
   return { summary, lines };
+}
+
+const FIXES_RE = /(?:fix(?:es|ed)?|close[sd]?|resolve[sd]?)\s*:?\s*(?:https:\/\/github\.com\/apache\/pulsar\/issues\/|apache\/pulsar#|#)(\d+)/gi;
+
+/**
+ * The issues each PR fixes, from its metadata on GitHub (closing issue references, and "Fixes #N" lines in the
+ * description). Fetched once per PR in batched GraphQL queries and stored in items.stats.fixedIssues
+ * ([{number, title}], empty when there is none), so a report does not fetch them again.
+ */
+export function fixedIssues(sid, prs) {
+  const rows = new Map(db.all(`SELECT pr, stats FROM items WHERE session_id = ? AND pr IN (${prs.map(() => '?').join(',') || 'NULL'})`, sid, ...prs)
+    .map((r) => [r.pr, db.J(r.stats, {})]));
+  const todo = prs.filter((pr) => rows.has(pr) && !Array.isArray(rows.get(pr).fixedIssues));
+  for (let i = 0; i < todo.length; i += 40) {
+    const batch = todo.slice(i, i + 40);
+    const query = `query { repository(owner: "apache", name: "pulsar") { ${batch.map((pr) => `p${pr}: pullRequest(number: ${pr}) { body closingIssuesReferences(first: 10) { nodes { number title } } }`).join(' ')} } }`;
+    const r = spawnSync('gh', ['api', 'graphql', '-f', `query=${query}`], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    if (r.status !== 0) break; // offline or rate limited: the report shows what is stored, the next one tries again
+    const repo = db.J(r.stdout, {})?.data?.repository || {};
+    for (const pr of batch) {
+      const node = repo[`p${pr}`]; if (!node) continue;
+      const list = new Map((node.closingIssuesReferences?.nodes || []).map((x) => [x.number, { number: x.number, title: x.title }]));
+      for (const m of String(node.body || '').matchAll(FIXES_RE)) { const n = Number(m[1]); if (n !== pr && !list.has(n)) list.set(n, { number: n, title: null }); }
+      const stats = { ...rows.get(pr), fixedIssues: [...list.values()] };
+      db.run('UPDATE items SET stats = ? WHERE session_id = ? AND pr = ?', db.S(stats), sid, pr);
+      rows.set(pr, stats);
+    }
+  }
+  return new Map([...rows].map(([pr, st]) => [pr, st.fixedIssues || []]));
 }
 
 export function reportFile(sid, branch) {
