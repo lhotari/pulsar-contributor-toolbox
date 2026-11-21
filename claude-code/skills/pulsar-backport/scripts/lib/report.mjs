@@ -117,7 +117,7 @@ export function laneReport(sid, branch) {
  */
 export function linkPrNumbers(md) {
   return md.split(/(`[^`\n]*`)/).map((part, i) => (i % 2 ? part
-    : part.replace(/(?<![\[\w\/&`#])(apache\/pulsar)?#(\d{3,6})\b(?!\]\()/g, (_, repo, n) => `[${repo || ''}#${n}](${REPO_URL}/issues/${n})`))).join('');
+    : part.replace(/(?<![\[\w&`#])(?<![A-Za-z][\w.-]*\/)(apache\/pulsar)?#(\d{3,6})\b(?!\]\()/g, (_, repo, n) => `[${repo || ''}#${n}](${REPO_URL}/issues/${n})`))).join('');
 }
 
 const RESULT = (r) => (r.status !== 'completed' ? `⏳ ${r.status}` : r.conclusion === 'success' ? '✅ success' : ['skipped', 'neutral'].includes(r.conclusion) ? `➖ ${r.conclusion}` : `❌ ${r.conclusion}`);
