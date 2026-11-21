@@ -214,6 +214,13 @@ export function cherryPick(cwd, sha, { trailer = true } = {}) {
   let r = git(cwd, [...args, ...shas], { allowFail: true });
   for (let i = 0; !r.ok && i <= shas.length; i++) {
     const unmerged = git(cwd, ['diff', '--name-only', '--diff-filter=U']).split('\n').filter(Boolean);
+    // rerere (rerere.autoupdate) replayed a recorded resolution and staged it: nothing is left to resolve, so the
+    // pick goes on; the build check validates the result as for any pick.
+    if (!unmerged.length && /Staged '|Resolved '/.test(r.err + r.out) && !git(cwd, ['diff', '--cached', '--quiet'], { allowFail: true }).ok) {
+      r = git(cwd, ['-c', 'core.editor=true', 'cherry-pick', '--continue'], { allowFail: true });
+      if (r.ok) continue;
+      return { ok: false, conflicts: [], error: r.err };
+    }
     if (unmerged.length || !/now empty|nothing to commit/.test(r.err + r.out)) return { ok: false, conflicts: unmerged, error: r.err };
     r = git(cwd, ['cherry-pick', '--skip'], { allowFail: true });
     if (shas.length === 1) return { ok: false, empty: true, conflicts: [] };

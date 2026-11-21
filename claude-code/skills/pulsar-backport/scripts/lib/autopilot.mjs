@@ -46,7 +46,12 @@ export function advance(sid, { force = false } = {}) {
       }
       case 'picking': jobs.enqueue(sid, b, 'pick-all'); say('pick'); break;
       case 'needs-attention': {
-        const p = lane.lanePicks(sid, b).find((x) => ['conflict', 'needs-fix'].includes(x.status));
+        const all = lane.lanePicks(sid, b);
+        // A pick that belongs before committed ones (a dependency just added) goes in first: the lane is rebuilt in
+        // master order before a stuck pick is resolved against a history that lacks it.
+        const early = all.find((x) => x.status === 'pending' && !x.detail.outOfOrder && all.some((y) => y.seq > x.seq && ['picked', 'needs-fix', 'conflict'].includes(y.status)));
+        if (early) { lane.setPhase(sid, b, 'picking', `#${early.pr} goes in first, in master order`); jobs.enqueue(sid, b, 'pick-all'); say(`pick #${early.pr} first (master order)`); break; }
+        const p = all.find((x) => ['conflict', 'needs-fix'].includes(x.status));
         if (!p) {
           if (lane.releaseBlocked(sid, b).length) { lane.setPhase(sid, b, 'picking'); jobs.enqueue(sid, b, 'pick-all'); say('pick'); break; }
           const blocked = lane.lanePicks(sid, b).find((x) => x.status === 'blocked');
