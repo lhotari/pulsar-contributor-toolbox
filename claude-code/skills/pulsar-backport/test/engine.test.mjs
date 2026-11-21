@@ -67,6 +67,7 @@ const SID = 'test-session';
 
 test('discover classifies, dry-runs and finds blame dependencies', () => {
   plan.createSession({ id: SID, repo, remote: 'origin', sincePr: 100, branches: plan.parseBranches('branch-4.2:4.2.6,branch-4.0:4.0.15<branch-4.2') });
+  plan.saveConfig(SID, { diffReview: false }); // the diff review has its own test
   const r = plan.discover(SID, { log: () => {} });
   assert.equal(r.total, 9);
   const v = plan.planView(SID);
@@ -398,11 +399,11 @@ test('a dependency left out in review is not asked again: the pick goes on witho
   assert.deepEqual(lane.releaseBlocked(sid, B), [112]);
 });
 
-test('every pick passes the build check; a fix for an earlier pick is squashed into it and the shas follow', () => {
+test('every pick passes the build check; a fix for an earlier pick is squashed into it and the shas follow', async () => {
   // Fake Maven: records its arguments; fails compile/test while the FAIL marker exists.
   const mvnLog = path.join(tmp, 'mvn.log'); const failMark = path.join(tmp, 'mvn.fail');
   const fake = path.join(bin, 'fake-mvn');
-  fs.writeFileSync(fake, `#!/bin/sh\necho "$@" >> ${mvnLog}\ncase "$*" in *checkstyle:check*) exit 0 ;; esac\n[ -e ${failMark} ] && { echo "[ERROR] COMPILATION ERROR: cannot find symbol"; exit 1; }\nexit 0\n`, { mode: 0o755 });
+  fs.writeFileSync(fake, `#!/bin/sh\necho "$@" >> ${mvnLog}\ncase "$*" in *checkstyle:check*) exit 0 ;; esac\n[ -e ${failMark} ] && { echo "[ERROR] COMPILATION ERROR: cannot find symbol"; cat ${failMark}; exit 1; }\nexit 0\n`, { mode: 0o755 });
   process.env.BPT_MVN = fake;
   fs.appendFileSync(path.join(repo, '.git/info/exclude'), '\npom.xml\n');
   try {
@@ -420,7 +421,7 @@ test('every pick passes the build check; a fix for an earlier pick is squashed i
     assert.deepEqual(r.results.map((x) => x.status), ['picked', 'built', 'picked', 'built', 'done'], 'each pick is built before the next one');
     assert.equal(pick(114).detail.build.ok, true); assert.deepEqual(pick(114).detail.build.modules, ['mod']);
     const calls = fs.readFileSync(mvnLog, 'utf8');
-    assert.match(calls, /-pl mod -am (test|test-compile)/);
+    assert.match(calls, /-pl mod -am package/);
     assert.match(calls, /-pl mod initialize checkstyle:check -Dcheckstyle.includes=\*\*\/Foo.java/);
 
     // The check fails for #114 (built again, e.g. after a rebuild): the pick needs a fix and goes to a resolve job.
@@ -444,7 +445,59 @@ test('every pick passes the build check; a fix for an earlier pick is squashed i
     assert.equal(pick(115).detail.build.ok, true, 'a pick that was only rewritten keeps its check');
     const d = lane.pickAll(sid, B, { log: () => {} });
     assert.deepEqual(d.results.map((x) => x.status), ['built', 'done'], 'the amended pick is checked again');
+
+    // A later pick's check fails on lines an earlier pick wrote: the earlier pick is named, and can be dropped from the decision.
+    fs.writeFileSync(failMark, `[ERROR] ${wt}/mod/src/main/java/Foo.java:[8,5] cannot find symbol\n`);
+    db.run(`UPDATE picks SET detail = json_remove(detail, '$.build') WHERE session_id = ? AND pr = 115`, sid);
+    db.updateLane(sid, B, { phase: 'picking' });
+    assert.deepEqual(lane.pickAll(sid, B, { log: () => {} }).last.status, 'needs-fix');
+    assert.deepEqual(pick(115).detail.build.suspects.map((x) => [x.pr, x.file, x.line]), [[114, 'mod/src/main/java/Foo.java', 8]]);
+    db.run(`UPDATE jobs SET status = 'cancelled' WHERE session_id = ? AND status = 'queued'`, sid);
+    const control = await import('../scripts/lib/control.mjs');
+    const dec = control.list(sid).find((x) => x.key === `needs-fix:${B}:115`);
+    assert.ok(dec.options.some((o) => o.id === 'drop:114')); assert.match(dec.text, /come from earlier picks: #114 \(Foo.java:8\)/);
+    fs.rmSync(failMark);
   } finally { delete process.env.BPT_MVN; }
+});
+
+test('diff review: picks are reviewed after picking, a concern holds the squash, a changed pick is reviewed again', async () => {
+  const control = await import('../scripts/lib/control.mjs');
+  const review = await import('../scripts/lib/review.mjs');
+  const sid = 'review-session'; const B = 'branch-4.2';
+  plan.createSession({ id: sid, repo, remote: 'origin', sincePr: 113, branches: plan.parseBranches('branch-4.2:4.2.10') });
+  plan.discover(sid, { log: () => {}, blame: false });
+  plan.setDecisions(sid, [114, 115].map((pr) => ({ pr, branch: B, decision: 'backport' })));
+  db.run(`UPDATE sessions SET status = 'backporting' WHERE id = ?`, sid);
+  lane.startLane(sid, B, { log: () => {} });
+  assert.equal(lane.pickAll(sid, B, { log: () => {} }).last.status, 'done');
+  assert.deepEqual(review.unreviewed(sid, B), [114, 115]);
+  // After picking, autopilot reviews before it verifies.
+  assert.ok(autopilot.advance(sid).some((s) => /diff review of #114, #115/.test(s.note)));
+  const j = db.get(`SELECT id, args FROM jobs WHERE session_id = ? AND type = 'review' AND status = 'queued'`, sid);
+  assert.deepEqual(db.J(j.args).prs, [114, 115]);
+  assert.match(jobs.workerPrompt(jobs.job(j.id)), /pick review/);
+  // Both sides, file by file.
+  const d = review.pickDiffs(sid, B, 114);
+  assert.deepEqual(d.files.map((f) => [f.path, !!f.master, !!f.backport]), [['mod/src/main/java/Foo.java', true, true]]);
+  assert.match(review.diffText(d), /----- master[\s\S]*----- backport/);
+  review.record(sid, B, 114, { verdict: 'ok', summary: 'same change', job: j.id });
+  assert.throws(() => review.record(sid, B, 115, { verdict: 'concern', summary: 's' }), /needs --concerns/);
+  review.record(sid, B, 115, { verdict: 'concern', summary: 'drops a hunk', concerns: 'line 3 is not fixed', job: j.id });
+  jobs.finish(j.id, 'done', { summary: 'reviewed' });
+  assert.deepEqual(review.unreviewed(sid, B), []);
+  // The concern is a decision, and it holds the squash.
+  const dec = control.list(sid).find((x) => x.key === `review:${B}:115`);
+  assert.deepEqual(dec.options.map((o) => o.id), ['fix', 'accept', 'drop']);
+  db.updateLane(sid, B, { phase: 'ci-green' });
+  assert.ok(autopilot.advance(sid).some((s) => /waits for the review concerns of #115/.test(s.note)));
+  control.apply(sid, dec.key, 'accept', 'not a problem on 4.2');
+  assert.deepEqual(review.concerns(sid, B), []);
+  // A rebuilt lane with the same patch keeps the review; a changed patch is reviewed again.
+  const p114 = lane.lanePicks(sid, B).find((x) => x.pr === 114);
+  db.run(`UPDATE picks SET picked_sha = ? WHERE session_id = ? AND branch = ? AND pr = 114`, sh(lane.worktreeDir(sid, B), 'rev-parse', 'HEAD'), sid, B);
+  assert.deepEqual(review.unreviewed(sid, B), [114], 'a different patch');
+  db.run(`UPDATE picks SET picked_sha = ?, detail = ? WHERE session_id = ? AND branch = ? AND pr = 114`, p114.picked_sha, db.S(p114.detail), sid, B);
+  assert.deepEqual(review.unreviewed(sid, B), []);
 });
 
 function edit2(dir, f, i, text) { const p = path.join(dir, 'mod/src/main/java', f); const a = fs.readFileSync(p, 'utf8').split('\n'); a[i - 1] = text; fs.writeFileSync(p, a.join('\n')); }

@@ -4,6 +4,7 @@
 import * as db from './db.mjs';
 import * as jobs from './jobs.mjs';
 import * as lane from './lane.mjs';
+import * as review from './review.mjs';
 
 const attempts = (sid, branch, type, key = {}) => db.all(`SELECT args FROM jobs WHERE session_id = ? AND branch = ? AND type = ? AND status IN ('failed','done','cancelled')`, sid, branch, type)
   .map((j) => db.J(j.args, {})).filter((a) => Object.entries(key).every(([k, v]) => a[k] === v)).length;
@@ -130,13 +131,16 @@ export function pending(sid) {
           options: [
             ...unmet.map((u, i) => ({ id: `add:${u.depends_on}`, label: `Backport #${u.depends_on} first`, recommended: i === 0,
               run: () => (ids(u.depends_on).length ? lane.acceptDeps(sid, b, ids(u.depends_on)) : lane.addDependency(sid, b, p.pr, u.depends_on, u.detail || 'accepted while backporting')) })),
-            { id: 'dismiss', label: `Pick #${p.pr} without ${unmet.length > 1 ? 'them' : 'it'}`, run: () => { for (const u of unmet) for (const id of ids(u.depends_on)) lane.setDep(sid, id, 'dismissed'); return { ok: lane.unblock(sid, b, p.pr) }; } },
+            { id: 'dismiss', label: `Pick #${p.pr} without ${unmet.length > 1 ? 'them' : 'it'}`, run: () => { for (const u of unmet) for (const id of ids(u.depends_on)) lane.setDep(sid, id, 'dismissed'); lane.unblock(sid, b, p.pr);
+              // setDep already unblocks the pick when its last dependency is dismissed.
+              return { ok: lane.lanePicks(sid, b).find((x) => x.pr === p.pr)?.status !== 'blocked' }; } },
             { id: 'skip', label: `Leave #${p.pr} out`, cls: 'ghost', run: () => { lane.skipPick(sid, b, p.pr, 'left out: dependency not wanted'); return {}; } },
           ] });
       }
       if (['conflict', 'needs-fix'].includes(p.status) && idle) {
         const tries = lane.resolveAttempts(sid, b, p.pr);
         const bf = p.status === 'needs-fix' && p.detail.build && !p.detail.build.ok ? p.detail.build : null;
+        const earlier = (bf?.suspects || []).filter((x) => x.pr && x.pr !== p.pr).slice(0, 3);
         const uniq = (p.detail.conflictDeps || []).filter((c, i, a) => a.findIndex((x) => x.depends_on === c.depends_on) === i);
         // A PR the user left out in review is not offered again: the pick is resolved without it.
         const left = uniq.filter((c) => c.excluded || lane.excludedInReview(sid, b, c.depends_on));
@@ -146,13 +150,32 @@ export function pending(sid) {
             : bf ? `fails the build check (${bf.stage})` : 'needs a fix after the post-pick check'}`,
           text: [tries ? `${tries} resolve attempt(s) did not finish it.` : '', hints.length ? `Missing master commits that touched these files: ${hints.map((c) => `#${c.depends_on} (${c.decision})`).join(', ')}.` : '',
             left.length ? `Resolved without ${left.map((c) => `#${c.depends_on}`).join(', ')}, left out in review.` : '',
-            bf ? `Modules ${bf.modules.join(', ')}${bf.tests ? `, tests ${bf.tests}` : ''}; log ${bf.log}` : ''].filter(Boolean).join(' '),
+            bf ? `Modules ${bf.modules.join(', ')}${bf.tests ? `, tests ${bf.tests}` : ''}; log ${bf.log}` : '',
+            earlier.length ? `The failing lines come from earlier picks: ${earlier.map((x) => `#${x.pr} (${x.file.split('/').pop()}:${x.line})`).join(', ')}. Fix that pick, drop it, or backport what it is missing.` : ''].filter(Boolean).join(' '),
           options: [
             { id: 'resolve', label: tries ? 'Resolve with Claude again' : 'Resolve with Claude', recommended: true, input: tries ? 'Instructions for the worker (optional)' : null, optional: true, run: (text) => enqueue(sid, b, 'resolve', { pr: p.pr, instructions: text || undefined }) },
             ...hints.map((c) => ({ id: `add:${c.depends_on}`, label: `Backport #${c.depends_on} first`, run: () => { settle(sid, b, `#${c.depends_on} added before #${p.pr}`); return lane.addDependency(sid, b, p.pr, c.depends_on, `also changed ${c.file}, which conflicts`); } })),
             { id: 'resolved', label: 'I resolved it in the worktree', run: () => lane.markResolved(sid, b, p.pr) },
+            ...earlier.map((x) => ({ id: `drop:${x.pr}`, label: `Drop #${x.pr} (the failing lines come from it)`, cls: 'ghost', confirm: `Drop #${x.pr}? The lane is rebuilt without it from its commit.`,
+              run: () => { settle(sid, b, `#${x.pr} dropped`); return lane.dropPick(sid, b, x.pr, `its code fails the build check of #${p.pr}`); } })),
             bf ? { id: 'accept-build', label: 'Accept the failing check', input: 'Why it is not this pick (e.g. it fails on the branch too)', run: (text) => { if (!text) throw new Error('say why'); lane.acceptBuild(sid, b, p.pr, text); return {}; } } : null,
             { id: 'skip', label: `Leave #${p.pr} out`, cls: 'ghost', run: () => { if (p.status === 'needs-fix') return lane.dropPick(sid, b, p.pr, 'left out: could not be fixed'); lane.skipPick(sid, b, p.pr, 'left out: conflict'); return {}; } },
+          ] });
+      }
+    }
+
+    // A diff review concern: fix it in the pick, accept it, or drop the pick.
+    if (idle && db.session(sid).config.diffReview !== false) {
+      for (const p of review.concerns(sid, b)) {
+        const r = p.detail.review;
+        add({ key: `review:${b}:${p.pr}`, kind: 'review', branch: b, pr: p.pr, title: `#${p.pr} ${title(p.pr)}: the diff review found a problem`,
+          text: `${r.concerns}\n\nReview: ${r.summary}`, recommendation: 'Fix it in the pick with Claude',
+          options: [
+            { id: 'fix', label: 'Fix it with Claude', recommended: true, input: 'Instructions for the worker (optional)', optional: true,
+              run: (text) => enqueue(sid, b, 'resolve', { pr: p.pr, concerns: r.concerns, instructions: text || undefined }) },
+            { id: 'accept', label: 'Accept as is', input: 'Why the backport is right as it is', run: (text) => { if (!text) throw new Error('say why'); review.accept(sid, b, p.pr, text); return {}; } },
+            { id: 'drop', label: `Drop #${p.pr}`, cls: 'ghost', confirm: `Drop #${p.pr} from ${b}? The lane is rebuilt from its commit.`,
+              run: () => { settle(sid, b, `#${p.pr} dropped`); return lane.dropPick(sid, b, p.pr, 'dropped after the diff review'); } },
           ] });
       }
     }

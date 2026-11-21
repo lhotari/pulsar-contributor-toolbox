@@ -65,6 +65,13 @@
   <form id="replyForm" hidden><textarea name="text" rows="3" placeholder="Answer the worker's question; its Claude Code session resumes with this text"></textarea><button class="primary">Send reply</button></form>
 </dialog>
 
+<dialog id="cmpDialog" class="full">
+  <div class="logHead"><h2 id="cmpTitle"></h2><span class="grow"></span><label class="toggle small"><input type="checkbox" id="cmpSame"> show identical files</label><button id="cmpClose" class="ghost">Close</button></div>
+  <div id="cmpMeta" class="small muted"></div>
+  <div id="cmpReview"></div>
+  <div id="cmpBody"></div>
+</dialog>
+
 <div id="toast" class="toast" hidden></div>
 <script src="app.js" type="module"></script>
 </body>

@@ -4,9 +4,11 @@ import * as db from './db.mjs';
 import * as jobs from './jobs.mjs';
 import * as lane from './lane.mjs';
 import * as plan from './plan.mjs';
+import * as review from './review.mjs';
 
 const POLL_MS = Number(process.env.BPT_POLL_MS || 5 * 60 * 1000);
 const REUSABLE = ['ready', 'final-ci', 'final-ci-failed', 'done'];
+const REVIEWS = ['picked', 'verified', 'testing', 'ci-failed', 'ci-green'];
 
 function attemptsFor(sid, branch, type, key) {
   return db.all(`SELECT args FROM jobs WHERE session_id = ? AND branch = ? AND type = ? AND status IN ('failed','done','cancelled')`, sid, branch, type)
@@ -27,6 +29,12 @@ export function advance(sid, { force = false } = {}) {
     if (lane.POST_PICK.includes(l.phase)) {
       const hold = lane.holds(sid, b);
       if (hold.length) { say(`waits for a decision on ${hold.map((x) => `#${x.pr}`).join(', ')}`); continue; }
+    }
+    // Diff review: once picking is done, every committed pick is compared with its master commit (Claude review jobs,
+    // a batch at a time), before verification and, for picks changed later, before the squash.
+    if (REVIEWS.includes(l.phase) && cfg.diffReview !== false) {
+      const todo = review.unreviewed(sid, b);
+      if (todo.length) { const prs = todo.slice(0, cfg.reviewBatch || 8); jobs.enqueue(sid, b, 'review', { prs }); say(`diff review of ${prs.map((x) => `#${x}`).join(', ')}${todo.length > prs.length ? ` (${todo.length - prs.length} more after)` : ''}`); continue; }
     }
     switch (l.phase) {
       case 'not-started': {
@@ -70,7 +78,11 @@ export function advance(sid, { force = false } = {}) {
         if (attemptsFor(sid, b, 'fix-ci', { kind, sha }) >= 1 && !force) { say('a CI fix attempt for this commit already ran; waits for the user'); break; }
         jobs.enqueue(sid, b, 'fix-ci', { kind, sha }); say(`investigate ${kind} CI failure`); break;
       }
-      case 'ci-green': jobs.enqueue(sid, b, 'squash'); say('squash fixups'); break;
+      case 'ci-green': {
+        const open = cfg.diffReview === false ? [] : review.concerns(sid, b);
+        if (open.length) { say(`waits for the review concerns of ${open.map((x) => `#${x.pr}`).join(', ')}`); break; }
+        jobs.enqueue(sid, b, 'squash'); say('squash fixups'); break;
+      }
       case 'ready': say('ready to finalize (user action)'); break;
       default: break;
     }

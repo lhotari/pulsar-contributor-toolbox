@@ -10,6 +10,7 @@ import * as g from './git.mjs';
 import * as gh from './gh.mjs';
 import * as jobs from './jobs.mjs';
 import { buildCheck } from './build.mjs';
+import { intentCheck } from './intent.mjs';
 import { remote, remoteRef, depOnBranch, saveConfig, pullInDependencies } from './plan.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -167,7 +168,11 @@ export function pickNext(sid, branch) {
   const stuck = list.find((p) => ['conflict', 'needs-fix', 'blocked'].includes(p.status));
   if (stuck) { db.updateLane(sid, branch, { phase: 'needs-attention' }); return { status: stuck.status, pr: stuck.pr }; }
   // A fix made for an earlier pick goes into that pick's commit before anything else happens.
-  if (laneCommits(sid, branch).some((c) => c.fixup)) { const a = absorbFixups(sid, branch); if (a.absorbed) return { status: 'absorbed', amended: a.amended }; }
+  if (laneCommits(sid, branch).some((c) => c.fixup)) {
+    const a = absorbFixups(sid, branch);
+    if (a.absorbed) return { status: 'absorbed', amended: a.amended };
+    if (a.orphans) return { status: 'orphan-fixup', orphans: a.orphans };
+  }
   // Every committed pick passes the build check (compile, changed tests, checkstyle) before the next one goes in.
   const unbuilt = list.find((p) => p.status === 'picked' && needsBuild(cfg, p));
   if (unbuilt) {
@@ -521,7 +526,7 @@ function conflictDeps(sid, cfg, branch, pick, files) {
   return out;
 }
 
-function runCheck(dir, sha, base = null) {
+export function runCheck(dir, sha, base = null) {
   const script = checkPickScript();
   if (!script) return { ok: true, skipped: 'check-pick.sh not found' };
   // With a base, only lines added since it count (the pick and its fixups), not code already on the branch.
@@ -545,7 +550,12 @@ export function buildPick(sid, branch, p, { log = console.log } = {}) {
   const l = db.lane(sid, branch); const cfg = db.session(sid).config;
   const files = g.git(l.worktree, ['diff-tree', '--no-commit-id', '--name-only', '-r', p.picked_sha]).split('\n').filter(Boolean);
   const { dtest } = changedTests(sid, branch, p);
-  const r = buildCheck({ dir: l.worktree, files, dtest, cfg, name: `build-${sid}-${branch}-${p.pr}`, log });
+  // First what needs no build: the master change is in effect on the branch (e.g. a Gradle dependency upgrade
+  // made in Maven too).
+  const intent = intentCheck({ repo: cfg.repo, master: p.detail.master || p.source_sha, dir: l.worktree });
+  const r = !intent.ok
+    ? { ok: false, stage: 'intent: the master change is not fully applied', modules: [], tests: '', output: intent.problems.join('\n'), intent: intent.checks, at: db.now() }
+    : { ...buildCheck({ dir: l.worktree, files, dtest, cfg, name: `build-${sid}-${branch}-${p.pr}`, log }), ...(intent.checks.length ? { intent: intent.checks } : {}) };
   const build = { ...r, head: g.rev(l.worktree, 'HEAD') };
   const fresh = picks(sid, branch).find((x) => x.pr === p.pr);
   if (r.ok) {
@@ -553,11 +563,61 @@ export function buildPick(sid, branch, p, { log = console.log } = {}) {
     db.event(sid, r.skipped ? `#${p.pr}: build check skipped (${r.skipped})` : `#${p.pr} passed the build check: ${r.modules.join(', ')}${r.tests ? `; tests ${r.tests}` : '; no changed tests'}; checkstyle`, { branch, level: r.skipped ? 'warn' : 'info' });
     return build;
   }
+  // A problem can come from an earlier pick and only show now (another module, a test that uses its code):
+  // the picks that last touched the failing lines.
+  build.suspects = suspectsOf(sid, branch, r.output || '');
+  const others = build.suspects.filter((x) => x.pr && x.pr !== p.pr);
   setPick(sid, branch, p.pr, { status: 'needs-fix', detail: { ...fresh.detail, build } });
   db.updateLane(sid, branch, { phase: 'needs-attention' });
-  attention(sid, branch, `#${p.pr} applied, but the build check failed (${r.stage}) in ${r.modules.join(', ')}`);
+  attention(sid, branch, `#${p.pr} applied, but the build check failed (${r.stage}) in ${r.modules.join(', ')}${others.length ? `; the failing lines come from ${others.map((x) => `#${x.pr}`).join(', ')}` : ''}`);
   queueResolve(sid, branch, p.pr);
   return build;
+}
+
+const ERROR_LINE = /^\[ERROR\] (\/[^\s:]+\.java):\[(\d+),\d+\]/gm;
+/**
+ * The lane picks that last changed the lines a build failure points at (compile errors), by git blame at HEAD.
+ * [{pr, sha, file, line}], one per pick, the pick at the head of the lane last; a line from before the lane is {pr: null}.
+ */
+export function suspectsOf(sid, branch, output) {
+  const l = db.lane(sid, branch); const dir = l.worktree;
+  const shaToPr = new Map(laneCommits(sid, branch).filter((c) => c.pick).map((c) => [c.sha, c.pick.pr]));
+  const seen = new Map();
+  for (const m of [...String(output).matchAll(ERROR_LINE)].slice(0, 30)) {
+    const file = path.relative(dir, m[1]); if (file.startsWith('..')) continue;
+    const b = g.git(dir, ['blame', '--porcelain', '-L', `${m[2]},${m[2]}`, 'HEAD', '--', file], { allowFail: true });
+    const sha = (b.out || '').split(' ')[0]; if (!/^[0-9a-f]{40}$/.test(sha)) continue;
+    const pr = shaToPr.get(sha) ?? null;
+    const key = pr ?? `base:${file}`;
+    if (!seen.has(key)) seen.set(key, { pr, sha, file, line: Number(m[2]) });
+  }
+  return [...seen.values()];
+}
+
+/**
+ * After the lane worktree's history was rewritten outside the engine (e.g. a branch verified commit by commit in
+ * another worktree and the lane reset to it), point every committed pick at its commit again, by the cherry-pick
+ * trailer or PR number. `builds` ({pr: build}) records build checks made elsewhere. A committed pick that has no
+ * commit any more is reported, not changed. Returns {mapped, missing, extra}.
+ */
+export function resyncPicks(sid, branch, { builds = {} } = {}) {
+  const l = db.lane(sid, branch);
+  const st = g.state(l.worktree);
+  if (st.cherryPicking || st.rebasing || st.dirty) throw new Error('the lane worktree is busy or dirty');
+  const byPr = new Map(picks(sid, branch).map((p) => [p.pr, p]));
+  const mapped = []; const extra = []; const seen = new Set();
+  for (const c of laneCommits(sid, branch)) {
+    if (!c.pick) { extra.push({ sha: c.sha, subject: c.subject }); continue; }
+    const p = byPr.get(c.pick.pr); seen.add(p.pr);
+    const build = builds[p.pr] ?? p.detail.build;
+    setPick(sid, branch, p.pr, { picked_sha: c.sha, status: p.status === 'needs-fix' && build?.ok ? 'picked' : p.status, detail: { ...p.detail, build } });
+    mapped.push(p.pr);
+  }
+  const missing = picks(sid, branch).filter((p) => COMMITTED.includes(p.status) && !seen.has(p.pr)).map((p) => p.pr);
+  db.updateLane(sid, branch, { head_sha: st.head, squashed_sha: null });
+  db.event(sid, `Picks re-synced to the lane worktree at ${g.short(st.head)}: ${mapped.length} mapped${missing.length ? `; no commit for ${missing.map((x) => `#${x}`).join(', ')}` : ''}${extra.length ? `; ${extra.length} commit(s) without a pick` : ''}`,
+    { branch, level: missing.length || extra.length ? 'attention' : 'info' });
+  return { mapped, missing, extra };
 }
 
 /** The user accepts a failing build check for a pick (a failure that is not the pick's, e.g. it fails on the branch too). */
@@ -585,6 +645,15 @@ export function absorbFixups(sid, branch) {
   const fix = commits.filter((c) => c.fixup);
   if (!fix.length) return { absorbed: 0 };
   const target = (c) => { const ref = c.subject.replace(/^(fixup|squash|amend)! /, ''); return commits.find((x) => x.pick && (x.sha.startsWith(ref) || x.subject === ref)) || null; };
+  // A fixup of a commit that is not a pick of this lane (e.g. one already on the release branch) cannot be squashed:
+  // the fix has to go into the pick it belongs to (the one that needs it), so the lane waits for that.
+  const orphans = fix.filter((c) => !target(c));
+  if (orphans.length) {
+    const text = `${orphans.map((c) => g.short(c.sha)).join(', ')} ${orphans.length > 1 ? 'are fixups' : 'is a fixup'} of a commit that is not a pick of this lane (${orphans.map((c) => `"${c.subject.replace(/^(fixup|squash|amend)! /, '').slice(0, 80)}"`).join(', ')}); reword ${orphans.length > 1 ? 'them' : 'it'} to fix up the pick that needs the change (git commit --amend -m "fixup! <that pick's subject>"), then continue picking`;
+    db.updateLane(sid, branch, { phase: 'needs-attention' });
+    attention(sid, branch, text);
+    return { absorbed: 0, orphans: orphans.map((c) => c.sha), reason: text };
+  }
   const amended = [...new Set(fix.map((c) => target(c)?.pick?.pr).filter(Boolean))];
   const before = st.head;
   const r = g.git(dir, ['rebase', '-i', '--autosquash', l.base_sha], { allowFail: true, env: { GIT_SEQUENCE_EDITOR: ':', GIT_EDITOR: ':' } });

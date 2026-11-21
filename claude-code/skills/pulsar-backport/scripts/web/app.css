@@ -91,6 +91,30 @@ td.title { max-width: 520px; overflow-wrap: anywhere; } /* test names like FooTe
 .ev.attention { background: var(--attn-bg); } .ev.error { background: var(--bad-bg); } .ev.warn { background: var(--warn-bg); }
 dialog { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--ink); padding: 18px 20px; width: min(520px, 94vw); }
 dialog.wide { width: min(1100px, 96vw); }
+dialog.full { width: 98vw; max-width: 98vw; height: 94vh; max-height: 94vh; }
+.review { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 10px 0; background: var(--soft); }
+.review.concern { border-color: var(--bad); background: var(--bad-bg); }
+.review.adapted { background: var(--info-bg); }
+.review.ok { background: var(--ok-bg); }
+.review .actions { margin: 8px 0 0; }
+.cmpFile { border: 1px solid var(--line); border-radius: 8px; margin: 10px 0; overflow: hidden; }
+.cmpFile > .cmpHead { display: flex; gap: 10px; align-items: baseline; padding: 6px 10px; background: var(--soft); border-bottom: 1px solid var(--line); font-family: var(--mono); font-size: 12.5px; }
+.cmpFile .cmpCols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.cmpFile .cmpCol { overflow-x: auto; border-right: 1px solid var(--line); }
+.cmpFile .cmpCol:last-child { border-right: 0; }
+.cmpFile .cmpCol .cmpLabel { position: sticky; left: 0; padding: 3px 10px; font-size: 11.5px; color: var(--muted); border-bottom: 1px solid var(--line); }
+.cmpFile pre { margin: 0; font-family: var(--mono); font-size: 12px; line-height: 1.4; }
+.cmpFile pre span { display: block; padding: 0 10px; white-space: pre; min-width: max-content; }
+.cmpFile pre span.add { background: var(--ok-bg); }
+.cmpFile pre span.del { background: var(--bad-bg); }
+.cmpFile pre span.hunk { color: var(--accent); background: var(--info-bg); }
+.cmpFile .cmpNone { padding: 10px; color: var(--muted); font-style: italic; }
+.cmpFile.onlyMaster > .cmpHead { background: var(--warn-bg); }
+.cmpFile.onlyBackport > .cmpHead { background: var(--attn-bg); }
+.chip.review-ok { background: var(--ok-bg); color: var(--ok); }
+.chip.review-adapted { background: var(--info-bg); color: var(--accent); }
+.chip.review-concern { background: var(--bad-bg); color: var(--bad); }
+.chip.review-accepted { background: var(--warn-bg); color: var(--warn); }
 dialog::backdrop { background: rgba(0,0,0,.35); }
 dialog form label { display: flex; flex-direction: column; gap: 3px; margin-bottom: 10px; font-size: 13px; }
 menu { display: flex; justify-content: flex-end; gap: 8px; padding: 0; margin: 14px 0 0; }
@@ -141,7 +165,9 @@ pre.check { font: 11.5px/1.4 var(--mono); white-space: pre-wrap; margin: 6px 0 0
   tbody tr.inGroup > td:first-child { border-left: none; } tbody tr.inGroup { border-left: 3px solid var(--accent); }
   tr.groupHead { border-top: 2px solid var(--accent); }
   .dep { flex-wrap: wrap; }
-  dialog, dialog.wide { width: 100vw; max-width: 100vw; max-height: 100dvh; margin: 0; border-radius: 0; padding: 14px 16px; }
+  .cmpFile .cmpCols { grid-template-columns: minmax(0, 1fr); }
+  .cmpFile .cmpCol { border-right: 0; border-bottom: 1px solid var(--line); }
+  dialog, dialog.wide, dialog.full { width: 100vw; max-width: 100vw; max-height: 100dvh; margin: 0; border-radius: 0; padding: 14px 16px; }
   .log { max-height: 70dvh; }
   .toast { max-width: calc(100vw - 32px); }
 }

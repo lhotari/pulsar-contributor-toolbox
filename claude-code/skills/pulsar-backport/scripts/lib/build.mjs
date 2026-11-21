@@ -1,10 +1,11 @@
 // The build check every committed pick passes before the lane moves on: the Maven modules the pick changed (and the
-// modules they need, built in the same reactor, so nothing is installed into ~/.m2) compile, the test methods the pick
+// modules they need, built and packaged in the same reactor, so nothing is installed into ~/.m2) compile, the test methods the pick
 // added or changed pass, and checkstyle passes for the changed Java files.
 //
 // Maven: session config `mvn` (a command), else $BPT_MVN, else the worktree's ./mvnw. A worktree without either
 // (a Gradle branch) is not checked here; the verify job covers it. Session config buildCheck=false turns it off,
 // buildCheckTests=false keeps compile and checkstyle but skips the tests, buildTimeoutMinutes (default 90).
+// The intent check (lib/intent.mjs, e.g. Gradle dependency upgrades in effect in Maven) runs before this, in lane.buildPick.
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -59,10 +60,12 @@ export function buildCheck({ dir, files, dtest = {}, cfg = {}, name = 'build', l
   const base = { modules: reactor, tests: tests.map(([, v]) => v).join(','), log: logFile, at: db.now() };
   const fail = (stage, r) => ({ ...base, ok: false, stage: r.timedOut ? `${stage} (timed out after ${timeout} min)` : stage, output: tail(logFile) });
 
-  // 1. Compile main and test code of the changed modules and run the changed tests, in one reactor with -am.
+  // 1. Compile main and test code of the changed modules and run the changed tests, in one reactor with -am. The
+  //    reactor goes to `package`: shaded modules (zookeeper-with-patched-admin) and dependency:unpack (functions
+  //    worker) need the packaged jars of upstream modules; `test` alone fails on branch-4.2.
   log(`build check: ${tests.length ? 'compile and test' : 'compile'} ${reactor.join(', ')}${tests.length ? ` (-Dtest=${base.tests})` : ''}`);
-  const testArgs = tests.length ? ['test', `-Dtest=${base.tests}`, '-Dsurefire.failIfNoSpecifiedTests=false', '-DfailIfNoTests=false',
-    '-DexcludedGroups=', '-DtestRetryCount=0', '-DtestFailFast=false', '-DredirectTestOutputToFile=true'] : ['test-compile'];
+  const testArgs = tests.length ? ['package', `-Dtest=${base.tests}`, '-Dsurefire.failIfNoSpecifiedTests=false', '-DfailIfNoTests=false',
+    '-DexcludedGroups=', '-DtestRetryCount=0', '-DtestFailFast=false', '-DredirectTestOutputToFile=true'] : ['package', '-DskipTests'];
   let r = mvn(dir, cmd, ['-B', '-ntp', '-T', '1C', '-pl', reactor.join(','), '-am', ...testArgs, '-Dcheckstyle.skip=true', ...SKIPS], logFile, timeout);
   if (!r.ok) return fail(tests.length ? 'compile or tests' : 'compile', r);
 

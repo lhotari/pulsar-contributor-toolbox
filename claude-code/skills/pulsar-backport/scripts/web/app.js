@@ -560,13 +560,69 @@ function renderPicks(branch) {
       const detail = prompt('Why (optional):', '') || undefined;
       act('add-dep', branch, { pr: p.pr, dep: Number(dep.trim()), detail });
     } }, 'Add dependency…'));
+    if (p.picked_sha) B.unshift(h('button', { onclick: () => openCompare(branch, p.pr) }, 'Compare'));
+    const rv = reviewOf(p);
+    if (rv && rv.verdict !== 'ok') extra.push(h('div', { class: 'small' }, chip(rv.label, rv.cls), ' ', prose(rv.r.concerns || rv.r.summary)));
     return h('tr', { class: 'pickRow' }, h('td', { class: 'muted small' }, i + 1), h('td', {}, prLink(p.pr), ' ', strip(titles.get(p.pr) || ''), det.reused ? h('span', { class: 'small muted' }, ' (reused)') : null, ...extra),
-      h('td', {}, chip(p.status, p.status)), h('td', { class: 'mono' }, short(p.picked_sha) || h('span', { class: 'muted' }, short(p.source_sha))), h('td', {}, h('div', { class: 'laneButtons' }, B)));
+      h('td', {}, chip(p.status, p.status)), h('td', {}, rv ? h('a', { href: '#', onclick: (e) => { e.preventDefault(); openCompare(branch, p.pr); } }, chip(rv.label, rv.cls)) : h('span', { class: 'muted small' }, p.picked_sha ? 'not yet' : '')),
+      h('td', { class: 'mono' }, short(p.picked_sha) || h('span', { class: 'muted' }, short(p.source_sha))), h('td', {}, h('div', { class: 'laneButtons' }, B)));
   });
   body.replaceChildren(h('div', { class: 'filters' }, h('span', { class: 'small muted' }, `Worktree ${d.worktree || '–'}`, d.worktree ? copyBtn(d.worktree, 'worktree path') : null, ` · local branch ${d.local_branch || '–'}`), h('span', { class: 'grow' }),
     h('button', { onclick: () => act('sync', branch) }, 'Sync with plan decisions')),
-  h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, '#'), h('th', {}, 'PR'), h('th', {}, 'Status'), h('th', {}, 'Commit'), h('th', {}, ''))), h('tbody', {}, rows)));
+  h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, '#'), h('th', {}, 'PR'), h('th', {}, 'Status'), h('th', {}, 'Review'), h('th', {}, 'Commit'), h('th', {}, ''))), h('tbody', {}, rows)));
 }
+
+// ---------- diff review: the master commit and the backport side by side ----------
+/** The review of a pick for its current commit: {r, verdict, label, cls}, or null. */
+function reviewOf(p) {
+  const r = p.detail?.review;
+  if (!r || r.sha !== p.picked_sha) return null;
+  const accepted = r.verdict === 'concern' && r.accepted;
+  return { r, verdict: r.verdict, label: accepted ? 'concern accepted' : r.verdict, cls: accepted ? 'review-accepted' : `review-${r.verdict}` };
+}
+function diffPre(text) {
+  return h('pre', {}, String(text || '').split('\n').map((l) => h('span', { class: l.startsWith('@@') ? 'hunk' : l.startsWith('+') ? 'add' : l.startsWith('-') ? 'del' : '' }, l || ' ')));
+}
+const sameDiff = (f) => f.master && f.backport && f.master.diff.replace(/^@@.*$/gm, '') === f.backport.diff.replace(/^@@.*$/gm, '');
+async function openCompare(branch, pr) {
+  S.cmp = { branch, pr }; $('#cmpTitle').textContent = `#${pr} on ${branch}`; $('#cmpMeta').textContent = 'Loading…';
+  $('#cmpReview').replaceChildren(); $('#cmpBody').replaceChildren(); $('#cmpDialog').showModal();
+  try { S.cmp.d = await api(`sessions/${S.sid}/lanes/${encodeURIComponent(branch)}/picks/${pr}/diff`); renderCompare(); }
+  catch (e) { $('#cmpMeta').textContent = e.message; }
+}
+function renderCompare() {
+  const d = S.cmp?.d; if (!d) return;
+  const showSame = $('#cmpSame').checked;
+  $('#cmpTitle').replaceChildren(prLink(d.pr), ' ', strip(d.title || ''), h('span', { class: 'muted small' }, ` on ${d.branch}`));
+  const onlyM = d.files.filter((f) => !f.backport).length; const onlyB = d.files.filter((f) => !f.master).length; const same = d.files.filter(sameDiff).length;
+  $('#cmpMeta').replaceChildren(`master ${short(d.masterSha)} · backport ${short(d.backportSha) || '–'} · ${d.files.length} file(s): ${same} identical, ${onlyM} not in the backport, ${onlyB} only in the backport${d.truncated ? ' · diff truncated' : ''}`);
+  const c = d.context || {};
+  const ctx = [c.note && `Plan note: ${c.note}`, c.adapt && `Adaptation: ${c.adapt}`, c.leftOutInReview?.length && `Left out in review: ${c.leftOutInReview.map((x) => `#${x.pr}`).join(', ')}`,
+    c.warnings?.length && `Warnings: ${c.warnings.join('; ')}`, c.buildCheck && `Build check: ${c.buildCheck.ok ? 'passed' : c.buildCheck.accepted ? `accepted (${c.buildCheck.accepted})` : `failed (${c.buildCheck.stage})`}${c.buildCheck.tests ? `, tests ${c.buildCheck.tests}` : ''}`,
+    c.intent?.length && `Intent: ${c.intent.map((x) => `${x.module} ${x.to} → Maven ${x.maven.map((m) => m.version).join(', ') || 'not declared'}`).join('; ')}`].filter(Boolean);
+  const r = d.review; const b = d.branch; const pr = d.pr;
+  const reviewBox = h('div', { class: `review ${r ? (r.verdict === 'concern' && r.accepted ? 'adapted' : r.verdict) : ''}` },
+    r ? h('div', {}, h('b', {}, `Diff review: ${r.verdict}${r.accepted ? ' (accepted)' : ''}`), h('span', { class: 'muted small' }, ` ${when(r.at)}${r.job ? ` · job ${r.job}` : ''}`)) : h('b', {}, 'Not reviewed yet'),
+    r?.summary ? h('div', {}, prose(r.summary)) : null,
+    r?.concerns ? h('div', {}, h('b', {}, 'Concerns: '), prose(r.concerns)) : null,
+    r?.accepted ? h('div', { class: 'small' }, `Accepted: ${r.accepted}`) : null,
+    ...ctx.map((x) => h('div', { class: 'small muted' }, linkPrs(x))),
+    h('div', { class: 'actions' },
+      r?.verdict === 'concern' && !r.accepted ? h('button', { class: 'primary', onclick: async () => { const t = prompt('Instructions for the worker (optional):', ''); if (t === null) return; await act('fix-review', b, { pr, instructions: t || undefined }); $('#cmpDialog').close(); } }, 'Fix it with Claude') : null,
+      r?.verdict === 'concern' && !r.accepted ? h('button', { onclick: async () => { const t = prompt('Why is the backport right as it is?', ''); if (!t) return; await act('accept-review', b, { pr, reason: t }); $('#cmpDialog').close(); } }, 'Accept as is') : null,
+      r ? h('button', { class: 'ghost', onclick: async () => { await act('review-again', b, { pr }); $('#cmpDialog').close(); } }, 'Review again') : null));
+  $('#cmpReview').replaceChildren(reviewBox);
+  const files = d.files.filter((f) => showSame || !sameDiff(f));
+  $('#cmpBody').replaceChildren(...(files.length ? files.map((f) => {
+    const col = (side, label) => h('div', { class: 'cmpCol' }, h('div', { class: 'cmpLabel' }, side ? `${label} · ${side.status} +${side.added} −${side.removed}` : label),
+      side ? diffPre(side.diff) : h('div', { class: 'cmpNone' }, label === 'master' ? 'not changed by the master commit' : 'not in the backport'));
+    return h('div', { class: `cmpFile ${!f.backport ? 'onlyMaster' : !f.master ? 'onlyBackport' : ''}` },
+      h('div', { class: 'cmpHead' }, h('span', {}, f.path), h('span', { class: 'grow' }), h('span', { class: 'muted' }, !f.backport ? 'not in the backport' : !f.master ? 'only in the backport' : sameDiff(f) ? 'identical' : 'differs')),
+      h('div', { class: 'cmpCols' }, col(f.master, 'master'), col(f.backport, `backport (${b})`)));
+  }) : [h('p', { class: 'muted' }, 'Every file is identical in both; tick "show identical files" to see them.')]));
+}
+$('#cmpSame').onchange = renderCompare;
+$('#cmpClose').onclick = () => { $('#cmpDialog').close(); S.cmp = null; };
 
 // ---------- activity and jobs ----------
 function renderActivity() {

@@ -11,6 +11,7 @@ import * as lane from './lib/lane.mjs';
 import * as jobs from './lib/jobs.mjs';
 import * as autopilot from './lib/autopilot.mjs';
 import * as control from './lib/control.mjs';
+import * as review from './lib/review.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SKILLS = path.resolve(HERE, '..', '..');
@@ -35,8 +36,12 @@ const HELP = `bpt — apache/pulsar backport sessions (state: ${db.DB_PATH})
   plan show <id> [--pr N] | report <id> [--out FILE] | labels <id> [--apply] [--removals]
   dep add <id> <pr> <depends-on> [--branch B] [--detail T] | dep set <id> <dep-id> <open|accepted|dismissed>
   lane <start|pick|pick-all|show|push-test|poll|squash|reset|push-final-fix> <id> <branch>
+  pick diff <id> <branch> <pr> [--json]    the master commit and the backport, file by file, with the review context
+  pick review <id> <branch> <pr> --verdict ok|adapted|concern --summary T [--concerns T]   record a diff review
+  pick accept-review <id> <branch> <pr> --reason T   accept a review concern
   lane build <id> <branch> <pr>   run the build check (changed modules compile, changed tests, checkstyle) for a committed pick
   lane absorb <id> <branch>       squash fixup! commits into the picks they fix and update the pick shas
+  lane resync <id> <branch>       point every pick at its commit again after the lane history was rewritten outside the engine
   lane accept-build <id> <branch> <pr> --reason T   accept a failing build check that is not the pick's fault
   lane resolved <id> <branch> <pr> [--tests A#m1+m2,B] [--result T]   after resolving; the tests that validated it
   lane unblock <id> <branch> <pr>  |  lane skip|drop <id> <branch> <pr> --reason T   (drop: also a committed pick; the lane is rebuilt)
@@ -226,6 +231,16 @@ async function main() {
       if (sub === 'set') { lane.setDep(sid, Number(pos[1]), pos[2]); return out(pullIn(sid)); }
       break;
     }
+    case 'pick': {
+      const [sid, branch, pr] = [need(pos[0], 'session id'), need(pos[1], 'branch'), Number(need(pos[2], 'pr'))];
+      switch (sub) {
+        case 'diff': { const d = review.pickDiffs(sid, branch, pr); if (opt.json) return out(d); console.log(review.diffText(d)); return; }
+        case 'review': return out(review.record(sid, branch, pr, { verdict: need(opt.verdict, '--verdict'), summary: typeof opt.summary === 'string' ? opt.summary : null,
+          concerns: typeof opt.concerns === 'string' ? opt.concerns : null, job: process.env.BPT_JOB ? Number(process.env.BPT_JOB) : null }));
+        case 'accept-review': review.accept(sid, branch, pr, need(opt.reason, '--reason')); return out('ok');
+      }
+      break;
+    }
     case 'lane': {
       const [sid, branch, arg] = [need(pos[0], 'session id'), need(pos[1], 'branch'), pos[2]];
       switch (sub) {
@@ -235,6 +250,7 @@ async function main() {
         case 'show': return out({ ...db.lane(sid, branch), picks: lane.lanePicks(sid, branch) });
         case 'build': { const p = lane.lanePicks(sid, branch).find((x) => x.pr === Number(need(arg, 'pr'))); if (!p?.picked_sha) throw new Error('not a committed pick'); return out(lane.buildPick(sid, branch, p)); }
         case 'absorb': return out(lane.absorbFixups(sid, branch));
+        case 'resync': return out(lane.resyncPicks(sid, branch));
         case 'accept-build': lane.acceptBuild(sid, branch, Number(need(arg, 'pr')), need(opt.reason, '--reason')); return out('ok');
         case 'resolved': return out(lane.markResolved(sid, branch, Number(need(arg, 'pr')), { tests: typeof opt.tests === 'string' ? opt.tests : null, result: typeof opt.result === 'string' ? opt.result : null }));
         case 'unblock': return out(lane.unblock(sid, branch, Number(need(arg, 'pr'))));
