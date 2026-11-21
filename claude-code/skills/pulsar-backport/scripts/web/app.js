@@ -107,7 +107,7 @@ function laneButtons(l, sum) {
     case 'ci-failed': btn('Fix with Claude', 'fix-ci', null, { cls: 'primary' }); btn('Re-run failed jobs', 'rerun'); btn('Poll CI', 'poll'); break;
     case 'ci-green': btn('Squash fixups', 'squash', null, { cls: 'primary' }); break;
     case 'ready':
-      btn(`Finalize: fast-forward ${b}`, 'finalize', {}, { cls: 'primary', confirm: `Push the tested commits to apache/pulsar ${b} (fast-forward only) and dispatch CI?` });
+      btn(`Finalize: fast-forward ${b}`, 'finalize', {}, { cls: 'primary', confirm: `Fast-forward the local ${b} to the tested commits, push it to apache/pulsar (fast-forward only) and dispatch CI?` });
       if (l.ci?.rebase) btn('Push rebased (untested)', 'finalize', { allowRebase: true }, { cls: 'danger', confirm: `${b} moved since testing. Push the rebased batch without testing that combination?` });
       break;
     case 'final-ci': btn('Poll CI now', 'poll'); break;
@@ -136,7 +136,8 @@ function laneCard(l, sum) {
       p.skipped ? h('span', {}, `${p.skipped} skipped`) : null,
       l.base_sha ? h('span', { class: 'mono' }, `${short(l.base_sha)}..${short(l.head_sha)}`) : null,
       l.worktree ? h('span', { class: 'small muted', title: l.worktree }, 'worktree ', copyBtn(l.worktree, 'worktree path')) : null,
-      l.test_pr_url ? h('a', { href: l.test_pr_url, target: '_blank' }, `test PR #${l.test_pr}`) : null, ciLine('test'), ciLine('final'),
+      ci.test?.branch ? h('a', { href: ci.test.url, target: '_blank', title: 'workflow_dispatch runs on the test branch (no PR)' }, `test branch ${ci.test.branch}`)
+        : l.test_pr_url ? h('a', { href: l.test_pr_url, target: '_blank' }, `test PR #${l.test_pr}`) : null, ciLine('test'), ciLine('final'),
       ci.test?.failed?.length && /failed/.test(l.phase) ? h('span', {}, ci.test.failed.slice(0, 4).map((f) => h('a', { href: f.link, target: '_blank', class: 'small' }, ` ${f.name}`))) : null),
     laneButtons(l, sum));
 }
@@ -227,7 +228,7 @@ function renderSession() {
   else { btn('Next step', () => act('advance', null, { force: true }), 'primary'); btn('Pause (back to planning)', () => act('stop-backport', null, null, 'Pause backporting? Running jobs continue; nothing new is started. The lanes keep their picks.'), 'ghost'); }
   const resettable = s.lanes.filter((l) => !['not-started', 'final-ci', 'final-ci-failed', 'done'].includes(l.phase));
   if (resettable.length) btn('Abort backporting…', () => {
-    const reason = prompt(`Abort backporting and start again after revisiting the decisions?\n\nResets ${resettable.map((l) => l.branch).join(', ')}: cancels their jobs, deletes the lane worktrees and picks, and closes their test PRs. Lanes already pushed to the real branch are kept. The plan and its decisions stay.\n\nReason (shown on the closed test PRs):`, 'revisiting the backport decisions');
+    const reason = prompt(`Abort backporting and start again after revisiting the decisions?\n\nResets ${resettable.map((l) => l.branch).join(', ')}: cancels their jobs, deletes the lane worktrees and picks, and deletes their test branches. Lanes already pushed to the real branch are kept. The plan and its decisions stay.\n\nReason:`, 'revisiting the backport decisions');
     if (reason !== null) act('abort-backport', null, { reason });
   }, 'ghost danger');
   $('#sessionActions').replaceChildren(...A);
@@ -612,7 +613,7 @@ function renderPicks(branch) {
     if (p.status === 'blocked') { b('Re-check', 'unblock', { pr: p.pr }); }
     if (['pending', 'conflict', 'blocked'].includes(p.status)) b('Skip', 'skip', { pr: p.pr, reason: '' }, { cls: 'ghost', confirm: `Skip #${p.pr} on ${branch}? Its decision becomes "skip".${stop}` });
     if (['picked', 'needs-fix'].includes(p.status) && !pushed) B.push(h('button', { class: 'ghost danger', onclick: () => {
-      const reason = prompt(`Drop #${p.pr} from ${branch}? Its decision becomes "skip".${stop}\n\nThe lane is rebuilt from its commit: later picks are re-applied from their lane commits (resolutions and fixups kept), then verified and tested again. A pushed test PR is replaced by a new one.\n\nReason:`, '');
+      const reason = prompt(`Drop #${p.pr} from ${branch}? Its decision becomes "skip".${stop}\n\nThe lane is rebuilt from its commit: later picks are re-applied from their lane commits (resolutions and fixups kept), then verified and tested again. A pushed test branch is replaced by a new one (next round).\n\nReason:`, '');
       if (reason !== null) act('drop', branch, { pr: p.pr, reason: reason || 'dropped from the UI' });
     } }, 'Drop'));
     if (p.status !== 'skipped' && !pushed) B.push(h('button', { class: 'ghost', onclick: () => {

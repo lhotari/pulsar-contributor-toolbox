@@ -18,7 +18,7 @@ case "$1 $2" in
   "pr list") echo '[]' ;;
   "pr create") cat >/dev/null; echo 'https://github.com/apache/pulsar/pull/9001' ;;
   "pr checks") echo '[{"name":"unit","bucket":"pass","link":"l","workflow":"Pulsar CI"}]' ;;
-  "run list") echo '[{"databaseId":1,"name":"Pulsar CI","status":"completed","conclusion":"success","url":"u","event":"workflow_dispatch"}]' ;;
+  "run list") echo '[{"databaseId":1,"name":"Pulsar CI","status":"completed","conclusion":"success","url":"u","event":"workflow_dispatch"},{"databaseId":2,"name":"Pulsar CI Flaky","status":"completed","conclusion":"success","url":"u2","event":"workflow_dispatch"},{"databaseId":3,"name":"CI - Go Functions","status":"completed","conclusion":"skipped","url":"u3","event":"workflow_dispatch"},{"databaseId":4,"name":"CI - Python Functions","status":"completed","conclusion":"success","url":"u4","event":"workflow_dispatch"}]' ;;
   "pr comment") cat >/dev/null ;;
   *) ;;
 esac
@@ -170,9 +170,10 @@ test('autopilot runs verify as a Claude job; fixups squash to the same tree', ()
   lane.setPhase(SID, 'branch-4.2', 'verified');
 });
 
-test('test PR, CI green, squash, finalize, done', () => {
+test('test branch CI (dispatched, no PR), squash, finalize, done', () => {
   const push = lane.pushTest(SID, 'branch-4.2');
-  assert.equal(push.pr.number, 9001);
+  assert.equal(push.dispatched.length, 4);
+  assert.match(fs.readFileSync(ghLog, 'utf8'), /workflow run pulsar-ci.yaml -R apache\/pulsar --ref branch-4.2-backports-test-session/);
   // The verify fixup went into #101's own commit before the push; the pick shas follow the rewritten lane.
   const wt = lane.worktreeDir(SID, 'branch-4.2');
   assert.doesNotMatch(sh(wt, 'log', '--format=%s', 'origin/branch-4.2..HEAD'), /fixup!/);
@@ -189,11 +190,13 @@ test('test PR, CI green, squash, finalize, done', () => {
   const f = lane.finalize(SID, 'branch-4.2');
   assert.equal(f.status, 'pushed');
   assert.equal(sh(origin, 'rev-parse', 'branch-4.2'), sq.squashed);
+  assert.equal(sh(repo, 'rev-parse', 'refs/heads/branch-4.2'), sq.squashed, 'the local branch was fast-forwarded and pushed');
   assert.equal(lane.pollCi(SID, 'branch-4.2').phase, 'done');
   const calls = fs.readFileSync(ghLog, 'utf8');
   assert.match(calls, /workflow run pulsar-ci.yaml/);
   assert.match(calls, /--add-label cherry-picked\/branch-4.2 --add-label release\/4.2.6/);
-  assert.match(calls, /pr close 9001/);
+  assert.doesNotMatch(calls, /pr create/, 'CI runs on the test branch, never in a PR');
+  assert.match(calls, /run list -R apache\/pulsar --commit \w+ --event workflow_dispatch .*--branch branch-4.2-backports-test-session/);
 });
 
 test('branch-4.0 lane reuses the squashed branch-4.2 commits', () => {
@@ -224,8 +227,12 @@ test('finalize refuses to push an untested rebase without confirmation', () => {
   assert.equal(r.status, 'needs-confirmation');
   assert.equal(sh(origin, 'log', '-1', '--format=%s', 'branch-4.0'), 'other (#200)');
   assert.equal(lane.finalize(SID, 'branch-4.0').status, 'needs-confirmation', 'still needs confirmation');
+  // branch-4.0 is checked out in a worktree: Finalize fast-forwards it there and pushes that branch.
+  const wt40 = path.join(tmp, 'wt-branch-4.0'); sh(repo, 'worktree', 'add', '-q', wt40, 'branch-4.0');
   const r2 = lane.finalize(SID, 'branch-4.0', { allowRebase: true });
   assert.equal(r2.status, 'pushed');
+  assert.equal(sh(wt40, 'rev-parse', 'HEAD'), sh(origin, 'rev-parse', 'branch-4.0'));
+  assert.equal(sh(wt40, 'status', '--porcelain'), '');
   assert.equal(sh(origin, 'rev-list', '--count', 'branch-4.0~3..branch-4.0'), '3');
 });
 
@@ -333,11 +340,10 @@ test('while backporting: late picks go in master order, drops rebuild the lane, 
   assert.equal(db.get('SELECT decision FROM targets WHERE session_id = ? AND pr = 113 AND branch = ?', sid, B).decision, 'skip');
   assert.doesNotMatch(sh(wt, 'show', 'HEAD:mod/src/main/java/Foo.java'), /line 6 other/);
 
-  // The next test push opens round 2 and closes the superseded test PR (no force-push).
+  // The next test push starts round 2 and deletes the superseded test branch (no force-push).
   lane.setPhase(sid, B, 'verified');
   assert.equal(lane.pushTest(sid, B).testBranch, `${firstTest}-r2`);
   assert.equal(sh(origin, 'branch', '--list', firstTest), '');
-  assert.match(fs.readFileSync(ghLog, 'utf8'), /pr close 9001/);
 
   // A picked PR decided "skip" again holds the lane until dropped or kept.
   plan.setDecisions(sid, [{ pr: 114, branch: B, decision: 'skip' }]); lane.syncPicks(sid, B);

@@ -54,7 +54,7 @@ const HELP = `bpt — apache/pulsar backport sessions (state: ${db.DB_PATH})
   decisions <id>                                    what the backport waits for, with the options
   decisions <id> apply <key> <option> [--text T]    choose an option (the UI does the same)
   decisions <id> recommended                        choose the recommended option wherever it needs no input
-  abort <id> [--reason T]                           reset every lane not yet pushed, close test PRs, back to planning
+  abort <id> [--reason T]                           reset every lane not yet pushed, delete test branches, back to planning
   lane phase <id> <branch> <phase>  |  lane finalize <id> <branch> [--allow-rebase]
   ci rerun <id> <branch>
   advance <id> [--force]                            one autopilot step
@@ -126,7 +126,7 @@ function runEngineJob(id) {
       case 'discover': { const r = plan.discover(sid); summary = `round ${r.round}: ${r.total} PRs, ${r.added} new`; break; }
       case 'start-lane': lane.startLane(sid, b); // fall through: picking starts right away
       case 'pick-all': { const r = lane.pickAll(sid, b); summary = `${r.results.filter((x) => x.status === 'picked').length} picked, stopped at ${r.last.status}${r.last.pr ? ` #${r.last.pr}` : ''}`; break; }
-      case 'push-test': { const r = lane.pushTest(sid, b); summary = `pushed ${r.testBranch}, PR #${r.pr.number}`; break; }
+      case 'push-test': { const r = lane.pushTest(sid, b); summary = `pushed ${r.testBranch}, dispatched ${r.dispatched.join(', ') || 'no workflow'}`; break; }
       case 'rerun': { const r = lane.rerunFailed(sid, b); summary = `re-ran ${r.runs.length} run(s)`; break; }
       case 'squash': { const r = lane.squash(sid, b); summary = `squashed to ${g.short(r.squashed)}`; break; }
       case 'finalize': { const r = lane.finalize(sid, b, { allowRebase: !!j.args.allowRebase }); summary = r.status; break; }

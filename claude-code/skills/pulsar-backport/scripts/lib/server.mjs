@@ -82,7 +82,7 @@ const ACTIONS = {
     db.event(sid, 'Backporting started'); return { steps: autopilot.advance(sid) };
   },
   'stop-backport': (sid) => { db.run(`UPDATE sessions SET status = 'planning' WHERE id = ?`, sid); plan.saveConfig(sid, { autopilot: false }); return {}; },
-  // Reset every lane not yet pushed and return to planning; runs as an engine job (it closes test PRs).
+  // Reset every lane not yet pushed and return to planning; runs as an engine job (it deletes test branches).
   'abort-backport': (sid, b, a) => {
     db.run(`UPDATE sessions SET status = 'planning', updated_at = ? WHERE id = ?`, db.now(), sid); plan.saveConfig(sid, { autopilot: false });
     return { job: jobs.enqueue(sid, null, 'abort', { reason: a.reason || undefined }) };

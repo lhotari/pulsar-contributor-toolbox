@@ -31,18 +31,6 @@ export function prMeta(prs, repo = REPO) {
   return out;
 }
 
-export function findPr(headBranch, repo = REPO) {
-  const list = gh(['pr', 'list', '-R', repo, '--head', headBranch, '--state', 'all', '--json', 'number,url,state'], { json: true });
-  return list?.find((p) => p.state === 'OPEN') || list?.[0] || null;
-}
-
-export function createPr({ base, head, title, body, labels = [] }, repo = REPO) {
-  const url = gh(['pr', 'create', '-R', repo, '--base', base, '--head', head, '--title', title, '--body-file', '-'], { input: body });
-  const number = Number(url.trim().split('/').pop());
-  for (const l of labels) gh(['pr', 'edit', String(number), '-R', repo, '--add-label', l], { allowFail: true });
-  return { number, url: url.trim() };
-}
-
 export function editLabels(pr, { add = [], remove = [] }, repo = REPO) {
   const args = ['pr', 'edit', String(pr), '-R', repo];
   for (const l of add) args.push('--add-label', l);
@@ -69,38 +57,53 @@ function summarize(checks) {
     failed: failed.map((c) => ({ name: c.name, link: c.link, workflow: c.workflow })) };
 }
 
-/** CI state of a PR's head commit. */
-export function prChecks(pr, repo = REPO) {
-  const checks = gh(['pr', 'checks', String(pr), '-R', repo, '--json', 'name,bucket,link,workflow'], { json: true, allowFail: true }) || [];
-  return summarize(checks);
+/**
+ * The workflow_dispatch runs of a pushed commit on one branch (a test branch or the release branch), the latest run
+ * per workflow: a test branch and the release branch can point at the same commit, and their runs must not mix.
+ */
+export function dispatchedRuns(sha, branch, repo = REPO) {
+  const args = ['run', 'list', '-R', repo, '--commit', sha, '--event', 'workflow_dispatch', '--json', 'databaseId,name,status,conclusion,url,event,headBranch,createdAt', '--limit', '100'];
+  if (branch) args.push('--branch', branch);
+  const runs = (gh(args, { json: true, allowFail: true }) || []).filter((r) => !branch || !r.headBranch || r.headBranch === branch);
+  const latest = new Map();
+  for (const r of runs) { const x = latest.get(r.name); if (!x || String(r.createdAt) > String(x.createdAt)) latest.set(r.name, r); }
+  return [...latest.values()];
 }
 
-/** CI state of a pushed commit (final branch pushes have no PR). */
-export function commitChecks(sha, repo = REPO) {
-  const runs = gh(['run', 'list', '-R', repo, '--commit', sha, '--json', 'databaseId,name,status,conclusion,url,event', '--limit', '50'], { json: true, allowFail: true }) || [];
+/** CI state of a pushed commit on a branch, from the workflow runs dispatched there (CI never runs in a PR). */
+export function commitChecks(sha, branch, repo = REPO) {
+  const runs = dispatchedRuns(sha, branch, repo);
   const checks = runs.map((r) => ({
     name: r.name, link: r.url, workflow: r.name,
     bucket: r.status !== 'completed' ? 'pending'
       : ['success', 'skipped', 'neutral'].includes(r.conclusion) ? 'pass' : 'fail',
   }));
-  return { ...summarize(checks), runs: runs.map((r) => r.databaseId) };
+  return { ...summarize(checks), runs: runs.map((r) => r.databaseId), links: runs.map((r) => ({ name: r.name, url: r.url })) };
 }
 
-/** The workflow runs of a commit, for reports: [{id, name, status, conclusion, url, event, attempt, createdAt}]. */
-export function workflowRuns(sha, repo = REPO) {
-  const fields = 'databaseId,name,status,conclusion,url,event,attempt,createdAt';
-  const runs = gh(['run', 'list', '-R', repo, '--commit', sha, '--json', fields, '--limit', '100'], { json: true, allowFail: true })
-    || gh(['run', 'list', '-R', repo, '--commit', sha, '--json', fields.replace(',attempt', ''), '--limit', '100'], { json: true, allowFail: true }) || [];
+/**
+ * The workflow runs of a commit, for reports: [{id, name, status, conclusion, url, event, attempt, createdAt}]. With a
+ * branch, only the runs on that branch, the latest per workflow (a test branch and the release branch share commits).
+ */
+export function workflowRuns(sha, branch = null, repo = REPO) {
+  const fields = 'databaseId,name,status,conclusion,url,event,attempt,createdAt,headBranch';
+  const base = ['run', 'list', '-R', repo, '--commit', sha, '--limit', '100', ...(branch ? ['--branch', branch] : [])];
+  let runs = gh([...base, '--json', fields], { json: true, allowFail: true })
+    || gh([...base, '--json', fields.replace(',attempt', '')], { json: true, allowFail: true }) || [];
+  if (branch) {
+    const latest = new Map();
+    for (const r of runs.filter((x) => !x.headBranch || x.headBranch === branch)) { const x = latest.get(r.name); if (!x || String(r.createdAt) > String(x.createdAt)) latest.set(r.name, r); }
+    runs = [...latest.values()];
+  }
   return runs.map((r) => ({ id: r.databaseId, name: r.name, status: r.status, conclusion: r.conclusion, url: r.url, event: r.event, attempt: r.attempt, createdAt: r.createdAt }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
-export function failedRunIds(sha, repo = REPO) {
-  const runs = gh(['run', 'list', '-R', repo, '--commit', sha, '--json', 'databaseId,status,conclusion', '--limit', '50'], { json: true, allowFail: true }) || [];
-  return runs.filter((r) => r.status === 'completed' && !['success', 'skipped', 'neutral'].includes(r.conclusion)).map((r) => r.databaseId);
+export function failedRunIds(sha, branch, repo = REPO) {
+  return dispatchedRuns(sha, branch, repo).filter((r) => r.status === 'completed' && !['success', 'skipped', 'neutral'].includes(r.conclusion)).map((r) => r.databaseId);
 }
 
-/** Pulsar CI has no push trigger, so a pushed release branch needs workflow_dispatch runs. */
+/** Pulsar CI has no push trigger: a pushed test branch or release branch gets workflow_dispatch runs. */
 export function dispatch(workflow, ref, repo = REPO) {
   gh(['workflow', 'run', workflow, '-R', repo, '--ref', ref]);
 }

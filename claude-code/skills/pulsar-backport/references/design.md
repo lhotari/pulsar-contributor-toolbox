@@ -8,7 +8,7 @@ pulsar-backport/SKILL.md           execution: lanes, worker jobs, driving from C
 pulsar-backport/scripts/bpt.mjs    CLI (both skills, the workers and the server call it)
   lib/db.mjs        SQLite schema (node:sqlite, no dependencies)
   lib/git.mjs       read-only analysis (merge-tree dry runs, blame dependencies) + worktree operations
-  lib/gh.mjs        every GitHub call (labels, PRs, checks, workflow dispatch, reruns)
+  lib/gh.mjs        every GitHub call (labels, PR comments, workflow dispatch, run status, reruns)
   lib/plan.mjs      sessions, discover, pre-filter, verdict import, decisions, label plan, report
   lib/lane.mjs      cherry-pick engine, dependency gate, test push, CI, squash, finalize
   lib/jobs.mjs      job queue; launches engine jobs and headless Claude Code workers
@@ -36,7 +36,7 @@ An MCP server would only add value if the UI had to push events into a running i
 - The server binds to 127.0.0.1, checks the Host header (DNS rebinding) and requires a random token (stored in the `meta` table) on every API call.
 - Workers cannot push or write to GitHub: the engine is the only writer, and the launcher denies `git push`, `gh pr create/edit/merge/comment/close/review`, `gh issue`, `gh label`.
 - Pushes are fast-forward only. Test-branch updates check that the remote head is an ancestor; fixes go in as `fixup!` commits and are squashed only locally, with a tree-equality check, so the pushed real-branch tree is exactly the tested tree.
-- The real release branch is pushed only by `finalize` and `push-final-fix`, which only the UI buttons (or an explicit CLI call) enqueue. Autopilot stops at `ready`.
+- The real release branch is pushed only by `finalize` and `push-final-fix`, by fast-forwarding the local branch (in the worktree that has it checked out, if any) and pushing that branch; which only the UI buttons (or an explicit CLI call) enqueue. Autopilot stops at `ready`.
 - If the branch moved after testing, finalize rebases and asks again before pushing the untested combination.
 - Lane worktrees are separate from every other checkout; the planning analysis only fetches and reads the main clone.
 
@@ -54,11 +54,11 @@ Gate: open or accepted-but-missing dependencies block the pick, except blame hin
 
 `lane.rewind` is the one primitive behind drop, late dependencies and re-picking in master order. It maps the lane's commits to picks (cherry-pick trailer, else the PR number), finds the first commit that must change (a dropped pick, or a pick after the insertion point), resets the worktree to the commit before it, and marks every later pick `pending` with `detail.replay`: its `source_sha` becomes its own lane commit and `detail.extras` the non-pick commits (fixups) that ride with it, so `pickNext` re-applies resolution and fixups as one cherry-pick sequence without adding a trailer. Fixups whose target is dropped go with it. A stopped cherry-pick is aborted and blocked picks are re-checked. `pickNext` calls it on its own when the first pending pick has committed picks after it in master order (unless `detail.outOfOrder`); past picking, `holds()` turns the same situation into a decision and autopilot and finalize wait.
 
-Pushed test branches are never rewritten: a rebuild or reset moves the test PR to `ci.retired` and bumps `ci.round`; the next `pushTest` closes the retired PRs, deletes their branches and pushes `<test-branch>-r<round>`.
+Pushed test branches are never rewritten: a rebuild or reset moves the test branch to `ci.retired` and bumps `ci.round`; the next `pushTest` deletes the retired branches (closing a test PR left by an earlier version) and pushes `<test-branch>-r<round>`. CI never runs in a PR (one could be merged by accident): `pushTest` dispatches the workflows on the test branch and `pollCi` reads that branch's `workflow_dispatch` runs of the commit, so test and release-branch runs of the same commit never mix.
 
 ## Extending
 
 - New job type: add it to `ENGINE` or `CLAUDE` in `jobs.mjs`, a case in `runEngineJob` (bpt.mjs) or a prompt in `workerPrompt`, a transition in `autopilot.advance`, and a button in `web/app.js`.
 - New wait point: add an item with options to `control.pending`; the UI panel and `bpt decisions` render it without changes. A new worker proposal type goes in `parseProposals` and `runProposal`.
 - Other target branches or repos: `--branches` accepts any list; `BPT_REPO_SLUG` changes the GitHub repo, `--remote` the git remote.
-- Final CI workflows: session config `finalWorkflows` (array of workflow file names).
+- CI workflows: session config `finalWorkflows` (array of workflow file names) and `testWorkflows` for the test branch (default: `finalWorkflows`).

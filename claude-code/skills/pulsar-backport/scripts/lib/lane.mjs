@@ -1,4 +1,4 @@
-// Lane engine: cherry-picks for one target branch, test PR, CI, squash, finalize.
+// Lane engine: cherry-picks for one target branch, test branch CI (workflow_dispatch, never a PR), squash, finalize.
 // Phases: not-started → picking ⇄ needs-attention → picked → verifying → verified → testing ⇄ ci-failed
 //         → ci-green → ready → final-ci ⇄ final-ci-failed → done
 import fs from 'node:fs';
@@ -348,16 +348,17 @@ function retireTest(l, reason) {
   return { round: (l.ci.round || 1) + 1, retired: [...(l.ci.retired || []), { branch: l.test_branch, pr: l.test_pr, reason }] };
 }
 
-/** Close the test PRs of earlier rounds and delete their branches (test branches only, never a release branch). */
+/** Delete the test branches of earlier rounds (test branches only, never a release branch). */
 export function closeRetired(sid, branch) {
   const cfg = db.session(sid).config; const l = db.lane(sid, branch);
   const left = [];
   for (const t of l.ci.retired || []) {
     try {
-      if (t.pr) gh.closePr(t.pr, `Superseded: ${t.reason || 'the backport batch was rebuilt'}. The rebuilt batch is tested in a new PR.`);
+      // Test PRs are no longer opened (CI is dispatched on the test branch); one from an earlier version is closed.
+      if (t.pr) gh.closePr(t.pr, `Superseded: ${t.reason || 'the backport batch was rebuilt'}.`);
       g.git(cfg.repo, ['push', remote(cfg), '--delete', t.branch], { allowFail: true });
-      db.event(sid, `Closed the earlier test PR${t.pr ? ` #${t.pr}` : ''} and deleted ${t.branch}`, { branch });
-    } catch (e) { left.push(t); db.event(sid, `Could not close the earlier test PR #${t.pr}: ${e.message}`, { branch, level: 'warn' }); }
+      db.event(sid, `Deleted the earlier test branch ${t.branch}${t.pr ? ` and closed test PR #${t.pr}` : ''}`, { branch });
+    } catch (e) { left.push(t); db.event(sid, `Could not retire the earlier test branch ${t.branch}: ${e.message}`, { branch, level: 'warn' }); }
   }
   if ((l.ci.retired || []).length) db.updateLane(sid, branch, { ci: { ...l.ci, retired: left } });
 }
@@ -367,7 +368,7 @@ export function closeRetired(sid, branch) {
  * added late go in at its master position (every pick with a later master position is replayed after it).
  * Replayed picks are re-applied from their lane commits, so conflict resolutions are kept, and fixups ride along
  * with the pick they follow; fixups of a dropped pick go with it. Local only: a pushed test branch cannot be
- * rewritten (no force-push), so it is retired and the next push opens a new test PR.
+ * rewritten (no force-push), so it is retired and the next push starts a new test branch.
  */
 export function rewind(sid, branch, { drop = [], before = null, reason = '' } = {}) {
   const l = db.lane(sid, branch);
@@ -777,35 +778,26 @@ export function setPhase(sid, branch, phase, note) {
   db.event(sid, `Phase → ${phase}${note ? `: ${note}` : ''}`, { branch });
 }
 
-function prBody(sid, branch, l) {
-  const list = picks(sid, branch).filter((p) => p.status === 'picked');
-  const items = new Map(db.all('SELECT pr, title FROM items WHERE session_id = ?', sid).map((x) => [x.pr, x.title]));
-  return `### Motivation
+const WORKFLOWS = ['pulsar-ci.yaml', 'pulsar-ci-flaky.yaml', 'ci-go-functions.yaml', 'ci-python-functions.yaml'];
+const testWorkflows = (cfg) => cfg.testWorkflows || cfg.finalWorkflows || WORKFLOWS;
+const finalWorkflows = (cfg) => cfg.finalWorkflows || WORKFLOWS;
 
-CI run for the ${l.release ? `${l.release} ` : ''}backports to \`${branch}\` (backport session \`${sid}\`). **Do not merge.** After CI passes, the commits are pushed to \`${branch}\` directly and this PR is closed.
-
-### Modifications
-
-${list.length} cherry-picks from \`master\`, in master commit order:
-
-${list.map((p) => `- #${p.pr} ${items.get(p.pr) || ''}`).join('\n')}
-
-Fixes for CI failures are added as \`fixup!\` commits and squashed into the matching cherry-pick before the final push; the tested tree and the pushed tree are identical.
-
-### Verifying this change
-
-- [x] Make sure that the change passes the CI checks.
-
-### Documentation
-
-- [ ] \`doc\`
-- [ ] \`doc-required\`
-- [x] \`doc-not-needed\`
-- [ ] \`doc-complete\`
-`;
+/** Dispatch CI workflows on a pushed ref of apache/pulsar. Returns the workflow files that were dispatched. */
+function dispatchWorkflows(sid, branch, ref, workflows) {
+  const ok = [];
+  for (const wf of workflows) {
+    try { gh.dispatch(wf, ref); ok.push(wf); } catch (e) { db.event(sid, `Could not dispatch ${wf} on ${ref}: ${e.message}`, { branch, level: 'warn' }); }
+  }
+  return ok;
 }
 
-/** Push the lane to its test branch on apache/pulsar (never forced) and open or reuse the test PR. */
+/** The Actions page of a branch's workflow_dispatch runs. */
+export const runsUrl = (ref) => `https://github.com/${gh.REPO}/actions?query=${encodeURIComponent(`branch:${ref} event:workflow_dispatch`)}`;
+
+/**
+ * Push the lane to its test branch on apache/pulsar (never forced) and dispatch the CI workflows on it. No pull
+ * request is opened: one could be merged by accident.
+ */
 export function pushTest(sid, branch) {
   // CI and verify fixes go into the pick they fix; that retires a pushed test branch (the next round gets a new one).
   if (laneCommits(sid, branch).some((c) => c.fixup)) absorbFixups(sid, branch);
@@ -819,32 +811,44 @@ export function pushTest(sid, branch) {
     if (!g.isAncestor(l.worktree, remoteHead, head)) throw new Error(`${r}/${tb} (${g.short(remoteHead)}) is not an ancestor of the lane head; refusing to force-push`);
   }
   if (remoteHead !== head) g.git(l.worktree, ['push', r, `HEAD:refs/heads/${tb}`]);
-  let pr = l.test_pr ? { number: l.test_pr, url: l.test_pr_url } : gh.findPr(tb);
-  if (!pr || pr.state === 'CLOSED') {
-    pr = gh.createPr({ base: branch, head: tb, labels: ['ready-to-test', 'doc-not-needed'],
-      title: `[improve][ci] Run CI for the ${l.release || ''} backports to ${branch} (do not merge)`.replace(/\s+/g, ' '),
-      body: prBody(sid, branch, l) });
-    db.event(sid, `Opened test PR #${pr.number}`, { branch, data: pr });
-  }
-  const ci = { ...l.ci, test: { sha: head, state: 'pending', pushedAt: db.now(), reruns: l.ci.test?.sha === head ? l.ci.test.reruns || 0 : 0 } };
-  db.updateLane(sid, branch, { phase: 'testing', test_branch: tb, test_pr: pr.number, test_pr_url: pr.url, head_sha: head, ci, attention: null });
-  db.event(sid, `Pushed ${g.short(head)} to ${r}/${tb}`, { branch });
-  return { testBranch: tb, pr };
+  const prev = l.ci.test;
+  // The same commit already has runs on this test branch (a repeated push-test): poll those instead of running CI twice.
+  const again = prev?.sha === head && prev.branch === tb && gh.dispatchedRuns(head, tb).length > 0;
+  const dispatched = again ? prev.dispatched || [] : dispatchWorkflows(sid, branch, tb, testWorkflows(cfg));
+  const ci = { ...l.ci, test: { sha: head, branch: tb, state: 'pending', pushedAt: again ? prev.pushedAt : db.now(), dispatched, url: runsUrl(tb),
+    reruns: again ? prev.reruns || 0 : 0 } };
+  db.updateLane(sid, branch, { phase: 'testing', test_branch: tb, test_pr: null, test_pr_url: null, head_sha: head, ci, attention: null });
+  db.event(sid, `Pushed ${g.short(head)} to ${r}/${tb}${again ? ' (CI already running there)' : ` and dispatched ${dispatched.join(', ') || 'no workflow'}`}`, { branch, level: dispatched.length ? 'info' : 'attention' });
+  return { testBranch: tb, head, dispatched, url: runsUrl(tb) };
 }
 
-/** Poll CI for the test PR or the final push. */
+const MIN = 60_000;
+
+/** Poll CI for the test branch or the final push: the workflow_dispatch runs on that branch. */
 export function pollCi(sid, branch) {
-  const l = db.lane(sid, branch);
+  const l = db.lane(sid, branch); const cfg = db.session(sid).config;
   const final = ['final-ci', 'final-ci-failed'].includes(l.phase);
   const kind = final ? 'final' : 'test';
   const prev = l.ci[kind] || {};
   if (!prev.sha) return { state: 'none' };
-  const res = final ? gh.commitChecks(prev.sha) : gh.prChecks(l.test_pr);
-  const ci = { ...l.ci, [kind]: { ...prev, ...res, polledAt: db.now() } };
+  const ref = final ? branch : prev.branch || l.test_branch;
+  let res = gh.commitChecks(prev.sha, ref);
+  const want = (prev.dispatched || []).length;
+  // A dispatched workflow whose run has not shown up yet keeps the state pending.
+  if (res.total < want) res = { ...res, state: res.failed.length ? 'failing' : 'pending', missing: want - res.total };
+  let extra = {};
+  const age = Date.now() - Date.parse(prev.pushedAt || db.now());
+  if (!res.total && age > 10 * MIN && !prev.redispatched) {
+    // No run at all: the dispatch did not take (GitHub had not seen the pushed ref yet, or a transient error). Once more.
+    extra = { redispatched: db.now(), dispatched: dispatchWorkflows(sid, branch, ref, final ? finalWorkflows(cfg) : testWorkflows(cfg)) };
+    db.event(sid, `No workflow runs on ${ref} for ${g.short(prev.sha)} after 10 minutes; dispatched again`, { branch, level: 'warn' });
+  }
+  const ci = { ...l.ci, [kind]: { ...prev, ...res, ...extra, polledAt: db.now() } };
   let phase = l.phase;
   if (res.state === 'success') phase = final ? 'done' : 'ci-green';
   else if (res.state === 'failure') phase = final ? 'final-ci-failed' : 'ci-failed';
-  db.updateLane(sid, branch, { ci, phase });
+  const stuck = !res.total && prev.redispatched && Date.now() - Date.parse(prev.redispatched) > 20 * MIN;
+  db.updateLane(sid, branch, { ci, phase, ...(stuck && !l.attention ? { attention: `No workflow runs on ${ref} for ${g.short(prev.sha)}; dispatching failed twice. Dispatch the CI workflows on ${ref} by hand (gh workflow run <file> -R ${gh.REPO} --ref ${ref})` } : {}) });
   if (phase !== l.phase) {
     const failed = res.failed?.map((f) => f.name).slice(0, 8).join(', ');
     db.event(sid, `${kind} CI ${res.state}${failed ? `: ${failed}` : ''}`, { branch, level: res.state === 'success' ? 'info' : 'attention' });
@@ -858,7 +862,7 @@ export function rerunFailed(sid, branch) {
   const final = l.phase.startsWith('final');
   const kind = final ? 'final' : 'test';
   const c = l.ci[kind]; if (!c?.sha) throw new Error('no CI run to rerun');
-  const ids = gh.failedRunIds(c.sha);
+  const ids = gh.failedRunIds(c.sha, final ? branch : c.branch || l.test_branch);
   for (const id of ids) gh.rerunFailed(id);
   const ci = { ...l.ci, [kind]: { ...c, state: 'pending', reruns: (c.reruns || 0) + 1 } };
   db.updateLane(sid, branch, { ci, phase: final ? 'final-ci' : 'testing', attention: null });
@@ -890,8 +894,37 @@ export function squash(sid, branch) {
   return { tested: before, squashed: after, extra };
 }
 
+/** The worktree that has `ref` checked out, if any. */
+function checkedOutIn(repo, ref) {
+  let wt = null;
+  for (const line of g.git(repo, ['worktree', 'list', '--porcelain']).split('\n')) {
+    if (line.startsWith('worktree ')) wt = line.slice(9);
+    else if (line === `branch ${ref}`) return wt;
+  }
+  return null;
+}
+
 /**
- * Fast-forward the real branch to the squashed lane head and dispatch CI. Only called from an explicit user action.
+ * The release branch is pushed the way a committer does it: the local branch is fast-forwarded to the tested commits
+ * (in the worktree that has it checked out, if one does) and that branch is pushed. Fast-forward only, never forced.
+ */
+export function fastForwardAndPush(cfg, branch, head, r = remote(cfg)) {
+  const ref = `refs/heads/${branch}`;
+  const cur = g.git(cfg.repo, ['rev-parse', '--verify', '--quiet', ref], { allowFail: true });
+  const local = cur.ok && cur.out ? cur.out : null;
+  if (local && !g.isAncestor(cfg.repo, local, head)) throw new Error(`the local ${branch} (${g.short(local)}) has commits that are not in the batch; it cannot be fast-forwarded to ${g.short(head)}`);
+  const wt = checkedOutIn(cfg.repo, ref);
+  if (wt && local !== head) {
+    const st = g.state(wt);
+    if (st.dirty || st.rebasing || st.cherryPicking) throw new Error(`${branch} is checked out in ${wt}, which has uncommitted changes or an operation in progress; clean it up to fast-forward it`);
+    g.git(wt, ['merge', '--ff-only', '--quiet', head]);
+  } else if (!local) g.git(cfg.repo, ['branch', branch, head]);
+  else if (local !== head) g.git(cfg.repo, ['update-ref', ref, head, local]);
+  g.git(wt || cfg.repo, ['push', r, `${ref}:${ref}`]);
+}
+
+/**
+ * Fast-forward the local release branch to the squashed lane head, push it and dispatch CI. Only called from an explicit user action.
  * If someone pushed to the branch meanwhile, the lane is rebased; pushing that untested combination needs allowRebase.
  */
 export function finalize(sid, branch, { allowRebase = false } = {}) {
@@ -921,12 +954,10 @@ export function finalize(sid, branch, { allowRebase = false } = {}) {
       return { status: 'needs-confirmation', moved, head };
     }
   }
-  g.git(l.worktree, ['push', r, `${head}:refs/heads/${branch}`]);
-  for (const wf of cfg.finalWorkflows || ['pulsar-ci.yaml', 'pulsar-ci-flaky.yaml', 'ci-go-functions.yaml', 'ci-python-functions.yaml']) {
-    try { gh.dispatch(wf, branch); } catch (e) { db.event(sid, `Could not dispatch ${wf}: ${e.message}`, { branch, level: 'warn' }); }
-  }
+  fastForwardAndPush(cfg, branch, head, r);
+  const dispatched = dispatchWorkflows(sid, branch, branch, finalWorkflows(cfg));
   db.updateLane(sid, branch, { final_sha: head, head_sha: head, phase: 'final-ci', attention: null,
-    ci: { ...db.lane(sid, branch).ci, final: { sha: head, state: 'pending', pushedAt: db.now(), reruns: 0 } } });
+    ci: { ...db.lane(sid, branch).ci, final: { sha: head, branch, state: 'pending', pushedAt: db.now(), reruns: 0, dispatched, url: runsUrl(branch) } } });
   db.event(sid, `Pushed ${branch} ${g.short(target)}..${g.short(head)} and dispatched CI`, { branch });
   return { status: 'pushed', from: target, to: head };
 }
@@ -936,15 +967,15 @@ export function pushFinalFix(sid, branch) {
   const s = db.session(sid); const cfg = s.config; const l = db.lane(sid, branch); const r = remote(cfg);
   const head = g.rev(l.worktree, 'HEAD');
   if (!g.isAncestor(l.worktree, l.final_sha, head) || head === l.final_sha) throw new Error('no new commits on top of the pushed head');
-  g.git(l.worktree, ['push', r, `HEAD:refs/heads/${branch}`]);
-  for (const wf of cfg.finalWorkflows || ['pulsar-ci.yaml', 'pulsar-ci-flaky.yaml', 'ci-go-functions.yaml', 'ci-python-functions.yaml']) {
-    try { gh.dispatch(wf, branch); } catch { /* reported by the next poll */ }
-  }
-  db.updateLane(sid, branch, { final_sha: head, head_sha: head, phase: 'final-ci', ci: { ...l.ci, final: { sha: head, state: 'pending', pushedAt: db.now(), reruns: 0 } } });
+  g.fetch(cfg.repo, r, [branch]);
+  if (!g.isAncestor(cfg.repo, `${r}/${branch}`, head)) throw new Error(`${r}/${branch} moved; the fix no longer fast-forwards it`);
+  fastForwardAndPush(cfg, branch, head, r);
+  const dispatched = dispatchWorkflows(sid, branch, branch, finalWorkflows(cfg));
+  db.updateLane(sid, branch, { final_sha: head, head_sha: head, phase: 'final-ci', ci: { ...l.ci, final: { sha: head, branch, state: 'pending', pushedAt: db.now(), reruns: 0, dispatched, url: runsUrl(branch) } } });
   db.event(sid, `Pushed fix ${g.short(l.final_sha)}..${g.short(head)} to ${branch} and dispatched CI`, { branch });
 }
 
-/** After final CI is green: labels, close the test PR, delete the test branch. */
+/** After final CI is green: labels, delete the test branch. */
 export function afterDone(sid, branch) {
   const s = db.session(sid); const cfg = s.config; const l = db.lane(sid, branch); const r = remote(cfg);
   const done = picks(sid, branch).filter((p) => p.status === 'picked');
@@ -955,7 +986,7 @@ export function afterDone(sid, branch) {
   if (l.test_pr) gh.closePr(l.test_pr, `CI passed; the commits were pushed to \`${branch}\` as ${g.short(l.base_sha)}..${g.short(l.final_sha)}.`);
   if (l.test_branch) g.git(cfg.repo, ['push', r, '--delete', l.test_branch], { allowFail: true });
   db.updateLane(sid, branch, { attention: null });
-  db.event(sid, `Done: labelled ${done.length} PRs cherry-picked/${branch}, closed the test PR and deleted ${l.test_branch}`, { branch });
+  db.event(sid, `Done: labelled ${done.length} PRs cherry-picked/${branch}${l.test_pr ? `, closed test PR #${l.test_pr}` : ''}${l.test_branch ? ` and deleted ${l.test_branch}` : ''}`, { branch });
 }
 
 /** Accept (add the dependency to the batch) or dismiss a dependency, then re-plan the affected lanes. */
@@ -994,7 +1025,7 @@ export function resetLane(sid, branch, reason = 'the lane was reset') {
 
 /**
  * Abort backporting to revisit the decisions: every lane that has not reached the real branch is reset (jobs
- * cancelled, worktree removed, test PR closed) and the session returns to planning. Start backporting again later.
+ * cancelled, worktree removed, test branch deleted) and the session returns to planning. Start backporting again later.
  */
 export function abortBackport(sid, { reason = 'backporting was aborted to revisit the decisions', cancel = () => {} } = {}) {
   db.run(`UPDATE sessions SET status = 'planning', updated_at = ? WHERE id = ?`, db.now(), sid);

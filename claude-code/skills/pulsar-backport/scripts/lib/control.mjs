@@ -201,7 +201,7 @@ export function pending(sid) {
     if (['ci-failed', 'final-ci-failed'].includes(l.phase)) {
       const kind = l.phase === 'final-ci-failed' ? 'final' : 'test'; const c = l.ci[kind] || {};
       if (attempts(sid, b, 'fix-ci', { kind, sha: c.sha }) >= 1) {
-        add({ key: `ci:${b}:${c.sha}`, kind: 'ci', branch: b, title: `${kind === 'final' ? b : 'The test PR'} CI still fails after a fix attempt`,
+        add({ key: `ci:${b}:${c.sha}`, kind: 'ci', branch: b, title: `${kind === 'final' ? b : 'The test branch'} CI still fails after a fix attempt`,
           text: `${(c.failed || []).map((f) => f.name).slice(0, 6).join(', ')}${c.reruns ? ` · ${c.reruns} rerun(s)` : ''}. ${kind === 'test' ? 'A pick that cannot be made to work can be dropped from the picks tab.' : ''}`,
           options: [
             { id: 'fix', label: 'Fix with Claude again', recommended: true, input: 'Instructions for the worker (optional)', optional: true, run: (text) => enqueue(sid, b, 'fix-ci', { kind, sha: c.sha, instructions: text || undefined }) },
@@ -210,9 +210,9 @@ export function pending(sid) {
       }
     }
     if (l.phase === 'ready' && !lane.holds(sid, b).length) {
-      add({ key: `ready:${b}`, kind: 'ready', branch: b, title: `${b} is tested and squashed`, text: l.ci.rebase ? `${b} moved since testing; the rebased batch is untested.` : 'Finalize fast-forwards the real branch to the tested commits and dispatches CI.',
+      add({ key: `ready:${b}`, kind: 'ready', branch: b, title: `${b} is tested and squashed`, text: l.ci.rebase ? `${b} moved since testing; the rebased batch is untested.` : `Finalize fast-forwards the local ${b} to the tested commits, pushes it and dispatches CI.`,
         options: [
-          { id: 'finalize', label: `Finalize: fast-forward ${b}`, recommended: true, confirm: `Push the tested commits to apache/pulsar ${b} (fast-forward only) and dispatch CI?`, run: () => enqueue(sid, b, 'finalize', { allowRebase: false }) },
+          { id: 'finalize', label: `Finalize: fast-forward ${b}`, recommended: true, confirm: `Fast-forward the local ${b} to the tested commits, push it to apache/pulsar (fast-forward only) and dispatch CI?`, run: () => enqueue(sid, b, 'finalize', { allowRebase: false }) },
           l.ci.rebase ? { id: 'rebased', label: 'Push rebased (untested)', cls: 'danger', confirm: `${b} moved since testing. Push the rebased batch without testing that combination?`, run: () => enqueue(sid, b, 'finalize', { allowRebase: true }) } : null,
         ] });
     }
