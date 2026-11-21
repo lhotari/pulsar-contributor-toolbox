@@ -51,6 +51,9 @@ const HELP = `bpt — apache/pulsar backport sessions (state: ${db.DB_PATH})
   lane add-dep <id> <branch> <pr> <dep> [--detail T]   backport <dep> before <pr>, in master order (rebuilds the lane if needed)
   lane out-of-order <id> <branch> <pr> --reason T      let a late pick go on top instead of in master order
   lane rewind <id> <branch> --before <master-order>    re-apply every pick after that position
+  lane pick-on-top <id> <branch> <pr> [--reason T]     a pushed lane: backport <pr> as a new commit on top (cherry-pick -x, build check)
+  lane revert <id> <branch> <pr> --reason T            a pushed lane: revert the pick with an ordinary revert commit on top
+                                                       (both stay local until push-final-fix; the report lists them)
   decisions <id>                                    what the backport waits for, with the options
   decisions <id> apply <key> <option> [--text T]    choose an option (the UI does the same)
   decisions <id> recommended                        choose the recommended option wherever it needs no input
@@ -277,6 +280,8 @@ async function main() {
         case 'squash': return out(lane.squash(sid, branch));
         case 'finalize': return out(lane.finalize(sid, branch, { allowRebase: !!opt['allow-rebase'] }));
         case 'push-final-fix': lane.pushFinalFix(sid, branch); return out('ok');
+        case 'pick-on-top': return out(lane.pickOnTop(sid, branch, Number(need(arg, 'pr')), { reason: typeof opt.reason === 'string' ? opt.reason : null }));
+        case 'revert': return out(lane.revertOnTop(sid, branch, Number(need(arg, 'pr')), { reason: need(opt.reason, '--reason') }));
         case 'reset': lane.resetLane(sid, branch); return out('ok');
       }
       break;

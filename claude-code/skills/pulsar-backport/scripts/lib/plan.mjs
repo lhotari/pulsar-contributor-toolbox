@@ -180,6 +180,21 @@ export function pullInDependencies(sid, { log = () => {}, refresh = false } = {}
   const needed = (e) => e.source === 'manual' || e.status === 'accepted'
     || !!db.get(`SELECT 1 FROM targets WHERE session_id = ? AND pr = ? AND (? IS NULL OR branch = ?) AND on_branch = 0 AND decision != 'skip'`, sid, e.pr, e.branch, e.branch);
   const want = new Map(); for (const e of edges.filter(needed)) (want.get(e.depends_on) || want.set(e.depends_on, []).get(e.depends_on)).push(e);
+  return importPrs(sid, want, { log });
+}
+
+/**
+ * Bring master PRs that are not items yet into the plan (merged before the plan's range), e.g. a follow-up fix
+ * backported on top of a pushed batch. Returns {added, missing} (missing: not a merged master PR).
+ */
+export function addPrs(sid, prs, { reason, log = () => {} } = {}) {
+  return importPrs(sid, new Map(prs.map((pr) => [pr, []])), { log, reason });
+}
+
+/** want: Map<pr, dependency edges that need it> (empty: added for `reason`). */
+function importPrs(sid, want, { log = () => {}, reason = null } = {}) {
+  const s = db.session(sid); const cfg = s.config; const repo = cfg.repo; const r = remote(cfg);
+  const masterRef = `${r}/${cfg.source}`;
   const out = { added: [], missing: [] };
   if (!want.size) return out;
   const branches = db.all('SELECT * FROM lanes WHERE session_id = ? ORDER BY seq', sid).map((l) => l.branch);
@@ -210,8 +225,9 @@ export function pullInDependencies(sid, { log = () => {}, refresh = false } = {}
               WHERE session_id = ? AND pr = ? AND (? IS NULL OR branch = ?) AND on_branch = 0`, `dependency of #${e.pr}`, db.now(), sid, pr, e.branch, e.branch);
     }
     out.added.push(pr);
-    db.event(sid, `#${pr} added to the plan: merged before the plan's range, needed as a dependency of ${via.map((x) => `#${x}`).join(', ')}`);
-    log(`pulled in #${pr} (dependency of ${via.map((x) => `#${x}`).join(', ')})`);
+    const why = via.length ? `needed as a dependency of ${via.map((x) => `#${x}`).join(', ')}` : reason || 'added by the user';
+    db.event(sid, `#${pr} added to the plan: merged before the plan's range, ${why}`);
+    log(`pulled in #${pr} (${why})`);
   }
   if (out.added.length) db.touchSession(sid);
   return out;

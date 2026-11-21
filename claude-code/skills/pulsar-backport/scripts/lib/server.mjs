@@ -42,7 +42,9 @@ function sessionSummary(sid) {
     const p = lane.lanePicks(sid, l.branch);
     const count = (st) => p.filter((x) => x.status === st).length;
     return { ...l, ci: db.J(l.ci, {}), picks: { total: p.length, picked: count('picked'), pending: count('pending'), conflict: count('conflict'),
-      blocked: count('blocked'), needsFix: count('needs-fix'), skipped: count('skipped'), empty: count('empty') } };
+      blocked: count('blocked'), needsFix: count('needs-fix'), skipped: count('skipped'), empty: count('empty'), reverted: count('reverted'),
+      // Commits on top of the pushed head that are not pushed yet.
+      onTop: lane.unpushedOnTop(sid, l.branch).map((x) => ({ pr: x.pr, kind: x.kind, sha: x.sha, ok: x.ok })) } };
   });
   const decisions = db.all(`SELECT branch, decision, decision_source source, COUNT(*) n FROM targets t JOIN items i ON i.session_id = t.session_id AND i.pr = t.pr
      WHERE t.session_id = ? AND t.on_branch = 0 AND i.excluded IS NULL GROUP BY branch, decision, decision_source`, sid);

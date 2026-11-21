@@ -25,12 +25,14 @@ export function laneReport(sid, branch) {
   const picks = db.all('SELECT * FROM picks WHERE session_id = ? AND branch = ? ORDER BY seq, pr', sid, branch).map((p) => ({ ...p, detail: db.J(p.detail, {}) }));
   const committed = picks.filter((p) => ['picked', 'needs-fix', 'empty'].includes(p.status));
   const open = picks.filter((p) => ['pending', 'conflict', 'blocked'].includes(p.status));
+  // Picks that were pushed and then reverted with an ordinary revert commit (they need a fix first).
+  const reverted = picks.filter((p) => p.status === 'reverted');
   const title = (pr) => strip(items.get(pr)?.title || '');
   const verdicts = {}; for (const p of committed) { const v = p.detail.review?.sha === p.picked_sha ? (p.detail.review.accepted ? 'concern accepted' : p.detail.review.verdict) : 'not reviewed'; verdicts[v] = (verdicts[v] || 0) + 1; }
 
   // Commits that are on apache/pulsar: the head that CI tested (the test branch) and the finalized release branch.
   const pushed = new Set();
-  for (const head of [ci.test?.sha, ci.final?.sha]) {
+  for (const head of [ci.test?.sha, ci.final?.sha, l.final_sha]) {
     if (!head || !l.base_sha) continue;
     const r = g.git(l.worktree || s.config.repo, ['rev-list', `${l.base_sha}..${head}`], { allowFail: true });
     for (const x of (r.out || '').split('\n').filter(Boolean)) pushed.add(x);
@@ -39,6 +41,9 @@ export function laneReport(sid, branch) {
   w.push(`# Backports to ${branch}${l.release ? ` (${l.release})` : ''}\n`);
   w.push(`${s.title}. Lane phase **${l.phase}**${l.head_sha ? `, head \`${g.short(l.head_sha)}\`` : ''}${l.base_sha ? ` on \`${g.short(l.base_sha)}\`` : ''}${l.test_branch ? `, test branch \`${l.test_branch}\`` : l.test_pr_url ? `, test PR ${l.test_pr_url}` : ''}${ci.test?.state ? ` (CI ${ci.test.state})` : ''}. Generated ${db.now().slice(0, 16).replace('T', ' ')} UTC from session \`${sid}\`.\n`);
   w.push(`- **${committed.length} cherry-picks**${committed.filter((p) => p.status === 'empty').length ? ` (${committed.filter((p) => p.status === 'empty').length} already on the branch)` : ''}, in master merge order${open.length ? `; **${open.length} not picked yet** (${['pending', 'conflict', 'blocked'].map((st) => [st, open.filter((p) => p.status === st).length]).filter(([, n]) => n).map(([st, n]) => `${n} ${st}`).join(', ')}), listed after them` : ''}.`);
+  const onTop = committed.filter((p) => p.detail.onTop);
+  if (onTop.length) w.push(`- **${onTop.length} backported on top** of the pushed batch: ${onTop.map((p) => `${prRef(p.pr)}${p.detail.onTop.pushed ? '' : ' (not pushed yet)'}`).join(', ')}.`);
+  if (reverted.length) w.push(`- **${reverted.length} reverted** after the batch was pushed: ${reverted.map((p) => `${prRef(p.pr)}${p.detail.revert?.pushed ? '' : ' (revert not pushed yet)'}`).join(', ')}; see Reverted.`);
   w.push(`- Diff review: ${Object.entries(verdicts).map(([k, n]) => `${n} ${k}`).join(', ') || 'none'}.`);
   const an = new Map(db.all('SELECT * FROM analysis WHERE session_id = ? AND branch = ?', sid, branch).map((x) => [x.pr, x]));
   const analyzed = committed.filter((p) => an.has(p.pr));
@@ -55,13 +60,23 @@ export function laneReport(sid, branch) {
   if (byCompat('behavior').length) { w.push('### Behavior changes (compatible)\n'); w.push(...compatList(byCompat('behavior')), ''); }
 
   w.push(...ciw.lines);
+  if (reverted.length) {
+    w.push('## Reverted\n');
+    w.push('Picks that were pushed and then reverted with an ordinary revert commit on top of the branch. They are not part of the release; the reason says what needs to happen first.\n');
+    for (const p of reverted) {
+      const r = p.detail.revert || {};
+      const ref = (sha) => (sha && pushed.has(sha) ? commitRef(sha) : `\`${g.short(sha) || '–'}\``);
+      w.push(`- ${prRef(p.pr)} ${title(p.pr)}: cherry-picked as ${ref(p.picked_sha)}, reverted by ${ref(r.sha)}${r.pushed ? '' : ' _(not pushed yet)_'}. **Reason:** ${one(r.reason || '')}`);
+    }
+    w.push('');
+  }
   w.push('## Cherry-picks\n');
   const issues = fixedIssues(sid, committed.map((p) => p.pr));
   committed.forEach((p, i) => {
     const it = items.get(p.pr) || {}; const a = it.assessment || {}; const t = targets.get(p.pr) || {}; const d = p.detail;
     w.push(`### ${i + 1}. ${prRef(p.pr)} ${title(p.pr)}\n`);
     const master = d.master || it.sha || p.source_sha;
-    w.push(`${p.picked_sha && pushed.has(p.picked_sha) ? commitRef(p.picked_sha) : `\`${g.short(p.picked_sha) || '–'}\``} cherry-picked from ${master ? commitRef(master) : '–'}${p.status === 'empty' ? ' · already on the branch (empty pick)' : ''}${d.reused ? ' · reused from the tested commits of the source lane' : ''}\n`);
+    w.push(`${p.picked_sha && pushed.has(p.picked_sha) ? commitRef(p.picked_sha) : `\`${g.short(p.picked_sha) || '–'}\``} cherry-picked from ${master ? commitRef(master) : '–'}${p.status === 'empty' ? ' · already on the branch (empty pick)' : ''}${d.reused ? ' · reused from the tested commits of the source lane' : ''}${d.onTop ? ` · backported on top of the pushed batch${d.onTop.reason ? ` (${one(d.onTop.reason)})` : ''}${d.onTop.pushed ? '' : ', not pushed yet'}` : ''}\n`);
     const x = an.get(p.pr);
     const REASON = { bug: 'bug fix', security: 'security fix', divergence: 'avoids divergence from master', dependency: 'dependency of another pick', test: 'test reliability', build: 'build', other: 'other' };
     const iss = issues.get(p.pr) || [];

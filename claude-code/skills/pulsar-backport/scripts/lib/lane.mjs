@@ -11,7 +11,7 @@ import * as gh from './gh.mjs';
 import * as jobs from './jobs.mjs';
 import { buildCheck } from './build.mjs';
 import { intentCheck } from './intent.mjs';
-import { remote, remoteRef, depOnBranch, saveConfig, pullInDependencies } from './plan.mjs';
+import { remote, remoteRef, depOnBranch, saveConfig, pullInDependencies, addPrs } from './plan.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const PHASES = ['not-started', 'picking', 'needs-attention', 'picked', 'verifying', 'verified', 'testing', 'ci-failed',
@@ -976,6 +976,8 @@ export function finalize(sid, branch, { allowRebase = false } = {}) {
       return { status: 'rebase-conflict', moved };
     }
     head = g.rev(l.worktree, 'HEAD');
+    db.updateLane(sid, branch, { base_sha: target });
+    resyncPicks(sid, branch); // the rebase gave every pick a new commit
     db.updateLane(sid, branch, { base_sha: target, squashed_sha: head, head_sha: head, ci: { ...l.ci, rebase: { onto: target, head, moved } } });
     if (!allowRebase) {
       attention(sid, branch, `${branch} moved by ${moved.length} commit(s) (${moved.slice(0, 3).join('; ')}). The batch rebased cleanly onto it, but that combination is untested. Use "Push rebased" to accept it`);
@@ -995,18 +997,135 @@ export function pushFinalFix(sid, branch) {
   const s = db.session(sid); const cfg = s.config; const l = db.lane(sid, branch); const r = remote(cfg);
   const head = g.rev(l.worktree, 'HEAD');
   if (!g.isAncestor(l.worktree, l.final_sha, head) || head === l.final_sha) throw new Error('no new commits on top of the pushed head');
+  const bad = unpushedOnTop(sid, branch).filter((x) => !x.ok);
+  if (bad.length) throw new Error(`${bad.map((x) => `${x.kind} of #${x.pr}`).join(', ')} did not pass the build check (or has a conflict); fix it first`);
   g.fetch(cfg.repo, r, [branch]);
   if (!g.isAncestor(cfg.repo, `${r}/${branch}`, head)) throw new Error(`${r}/${branch} moved; the fix no longer fast-forwards it`);
   fastForwardAndPush(cfg, branch, head, r);
   const dispatched = dispatchWorkflows(sid, branch, branch, finalWorkflows(cfg));
   db.updateLane(sid, branch, { final_sha: head, head_sha: head, phase: 'final-ci', ci: { ...l.ci, final: { sha: head, branch, state: 'pending', pushedAt: db.now(), reruns: 0, dispatched, url: runsUrl(branch) } } });
-  db.event(sid, `Pushed fix ${g.short(l.final_sha)}..${g.short(head)} to ${branch} and dispatched CI`, { branch });
+  const marked = [];
+  for (const p of picks(sid, branch)) {
+    const d = { ...p.detail }; let changed = false;
+    if (d.onTop && !d.onTop.pushed && p.picked_sha && g.isAncestor(l.worktree, p.picked_sha, head)) { d.onTop = { ...d.onTop, pushed: head }; changed = true; marked.push(`#${p.pr}`); }
+    if (d.revert && !d.revert.pushed && g.isAncestor(l.worktree, d.revert.sha, head)) { d.revert = { ...d.revert, pushed: head }; changed = true; marked.push(`revert of #${p.pr}`); }
+    if (changed) setPick(sid, branch, p.pr, { detail: d });
+  }
+  db.event(sid, `Pushed ${g.short(l.final_sha)}..${g.short(head)} to ${branch}${marked.length ? ` (${marked.join(', ')})` : ''} and dispatched CI`, { branch });
+}
+
+// --- changes on top of a pushed batch ---
+// Once a lane is pushed to its release branch its commits are fixed: a missing fix is backported, and a pick that
+// turns out to need a fix is reverted, as ordinary commits on top of the pushed head. They stay local until the user
+// pushes them (push-final-fix), which fast-forwards the branch and dispatches CI again. The picks table records them,
+// so the report lists the added backport and the revert.
+
+function onTopLane(sid, branch) {
+  const l = db.lane(sid, branch);
+  if (!PUSHED.includes(l.phase)) throw new Error(`${branch} is ${l.phase}: before the batch is pushed, add or drop picks instead (it is rebuilt)`);
+  const st = g.state(l.worktree);
+  if (st.cherryPicking || st.rebasing) throw new Error(`a cherry-pick or rebase is in progress in ${l.worktree}; finish or abort it first`);
+  if (st.dirty) throw new Error(`${l.worktree} has uncommitted changes`);
+  if (!g.isAncestor(l.worktree, l.final_sha, st.head)) throw new Error(`the lane head ${g.short(st.head)} does not build on the pushed ${g.short(l.final_sha)}`);
+  return { l, head: st.head };
+}
+
+const compileCheck = (sid, branch, l, sha, p, log) => {
+  const cfg = db.session(sid).config;
+  const files = g.git(l.worktree, ['diff-tree', '--no-commit-id', '--name-only', '-r', sha]).split('\n').filter(Boolean)
+    .filter((f) => fs.existsSync(path.join(l.worktree, f)));
+  const { dtest } = p ? changedTests(sid, branch, p) : { dtest: {} };
+  return { ...buildCheck({ dir: l.worktree, files, dtest, cfg, name: `build-${sid}-${branch}-${p?.pr ?? 'revert'}-on-top`, log }), head: g.rev(l.worktree, 'HEAD') };
+};
+
+/**
+ * Backport `pr` as a new commit on top of the pushed lane (`git cherry-pick -x`), then run its build check. A PR
+ * merged before the plan's range joins the plan first. On a conflict the cherry-pick is left in progress: resolve,
+ * `git cherry-pick --continue`, and run this again; it adopts the commit at HEAD that carries the trailer.
+ */
+export function pickOnTop(sid, branch, pr, { reason = null, log = console.log } = {}) {
+  const { l, head } = onTopLane(sid, branch);
+  const have = picks(sid, branch).find((x) => x.pr === pr);
+  if (have && ['picked', 'needs-fix', 'empty'].includes(have.status) && !have.detail.onTop?.conflict) throw new Error(`#${pr} is already ${have.status} on ${branch}`);
+  let item = db.get('SELECT pr, sha FROM items WHERE session_id = ? AND pr = ?', sid, pr);
+  if (!item) {
+    const r = addPrs(sid, [pr], { reason: `backported on top of the pushed ${branch}${reason ? `: ${reason}` : ''}` });
+    if (r.missing.includes(pr)) throw new Error(`#${pr} is not a merged master PR`);
+    item = db.get('SELECT pr, sha FROM items WHERE session_id = ? AND pr = ?', sid, pr);
+  }
+  const t = db.get('SELECT on_branch FROM targets WHERE session_id = ? AND pr = ? AND branch = ?', sid, pr, branch);
+  if (t?.on_branch) throw new Error(`#${pr} is already on ${branch}`);
+  db.run(`UPDATE targets SET decision = 'backport', decision_source = 'user', decision_note = ?, decided_at = ? WHERE session_id = ? AND pr = ? AND branch = ?`,
+    reason || `backported on top of the pushed ${branch}`, db.now(), sid, pr, branch);
+  const onTop = { reason, at: db.now(), base: l.final_sha };
+  const seq = have?.seq ?? (db.get('SELECT MAX(seq) AS m FROM picks WHERE session_id = ? AND branch = ?', sid, branch).m || 0) + 1;
+  db.run(`INSERT OR REPLACE INTO picks (session_id, branch, pr, seq, source_sha, picked_sha, status, detail, updated_at) VALUES (?,?,?,?,?,?,?,?,?)`,
+    sid, branch, pr, seq, item.sha, null, 'pending', db.S({ master: item.sha, onTop }), db.now());
+  // Resolved by hand after a conflict: the commit at HEAD is the cherry-pick.
+  const atHead = head !== l.final_sha && g.git(l.worktree, ['log', '-1', '--format=%B', 'HEAD']).includes(`cherry picked from commit ${item.sha}`);
+  if (!atHead) {
+    const r = g.cherryPick(l.worktree, item.sha);
+    if (!r.ok) {
+      const conflicts = g.git(l.worktree, ['diff', '--name-only', '--diff-filter=U']).split('\n').filter(Boolean);
+      setPick(sid, branch, pr, { status: 'conflict', detail: { master: item.sha, onTop: { ...onTop, conflict: true }, conflicts } });
+      db.event(sid, `#${pr} conflicts on top of ${branch} in ${conflicts.join(', ') || '?'}; resolve in ${l.worktree}, git cherry-pick --continue, then pick it on top again`, { branch, level: 'attention' });
+      return { pr, status: 'conflict', conflicts, worktree: l.worktree };
+    }
+  }
+  const sha = g.rev(l.worktree, 'HEAD');
+  setPick(sid, branch, pr, { status: 'picked', picked_sha: sha, detail: { master: item.sha, onTop } });
+  const p = picks(sid, branch).find((x) => x.pr === pr);
+  const intent = intentCheck({ repo: db.session(sid).config.repo, master: item.sha, dir: l.worktree });
+  const build = intent.ok ? compileCheck(sid, branch, l, sha, p, log) : { ok: false, stage: 'intent: the master change is not fully applied', output: intent.problems.join('\n'), at: db.now() };
+  setPick(sid, branch, pr, { status: build.ok ? 'picked' : 'needs-fix', detail: { ...p.detail, build } });
+  db.updateLane(sid, branch, { head_sha: sha });
+  db.event(sid, `#${pr} backported on top of the pushed ${branch} as ${g.short(sha)}${build.ok ? `; build check passed (${build.modules?.join(', ') || build.skipped})${build.tests ? `, tests ${build.tests}` : ''}` : `; build check FAILED (${build.stage})`}. Not pushed yet: push the fix from the UI`, { branch, level: build.ok ? 'info' : 'attention' });
+  return { pr, status: build.ok ? 'picked' : 'needs-fix', sha, build: { ok: build.ok, stage: build.stage, modules: build.modules, tests: build.tests } };
+}
+
+/**
+ * Revert a pushed pick with an ordinary `git revert` commit on top of the lane (the pick needs a fix first). The
+ * pick becomes "reverted" with the revert commit and the reason; the report lists it under Reverted.
+ */
+export function revertOnTop(sid, branch, pr, { reason, log = console.log } = {}) {
+  if (!reason) throw new Error('a revert needs a reason');
+  const { l } = onTopLane(sid, branch);
+  const p = picks(sid, branch).find((x) => x.pr === pr);
+  if (!p?.picked_sha || !['picked', 'needs-fix', 'empty'].includes(p.status)) throw new Error(`#${pr} is not a committed pick of ${branch}`);
+  if (!g.isAncestor(l.worktree, p.picked_sha, 'HEAD')) throw new Error(`#${pr}'s commit ${g.short(p.picked_sha)} is not in the lane history`);
+  const r = g.git(l.worktree, ['revert', '--no-edit', p.picked_sha], { allowFail: true });
+  if (!r.ok) {
+    g.git(l.worktree, ['revert', '--abort'], { allowFail: true });
+    throw new Error(`git revert ${g.short(p.picked_sha)} does not apply cleanly; later commits build on it: ${(r.err || r.out).slice(0, 500)}`);
+  }
+  const sha = g.rev(l.worktree, 'HEAD');
+  const build = compileCheck(sid, branch, l, sha, null, log);
+  const revert = { sha, reason, at: db.now(), build: { ok: build.ok, stage: build.stage, modules: build.modules, at: build.at } };
+  setPick(sid, branch, pr, { status: 'reverted', detail: { ...p.detail, revert } });
+  db.updateLane(sid, branch, { head_sha: sha });
+  db.event(sid, `#${pr} reverted on top of the pushed ${branch} as ${g.short(sha)} (${reason})${build.ok ? '; compiles' : `; build check FAILED (${build.stage})`}. Not pushed yet: push the fix from the UI`, { branch, level: build.ok ? 'warn' : 'attention' });
+  return { pr, sha, build: revert.build };
+}
+
+/** Backports and reverts made on top of the pushed lane that are not pushed yet: [{pr, kind, sha, ok}]. */
+export function unpushedOnTop(sid, branch) {
+  const out = [];
+  for (const p of picks(sid, branch)) {
+    if (p.detail.onTop && !p.detail.onTop.pushed && (p.picked_sha || p.status === 'conflict')) out.push({ pr: p.pr, kind: 'backport', sha: p.picked_sha, ok: p.status === 'picked' });
+    if (p.detail.revert && !p.detail.revert.pushed) out.push({ pr: p.pr, kind: 'revert', sha: p.detail.revert.sha, ok: p.detail.revert.build?.ok !== false });
+  }
+  return out;
 }
 
 /** After final CI is green: labels, delete the test branch. */
 export function afterDone(sid, branch) {
   const s = db.session(sid); const cfg = s.config; const l = db.lane(sid, branch); const r = remote(cfg);
   const done = picks(sid, branch).filter((p) => p.status === 'picked');
+  // A pick reverted after it was pushed is not on the branch any more: it must not carry (or keep) the labels.
+  for (const p of picks(sid, branch).filter((x) => x.status === 'reverted')) {
+    const remove = [`cherry-picked/${branch}`]; if (l.release) remove.push(`release/${l.release}`);
+    try { gh.editLabels(p.pr, { remove }); } catch (e) { db.event(sid, `Removing labels from reverted #${p.pr} failed: ${e.message}`, { branch, level: 'warn' }); }
+  }
   for (const p of done) {
     const add = [`cherry-picked/${branch}`]; if (l.release) add.push(`release/${l.release}`);
     try { gh.editLabels(p.pr, { add }); } catch (e) { db.event(sid, `Labels on #${p.pr} failed: ${e.message}`, { branch, level: 'warn' }); }

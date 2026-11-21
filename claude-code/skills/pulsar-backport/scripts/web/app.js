@@ -102,7 +102,7 @@ function laneButtons(l, sum) {
     case 'picking': btn('Continue picking', 'pick-all', null, { cls: 'primary' }); break;
     case 'needs-attention': B.push(h('button', { class: 'primary', onclick: () => setTab(`picks:${b}`) }, 'Show picks')); btn('Continue picking', 'pick-all'); break;
     case 'picked': case 'verifying': btn('Verify with Claude', 'verify', null, { cls: 'primary' }); btn('Mark verified', 'mark-verified', null, { confirm: 'Mark the lane verified without a Claude build check?' }); break;
-    case 'verified': btn('Push test branch + open PR', 'push-test', null, { cls: 'primary', confirm: `Push the lane to a new test branch on apache/pulsar and open a PR against ${b}?` }); break;
+    case 'verified': btn('Push test branch + run CI', 'push-test', null, { cls: 'primary', confirm: `Push the lane to a test branch on apache/pulsar and dispatch CI there (no PR)?` }); break;
     case 'testing': btn('Poll CI now', 'poll'); break;
     case 'ci-failed': btn('Fix with Claude', 'fix-ci', null, { cls: 'primary' }); btn('Re-run failed jobs', 'rerun'); btn('Poll CI', 'poll'); break;
     case 'ci-green': btn('Squash fixups', 'squash', null, { cls: 'primary' }); break;
@@ -111,8 +111,13 @@ function laneButtons(l, sum) {
       if (l.ci?.rebase) btn('Push rebased (untested)', 'finalize', { allowRebase: true }, { cls: 'danger', confirm: `${b} moved since testing. Push the rebased batch without testing that combination?` });
       break;
     case 'final-ci': btn('Poll CI now', 'poll'); break;
-    case 'final-ci-failed': btn('Fix with Claude', 'fix-ci', null, { cls: 'primary' }); btn('Re-run failed jobs', 'rerun'); btn(`Push fix to ${b}`, 'push-final-fix', null, { confirm: `Push the fix commit(s) on top of ${b} (fast-forward) and dispatch CI?` }); break;
+    case 'final-ci-failed': btn('Fix with Claude', 'fix-ci', null, { cls: 'primary' }); btn('Re-run failed jobs', 'rerun'); break;
     default: break;
+  }
+  // Commits on top of the pushed head (a fix, a backport added later, a revert) wait for the user to push them.
+  if (['final-ci', 'final-ci-failed', 'done'].includes(l.phase) && l.head_sha && l.final_sha && l.head_sha !== l.final_sha) {
+    const onTop = (l.picks?.onTop || []).map((x) => `${x.kind} #${x.pr}`).join(', ');
+    btn(`Push commits on top to ${b}${onTop ? ` (${onTop})` : ''}`, 'push-final-fix', null, { cls: 'primary', confirm: `Fast-forward the local ${b} to ${short(l.head_sha)} (${onTop || 'the commits on top'}), push it to apache/pulsar and dispatch CI?` });
   }
   if (!['not-started', 'final-ci', 'final-ci-failed', 'done'].includes(l.phase)) btn('Reset lane', 'reset', null, { cls: 'ghost danger', confirm: `Delete the ${b} lane worktree and forget its picks? The remote test branch stays.` });
   const wrap = h('div', { class: 'laneButtons' }, B);

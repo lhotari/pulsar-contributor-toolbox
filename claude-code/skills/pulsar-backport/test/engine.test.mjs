@@ -287,6 +287,37 @@ test('a dependency merged before the plan\'s range joins the plan and its group'
   assert.equal(plan.planView(sid).items.find((x) => x.pr === 110).targets['branch-4.2'].on_branch, 0);
 });
 
+test('a pushed lane takes a backport and a revert on top; the report lists both', async () => {
+  const B = 'branch-4.0'; const wt = lane.worktreeDir(SID, B);
+  assert.equal(db.lane(SID, B).phase, 'done');
+  // #113 merged after the plan was made: it joins the plan and goes on top of the pushed head with -x.
+  const r = lane.pickOnTop(SID, B, 113, { reason: 'follow-up fix', log: () => {} });
+  assert.equal(r.status, 'picked');
+  assert.ok(db.get('SELECT 1 x FROM items WHERE session_id = ? AND pr = 113', SID));
+  assert.match(sh(wt, 'log', '-1', '--format=%B'), /cherry picked from commit/);
+  assert.throws(() => lane.pickOnTop(SID, B, 113, { log: () => {} }), /already picked/);
+  // A pushed pick that needs a fix first is reverted with an ordinary revert commit.
+  const rv = lane.revertOnTop(SID, B, 101, { reason: 'needs a fix first', log: () => {} });
+  assert.match(sh(wt, 'log', '-1', '--format=%s'), /^Revert ".*\(#101\)"$/);
+  assert.match(sh(wt, 'log', '-1', '--format=%b'), /This reverts commit [0-9a-f]{40}/);
+  assert.equal(lane.lanePicks(SID, B).find((p) => p.pr === 101).status, 'reverted');
+  assert.deepEqual(lane.unpushedOnTop(SID, B).map((x) => [x.kind, x.pr]), [['revert', 101], ['backport', 113]]);
+  const { laneReport } = await import('../scripts/lib/report.mjs');
+  let md = laneReport(SID, B);
+  assert.match(md, /## Reverted[\s\S]*#101[\s\S]*not pushed yet[\s\S]*needs a fix first/);
+  assert.match(md, /backported on top of the pushed batch \(follow-up fix\), not pushed yet/);
+  assert.doesNotMatch(md.split('## Cherry-picks')[1], /### \d+\. \[#101\]/, 'a reverted pick is not listed as a cherry-pick');
+  // Pushed by the user (fast-forward of the local branch), then CI again; the labels leave the reverted PR.
+  lane.pushFinalFix(SID, B);
+  assert.equal(sh(origin, 'rev-parse', B), rv.sha);
+  assert.deepEqual(lane.unpushedOnTop(SID, B), []);
+  md = laneReport(SID, B);
+  assert.doesNotMatch(md, /not pushed yet/);
+  assert.equal(lane.pollCi(SID, B).phase, 'done');
+  assert.match(fs.readFileSync(ghLog, 'utf8'), /pr edit 101 -R apache\/pulsar --remove-label cherry-picked\/branch-4.0 --remove-label release\/4.0.15/);
+  assert.throws(() => lane.revertOnTop(SID, B, 101, { reason: 'x' }), /not a committed pick/);
+});
+
 test('while backporting: late picks go in master order, drops rebuild the lane, workers propose, abort resets', async () => {
   const control = await import('../scripts/lib/control.mjs');
   sh(repo, 'checkout', '-q', 'master'); sh(repo, 'pull', '-q', 'origin', 'master');
