@@ -41,7 +41,7 @@ let TOKEN = null;
 async function api(path, { method = 'GET', body } = {}) {
   const r = await fetch(`/api/${path}`, { method, headers: { 'x-prd-token': TOKEN || '', 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw Object.assign(new Error(j.error || r.statusText), { status: r.status, code: j.code });
+  if (!r.ok) throw Object.assign(new Error(j.error || r.statusText), { status: r.status, code: j.code, lint: j.lint });
   return j;
 }
 const action = (name, args = {}) => api('action', { method: 'POST', body: { action: name, ...args } });
@@ -233,6 +233,16 @@ async function showBoard() {
       ...[3, 5, 10, 20].map((v) => h('option', { value: v, selected: v === 5 ? true : null }, String(v))));
     filters.append(h('span', { class: 'bulk' }, h('button', { class: 'small primary', onclick: () => bulkReReview(Number(n.value)) }, 'Re-review top'), n));
   }
+  if (S.lane === 'approved') {
+    const n = h('select', { class: 'small', title: 'How many of the PRs shown (in the current order) with open threads to queue' },
+      ...[3, 5, 10, 20].map((v) => h('option', { value: v, selected: v === 5 ? true : null }, String(v))));
+    filters.append(h('span', { class: 'bulk' }, h('button', { class: 'small primary', title: 'Claude checks every open thread of approved PRs that cannot merge because of them, and proposes resolve / nudge / follow-up issue for each; nothing posts until you apply it', onclick: () => bulkSettle(Number(n.value)) }, 'Settle threads top'), n));
+  }
+  if (!['security', 'parked', 'done'].includes(S.lane) && S.repo) {
+    const n = h('select', { class: 'small', title: 'How many of the PRs shown (in the current order) to check' },
+      ...[5, 10, 20, 40].map((v) => h('option', { value: v, selected: v === 10 ? true : null }, String(v))));
+    filters.append(h('span', { class: 'bulk' }, h('button', { class: 'small', title: 'Approve the workflow runs GitHub holds for approval on the current head of the top PRs shown. Refused for a head the security scan did not read or flagged.', onclick: () => bulkApproveCi(Number(n.value)) }, 'Approve CI top'), n));
+  }
   body.append(filters, h('div', { id: 'laneNote' }), h('div', { id: 'rows' }));
   main.replaceChildren(h('div', { class: 'board' }, lanes, body));
   boardItems = await api(itemsUrl()).catch((e) => { toast(e.message, true); return []; });
@@ -269,6 +279,10 @@ function rowActions(it) {
   if (['backlog', 'follow-up', 'waiting', 'approved'].includes(it.lane) && !isSec) {
     a.push(go(it.myLast ? 'Re-review' : 'AI review', () => run('Queued', () => action('review', { repo: it.repo, number: it.number })).then(refresh), 'small primary'));
   }
+  if (it.mergeBlock && !it.job && !isSec) {
+    a.push(go(it.threadPlan ? 'Thread plan' : 'Settle threads', () => (it.threadPlan ? (S.tab = 'threads', location.hash = `#/pr/${it.repo}/${it.number}`)
+      : run('Queued', () => action('settle-threads', { repo: it.repo, number: it.number })).then(refresh))));
+  }
   if (['backlog', 'follow-up', 'waiting', 'approved'].includes(it.lane)) {
     a.push(go('Snooze 3d', () => run('Snoozed', () => action('hold', { repo: it.repo, number: it.number, hold: 'snoozed', days: 3 })).then(refresh)));
     a.push(go('Park', () => run('Parked', () => action('hold', { repo: it.repo, number: it.number, hold: 'parked' })).then(refresh)));
@@ -276,6 +290,32 @@ function rowActions(it) {
   if (it.lane === 'parked') a.push(go('Unpark', () => run('Back in triage', () => action('hold', { repo: it.repo, number: it.number, hold: null })).then(refresh)));
   if (it.job && ['queued', 'running'].includes(it.job.status)) a.push(go('Log', () => openLog(it.job.id)), go('Cancel', () => run('Cancelled', () => action('cancel-job', { job: it.job.id })).then(refresh)));
   return h('div', { class: 'rowActions' }, a);
+}
+
+async function bulkSettle(n) {
+  const shown = sortItems(boardItems.filter((it) => matchesFilter(it, S.filter)));
+  const pick = shown.filter((it) => it.mergeBlock && !it.job && !it.threadPlan && !(['flagged', 'suspicious'].includes(it.gate) && it.gateCurrent)).slice(0, n);
+  if (!pick.length) return toast('Nothing to queue: no PR shown has open threads without a job or a thread plan', true);
+  if (!confirm(`Have Claude check the open threads of ${pick.length} approved PR(s)?\n\n${pick.map((it) => `#${it.number} (${it.mergeBlock.open} open) ${it.title}`).join('\n')}\n\nEach gets a thread plan (resolve, nudge the author, or a follow-up issue) for you to check and apply; nothing is posted until then.`)) return;
+  let ok = 0;
+  for (const it of pick) { try { await action('settle-threads', { repo: it.repo, number: it.number }); ok++; } catch (e) { toast(`#${it.number}: ${e.message}`, true); } }
+  toast(`Queued ${ok} thread check(s)`);
+  refreshState().then(refreshBoard);
+}
+
+async function bulkApproveCi(n) {
+  const shown = sortItems(boardItems.filter((it) => matchesFilter(it, S.filter))).filter((it) => !(['flagged', 'suspicious'].includes(it.gate) && it.gateCurrent)).slice(0, n);
+  if (!shown.length) return toast('No PR shown', true);
+  toast(`Checking workflow runs of ${shown.length} PR(s)…`);
+  const { prs } = await run(null, () => action('ci-check', { repo: S.repo, numbers: shown.map((it) => it.number) }));
+  const ready = prs.filter((r) => !r.blocked && r.pending.length);
+  const blocked = prs.filter((r) => r.blocked && r.pending.length);
+  const line = (r) => `#${r.number} ${r.title.slice(0, 70)}: ${r.pending.length} run(s)`;
+  if (!ready.length) return toast(`No workflow runs waiting for approval on the ${prs.length} PR(s) checked${blocked.length ? `; ${blocked.length} blocked: ${blocked.map((r) => `#${r.number} (${r.blocked})`).join(', ')}` : ''}`, !!blocked.length);
+  if (!confirm(`Approve the workflow runs waiting on ${ready.length} PR(s)? CI then runs each PR's code.\n\n${ready.map(line).join('\n')}${blocked.length ? `\n\nNot approved (security):\n${blocked.map((r) => `#${r.number}: ${r.blocked}`).join('\n')}` : ''}`)) return;
+  const res = await run(null, () => action('ci-approve', { repo: S.repo, numbers: ready.map((r) => r.number) }));
+  const n2 = res.prs.reduce((s2, r) => s2 + (r.approved?.length || 0), 0); const errs = res.prs.flatMap((r) => (r.errors || []).map((e) => `#${r.number}: ${e}`));
+  toast(`Approved ${n2} workflow run(s) on ${res.prs.filter((r) => r.approved?.length).length} PR(s)${errs.length ? `; ${errs.length} failed: ${errs.join('; ')}` : ''}`, !!errs.length);
 }
 
 async function bulkReReview(n) {
@@ -373,6 +413,9 @@ function renderRows() {
           it.followUp?.length ? h('ul', { class: 'why' }, it.followUp.map((r) => h('li', {}, r))) : null),
         h('td', { class: 'small' }, S.submitting.has(key) ? h('div', {}, chip('submitting…', 'running')) : null,
           it.job ? chip(`${it.job.type} ${it.job.status}`, it.job.status) : null,
+          it.mergeable === 'CONFLICTING' ? h('div', {}, chip('merge conflicts', 'bad', 'The PR conflicts with its base branch; resolve from the PR page')) : null,
+          it.mergeBlock ? h('div', {}, chip(`${it.mergeBlock.open} open thread(s) block merge`, 'warn', 'GitHub requires every conversation to be resolved before merging')) : null,
+          it.threadPlan ? h('div', {}, chip(`thread plan: ${it.threadPlan} to check`, 'attn')) : null,
           it.review ? h('div', {}, chip(`${{ 're-review': 're-review', manual: 'your review', initial: 'first review' }[it.review.kind] || it.review.kind} ${it.review.status}`, it.review.status),
             it.review.stale ? [' ', chip('out of date', 'warn', 'The draft was written for an older head')] : null,
             h('div', { class: 'muted' }, `${it.review.comments} comment(s)`)) : null),
@@ -483,6 +526,7 @@ function renderSide() {
     jobs.filter((j) => j.type === 'ask' && j.status === 'done' && j.result?.summary).slice(0, 3).map((j) =>
       h('div', { class: 'card' }, h('div', { class: 'cardHead' }, `Answer (job ${j.id}, ${ago(j.finished_at)})`), h('div', { class: 'cardBody' }, md(j.result.summary)))));
   out.push(ai);
+  out.push(renderBranch(bad));
   // triage
   const note = h('textarea', { rows: 2, placeholder: 'Private note (never posted)', value: item.note || '',
     onblur: (e) => { if ((e.target.value || null) !== (item.note || null)) action('note', { repo: pr.repo, number: pr.number, note: e.target.value }).then(() => toast('Note saved')); } });
@@ -499,6 +543,36 @@ function renderSide() {
       r.gh_url ? [' ', ext(r.gh_url, 'GitHub')] : null)),
     h('div', { class: 'small muted', style: 'margin-top:8px' }, S.pr.events.slice(0, 12).map((e) => h('div', {}, `${ago(e.at)} — ${e.message}`)))));
   return out;
+}
+
+/** Merge conflicts: merge the PR's base branch into it (Claude resolves; you push), or GitHub's "Update branch" when it merges cleanly. */
+function renderBranch(bad) {
+  const { pr, jobs } = S.pr;
+  const state = pr.analysis?.mergeable || 'UNKNOWN';
+  const mj = jobs.find((j) => j.type === 'merge');
+  const active = mj && ['queued', 'running', 'waiting'].includes(mj.status) ? mj : null;
+  const m = mj?.result?.merge; const pushed = mj?.result?.pushed;
+  const fresh = m && m.head === pr.head_sha && !pushed;
+  const resolve = h('button', { class: state === 'CONFLICTING' ? 'small primary' : 'small', disabled: bad || active ? true : null,
+    title: bad ? 'Security hold: no checkout for this head' : `Claude merges ${pr.base_ref} into a checkout of the PR head and resolves the conflicts; you check and push the merge commit`,
+    onclick: () => run('Queued', () => action('resolve-conflicts', { repo: pr.repo, number: pr.number })).then(reloadPr) }, `Resolve conflicts (merge ${pr.base_ref})`);
+  const update = h('button', { class: 'small ghost', disabled: bad || state === 'CONFLICTING' ? true : null, title: 'GitHub\'s "Update branch": merges the base into the PR branch when there is no conflict',
+    onclick: () => { if (confirm(`Merge ${pr.base_ref} into #${pr.number} on GitHub ("Update branch")? Workflow runs it starts are approved as they appear.`)) run('Update requested', () => action('update-branch', { repo: pr.repo, number: pr.number })).then(reloadPr); } }, 'Update branch');
+  const push = async () => {
+    if (!confirm(`Push merge commit ${m.mergeSha.slice(0, 10)} (${pr.base_ref} merged into ${m.head.slice(0, 10)}) to the PR branch?\n\n${m.stat || ''}\n\nIt is a fast-forward of the PR head, pushed as you; check the combined diff first.`)) return;
+    await run('Pushed', () => action('merge-push', { job: mj.id })); reloadPr();
+  };
+  return h('div', { class: 'panel' }, h('h2', {}, 'Branch'),
+    h('div', { class: 'kv' }, h('span', { class: 'muted' }, 'base'), h('span', { class: 'mono small' }, pr.base_ref),
+      h('span', { class: 'muted' }, 'mergeable'), h('span', {}, chip(state.toLowerCase(), state === 'CONFLICTING' ? 'bad' : state === 'MERGEABLE' ? 'ok' : ''))),
+    active ? h('div', { class: 'small' }, chip(`merge ${active.status}`, active.status), ' ', h('button', { class: 'small ghost', onclick: () => openLog(active.id) }, 'Log')) : null,
+    m ? h('div', { class: 'small', style: 'margin-top:6px' }, pushed ? [chip('pushed', 'ok'), ` ${m.mergeSha.slice(0, 10)} to ${pushed.to} ${ago(pushed.at)}`]
+      : fresh ? [h('p', {}, `Merge commit ${m.mergeSha.slice(0, 10)} is ready (${m.stat || 'no stat'}).`),
+        mj.result?.summary ? h('details', {}, h('summary', {}, 'How the conflicts were resolved'), md(mj.result.summary)) : null,
+        h('details', {}, h('summary', {}, 'Combined diff of the merge'), h('pre', { class: 'small', style: 'max-height:420px;overflow:auto' }, m.combinedDiff || '(empty: no manual resolution)')),
+        h('div', { class: 'actions', style: 'margin-top:6px' }, h('button', { class: 'small primary', disabled: mj.status !== 'done' ? true : null, onclick: push }, 'Push merge to the PR branch'))]
+        : h('p', { class: 'muted' }, `A merge made for ${m.head.slice(0, 10)} is out of date: the head moved.`)) : null,
+    h('div', { class: 'actions', style: 'margin-top:8px' }, resolve, update));
 }
 
 async function gateDecision(gate) {
@@ -794,9 +868,103 @@ function newCommentBox() {
 }
 
 // --- threads tab ---
+const ACTION_LABEL = { resolve: 'Resolve', 'reply-resolve': 'Reply and resolve', nag: 'Nudge the author (reply, keep open)', issue: 'Follow-up issue, reply and resolve', leave: 'Leave open' };
+const firstLine = (t) => String(t || '').replace(/```[\s\S]*?```/g, ' ').replace(/\s+/g, ' ').trim();
+
+/** A prefilled follow-up issue for a thread: the reviewer's point, quoted, with links back. */
+function issueDraft(t) {
+  const { pr, item } = S.pr;
+  const first = t.comments[0] || {};
+  const head = String(first.body || '').split('\n').find((l) => l.trim()) || '';
+  const sev = /\[(BUG|SECURITY|CORRECTNESS)\]/i.test(head) ? 'fix' : 'improve';
+  const point = firstLine(head.replace(/\*\*|__|`/g, '').replace(/^\s*\[[A-Z_-]+\]\s*/, '').replace(/^#+\s*/, '')) || firstLine(first.body);
+  const type = sev;
+  const quote = String(first.body || '').slice(0, 1200).split('\n').map((l) => `> ${l}`).join('\n');
+  const later = t.comments.slice(1).filter((c) => c.author !== first.author).slice(-1)[0];
+  return {
+    title: `[${type}]${item.component ? `[${item.component}]` : ''} ${point.slice(0, 90)}${point.length > 90 ? '…' : ''}`,
+    body: `While reviewing #${pr.number} (${pr.title}), ${first.author || 'a reviewer'} raised this point on \`${t.path}${t.line ? `:${t.line}` : ''}\`:\n\n${quote}\n\n${later ? `${later.author} replied:\n\n${String(later.body).slice(0, 800).split('\n').map((l) => `> ${l}`).join('\n')}\n\n` : ''}It is out of scope for #${pr.number}, so it is tracked here.`,
+    reply: 'Thanks, let\'s handle this separately: {issue}.',
+  };
+}
+
+async function applyThreadActions(ids, rows) {
+  const n = rows.length;
+  const lines = rows.map((r) => `${r.path}:${r.line ?? ''} — ${ACTION_LABEL[r.action]}${r.action === 'issue' ? `: "${r.issue_title}"` : ''}`);
+  if (!confirm(`Apply ${n} thread action(s) on GitHub now?\n\n${lines.join('\n')}\n\nReplies and issues are posted as you; resolved threads unblock the merge.`)) return;
+  const go = (ack) => action('threads-apply', { repo: S.pr.pr.repo, number: S.pr.pr.number, ids, ack });
+  let res;
+  try { res = await go([]); } catch (e) {
+    if (e.code !== 'LINT') { toast(e.message, true); return; }
+    if (!confirm(`${e.message}\n\nPost it anyway?`)) return;
+    const ack = [...(e.lint?.security?.length ? ['security'] : []), ...(e.lint?.tooling || []).map((x) => x.label)];
+    try { res = await go(ack); } catch (e2) { toast(e2.message, true); return; }
+  }
+  const ok = res.results.filter((r) => r.status === 'applied'); const bad = res.results.filter((r) => r.status !== 'applied');
+  toast(`${ok.length} applied${ok.filter((r) => r.issue).length ? ` (issue ${ok.filter((r) => r.issue).map((r) => `#${r.issue}`).join(', ')})` : ''}${bad.length ? `; ${bad.length} not: ${bad.map((r) => r.error || r.note).join('; ')}` : ''}`, bad.some((r) => r.status === 'failed'));
+  reloadPr();
+}
+
+function renderThreadPlan() {
+  const rows = S.pr.threadActions || [];
+  if (!rows.length) return null;
+  const live = rows.filter((r) => ['proposed', 'failed'].includes(r.status));
+  const save = (r, patch) => action('thread-action-update', { id: r.id, patch }).then(() => Object.assign(r, { ...patch.action ? { action: patch.action } : {},
+    ...patch.reply !== undefined ? { reply: patch.reply } : {}, ...patch.issueTitle !== undefined ? { issue_title: patch.issueTitle } : {},
+    ...patch.issueBody !== undefined ? { issue_body: patch.issueBody } : {}, ...patch.include !== undefined ? { include: patch.include } : {} })).catch((e) => toast(e.message, true));
+  const editKey = (r) => `ta${r.id}`;
+  const card = (r) => {
+    const editable = ['proposed', 'failed'].includes(r.status);
+    const sel = h('select', { class: 'small', disabled: editable ? null : true, onchange: (e) => save(r, { action: e.target.value }).then(renderPr) },
+      ...Object.entries(ACTION_LABEL).map(([k, v]) => h('option', { value: k, selected: r.action === k ? true : null }, v)));
+    const text = (val, key, rowsN, ph) => h('textarea', { rows: rowsN, placeholder: ph, value: val || '', disabled: editable ? null : true,
+      onfocus: () => S.editing.add(editKey(r)), onblur: (e) => { S.editing.delete(editKey(r)); if ((e.target.value || '') !== (val || '')) save(r, { [key]: e.target.value }); } });
+    const mine = r.reviewer && r.reviewer === S.state?.login;
+    return h('div', { class: 'card' },
+      h('div', { class: 'cardHead' }, editable ? h('input', { type: 'checkbox', checked: r.include ? true : null, title: 'Apply this one', onchange: (e) => save(r, { include: e.target.checked }).then(renderPr) }) : null,
+        h('span', { class: 'loc' }, `${r.path}:${r.line ?? ''}`), r.reviewer ? chip(mine ? 'your thread' : `${r.reviewer}'s thread`, mine ? '' : 'info') : null,
+        r.verdict ? chip(r.verdict.toLowerCase().replace('_', ' '), { ADDRESSED: 'ok', OBSOLETE: 'ok', NOT_ADDRESSED: 'warn', FOLLOW_UP: 'attn', NEEDS_HUMAN: 'warn' }[r.verdict] || '') : null,
+        chip(r.status, { applied: 'ok', failed: 'bad', skipped: '' }[r.status] || ''), h('span', { class: 'grow' }), r.url ? ext(r.url, 'GitHub ↗') : null),
+      h('div', { class: 'cardBody' },
+        r.evidence ? h('div', { class: 'small muted' }, md(r.evidence)) : null,
+        h('div', { class: 'editRow' }, sel),
+        r.action === 'issue' ? [h('input', { type: 'text', class: 'wide', placeholder: 'Issue title', value: r.issue_title || '', disabled: editable ? null : true,
+          onfocus: () => S.editing.add(editKey(r)), onblur: (e) => { S.editing.delete(editKey(r)); if (e.target.value !== (r.issue_title || '')) save(r, { issueTitle: e.target.value }); } }),
+        text(r.issue_body, 'issueBody', 6, 'Issue body (a link back to the thread is added)')] : null,
+        ['issue', 'nag', 'reply-resolve'].includes(r.action) ? text(r.reply, 'reply', 2, r.action === 'issue' ? 'Thread reply; {issue} becomes the issue reference' : 'Thread reply') : null,
+        r.result?.issueUrl ? h('div', { class: 'small' }, 'Issue: ', ext(r.result.issueUrl, `#${r.result.issue}`)) : null,
+        r.result?.replyUrl ? h('div', { class: 'small' }, ext(r.result.replyUrl, 'Reply ↗')) : null,
+        r.result?.error ? h('div', { class: 'small bad' }, r.result.error) : r.result?.note ? h('div', { class: 'small muted' }, r.result.note) : null));
+  };
+  const ticked = live.filter((r) => r.include && r.action !== 'leave');
+  return h('div', { class: 'panel' }, h('div', { class: 'actions' }, h('h2', { style: 'margin:0' }, 'Thread plan'), h('span', { class: 'grow' }),
+    live.length ? h('button', { class: 'small primary', disabled: ticked.length ? null : true, onclick: () => applyThreadActions(ticked.map((r) => r.id), ticked) }, `Apply ${ticked.length} ticked`) : null),
+  h('p', { class: 'small muted' }, 'One action per open thread. Other reviewers\' threads start unticked: resolving them is their call unless they agreed. Nothing is posted until you apply.'),
+  rows.map(card));
+}
+
+function issueForm(t) {
+  const d = issueDraft(t);
+  const title = h('input', { type: 'text', class: 'wide', value: d.title, onfocus: () => S.editing.add('issue') });
+  const body = h('textarea', { rows: 8, value: d.body, onfocus: () => S.editing.add('issue') });
+  const reply = h('textarea', { rows: 2, value: d.reply, onfocus: () => S.editing.add('issue') });
+  const close = () => { S.issueFor = null; S.editing.delete('issue'); renderPr(); };
+  return h('div', { class: 'card' }, h('div', { class: 'cardHead' }, `Follow-up issue for ${t.path}:${t.line ?? ''}`),
+    h('div', { class: 'cardBody' }, h('label', { class: 'small muted' }, 'Title'), title, h('label', { class: 'small muted' }, 'Body (a link back to the thread is added)'), body,
+      h('label', { class: 'small muted' }, 'Reply in the thread ({issue} becomes the issue reference); the thread is then resolved'), reply,
+      h('div', { class: 'editRow' }, h('button', { class: 'small primary', onclick: async () => {
+        if (!title.value.trim()) return toast('The issue needs a title', true);
+        const { id } = await run(null, () => action('thread-action-add', { repo: S.pr.pr.repo, number: S.pr.pr.number, threadId: t.id, kind: 'issue', issueTitle: title.value, issueBody: body.value, reply: reply.value }));
+        S.issueFor = null; S.editing.delete('issue');
+        await applyThreadActions([id], [{ path: t.path, line: t.line, action: 'issue', issue_title: title.value }]);
+      } }, 'Create issue and resolve'), h('button', { class: 'small ghost', onclick: close }, 'Cancel'))));
+}
+
 function renderThreads() {
-  const a = S.pr.pr.analysis || {};
-  const mine = a.threads || []; const others = (a.openThreads || []).filter((t) => !mine.some((m) => m.id === t.id));
+  const { pr } = S.pr;
+  const a = pr.analysis || {};
+  const mine = a.threads || []; const full = new Map((S.pr.openThreads || []).map((t) => [t.id, t]));
+  const others = (S.pr.openThreads || []).filter((t) => !mine.some((m) => m.id === t.id));
   const reply = (t) => {
     const box = h('textarea', { rows: 3, placeholder: 'Reply (added to the review round; posted when you submit)' });
     return h('div', { class: 'editRow' }, box, h('button', { class: 'small', onclick: async () => {
@@ -809,15 +977,34 @@ function renderThreads() {
       reloadPr();
     } }, 'Add reply'));
   };
+  const quick = (t) => {
+    if (!full.has(t.id)) return null;
+    const one = (kind, label) => h('button', { class: 'small ghost', onclick: async () => {
+      const { id } = await run(null, () => action('thread-action-add', { repo: pr.repo, number: pr.number, threadId: t.id, kind, verdict: 'ADDRESSED' }));
+      await applyThreadActions([id], [{ path: t.path, line: t.line, action: kind }]);
+    } }, label);
+    return h('div', { class: 'actions', style: 'margin-top:6px' }, h('button', { class: 'small', onclick: () => { S.issueFor = t.id; renderPr(); } }, 'Follow-up issue and resolve'), one('resolve', 'Resolve'));
+  };
+  const active = S.pr.jobs.find((j) => j.type === 'threads' && ['queued', 'running', 'waiting'].includes(j.status));
+  const block = S.pr.mergeBlock;
   return h('div', {},
+    block ? h('div', { class: 'panel' }, h('div', { class: 'actions' }, h('strong', {}, `Approved, but ${block.open} open thread(s) block the merge${block.outdated ? ` (${block.outdated} outdated)` : ''}.`), h('span', { class: 'grow' }),
+      active ? chip(`threads ${active.status}`, active.status) : h('button', { class: 'small primary', onclick: () => run('Queued', () => action('settle-threads', { repo: pr.repo, number: pr.number })).then(reloadPr) },
+        S.pr.threadActions?.some((r) => ['proposed', 'failed'].includes(r.status)) ? 'Re-check threads with Claude' : 'Settle threads with Claude')),
+    h('p', { class: 'small muted' }, 'Claude checks each open thread against the code and proposes: resolve (addressed or obsolete), nudge the author, a follow-up issue, or leave it to you.')) : null,
+    renderThreadPlan(),
     h('h3', {}, `Your threads (${mine.length})`),
     mine.length ? mine.map((t) => h('div', { class: 'card' }, h('div', { class: 'cardHead' }, chip(t.state, t.state === 'awaiting-my-reply' ? 'attn' : t.isResolved ? 'ok' : ''), h('span', { class: 'loc' }, `${t.path}:${t.line ?? ''}`),
       t.isOutdated ? chip('outdated') : null, h('span', { class: 'grow' }), t.url ? ext(t.url, 'GitHub ↗') : null),
     h('div', { class: 'cardBody' }, t.myLastComment ? h('div', { class: 'small muted' }, 'You:', md(t.myLastComment.body)) : null,
       t.lastComment && t.lastComment.author !== S.state?.login ? h('div', { class: 'small' }, `${t.lastComment.author}:`, md(t.lastComment.body)) : null,
-      !t.isResolved ? reply(t) : null))) : h('p', { class: 'muted' }, 'None.'),
+      !t.isResolved ? reply(t) : null, !t.isResolved ? quick(t) : null, S.issueFor === t.id && full.has(t.id) ? issueForm(full.get(t.id)) : null))) : h('p', { class: 'muted' }, 'None.'),
     h('h3', {}, `Other open threads (${others.length})`),
-    others.map((t) => h('div', { class: 'small' }, h('span', { class: 'mono' }, `${t.path}:${t.line ?? ''}`), t.isOutdated ? ' (outdated) ' : ' ', t.url ? ext(t.url, 'open') : null)));
+    others.map((t) => h('div', { class: 'card' }, h('div', { class: 'cardHead' }, h('span', { class: 'loc' }, `${t.path}:${t.line ?? ''}`), t.reviewer ? chip(t.reviewer, 'info') : null,
+      t.isOutdated ? chip('outdated') : null, h('span', { class: 'grow' }), t.url ? ext(t.url, 'GitHub ↗') : null),
+    h('div', { class: 'cardBody' }, t.comments[0] ? h('div', { class: 'small' }, `${t.comments[0].author}:`, md(firstLine(t.comments[0].body).slice(0, 400))) : null,
+      t.comments.length > 1 ? h('div', { class: 'small muted' }, `${t.comments.at(-1).author} (latest):`, md(firstLine(t.comments.at(-1).body).slice(0, 300))) : null,
+      quick(t), S.issueFor === t.id ? issueForm(t) : null))));
 }
 
 // --- jobs, activity, settings ---

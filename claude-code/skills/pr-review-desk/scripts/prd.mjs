@@ -11,6 +11,8 @@ import * as triage from './lib/triage.mjs';
 import * as review from './lib/review.mjs';
 import * as jobs from './lib/jobs.mjs';
 import * as autopilot from './lib/autopilot.mjs';
+import * as threads from './lib/threads.mjs';
+import * as merge from './lib/merge.mjs';
 import { addRepo, here, parsePrRef } from './lib/repos.mjs';
 import { scanSummary } from './lib/scan.mjs';
 import { serve, token } from './lib/server.mjs';
@@ -88,9 +90,11 @@ const HELP = `prd — pr-review-desk engine
 Worker commands (inside a job):
   job show <id> | job claim [--wait SEC] | job done <id> --summary "…" | job fail <id> --reason "…"
   job ask <id> --question "…" | job worktree <id> | job list | job log <id> | job cancel <id>
+  job merge-start <id> | job merge-ready <id>   merge jobs: start the base-branch merge; check and pin the merge commit
   gate <job> clear|suspicious|inconclusive --evidence "…"
   review import <job> --findings FILE      draft from pr-review findings.json
   review body <job> --body-file FILE       replace the draft's summary (revise jobs)
+  threads import <job> --file FILE         a threads job's plan: one action per open thread (applied in the web UI)
   comment set <id> --body-file FILE | comment add <job> --path P --line N [--side LEFT] [--start-line N] --body-file FILE
   comment exclude <id> | comment include <id>`;
 
@@ -223,6 +227,18 @@ async function main() {
       if (sub === 'stage' || sub === 'submit') inJobGuard(`review ${sub}`);
       return die('review import|body (staging and submitting are in the web UI)');
     }
+    case 'threads': {
+      const p = opts(rest);
+      if (sub === 'import') {
+        const j = jobs.job(Number(p._[0]));
+        if (j.type !== 'threads') die(`job ${j.id} is a ${j.type} job, not a threads job`);
+        const r = threads.importPlan(j, JSON.parse(fs.readFileSync(p.file, 'utf8')));
+        triage.refreshItem(j.repo, j.number);
+        return out(r);
+      }
+      if (sub === 'apply') inJobGuard('applying thread actions');
+      return die('threads import <job> --file FILE (applying is in the web UI)');
+    }
     case 'comment': {
       const p = opts(rest);
       if (sub === 'set') return out(await review.updateComment(Number(p._[0]), { body: readText(p), by: process.env.PRD_JOB ? `job ${process.env.PRD_JOB}` : 'cli' }));
@@ -241,6 +257,8 @@ async function main() {
       if (sub === 'list') return out(db.all(`SELECT id, repo, number, type, status, claimed_by, created_at FROM jobs ORDER BY id DESC LIMIT 30`));
       if (sub === 'show') return out(await jobs.context(Number(p._[0])));
       if (sub === 'worktree') return out(jobs.worktree(Number(p._[0])));
+      if (sub === 'merge-start') return out(merge.start(Number(p._[0])));
+      if (sub === 'merge-ready') { const r = merge.ready(Number(p._[0])); return out({ mergeSha: r.mergeSha, base: r.base, baseRef: r.baseRef, stat: r.stat }); }
       if (sub === 'log') return out(jobs.readLog(Number(p._[0])).lines.map((l) => `${l.kind}: ${l.text}`).join('\n'));
       if (sub === 'cancel') { jobs.cancel(Number(p._[0])); return out('cancelled'); }
       if (sub === 'claim') {

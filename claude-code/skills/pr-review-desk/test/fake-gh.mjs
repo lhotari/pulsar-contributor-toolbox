@@ -17,9 +17,10 @@ const q = vars.query || '';
 const pr = (n) => st.prs[n];
 const core = (p) => ({ id: `PR_${p.number}`, number: p.number, title: p.title, url: `https://github.com/o/r/pull/${p.number}`, state: 'OPEN', isDraft: false, merged: false,
   createdAt: '2026-11-01T00:00:00Z', updatedAt: p.updatedAt, additions: 3, deletions: 0, changedFiles: 1, headRefOid: p.head, baseRefName: 'main',
-  authorAssociation: p.association, reviewDecision: null, author: { login: p.author }, labels: { nodes: [] },
+  authorAssociation: p.association, reviewDecision: p.reviewDecision || null, mergeable: p.mergeable || 'MERGEABLE', author: { login: p.author }, labels: { nodes: [] },
   commits: { nodes: [{ commit: { oid: p.head, statusCheckRollup: { state: 'SUCCESS' } } }] }, reviews: { nodes: [] }, latestOpinionatedReviews: { nodes: [] },
-  reviewThreads: { nodes: [] }, comments: { nodes: (p.comments || []).map((c) => ({ author: { login: c.author }, createdAt: c.at, url: c.url || 'u', body: c.body || '' })) }, body: 'body' });
+  reviewThreads: { nodes: (p.threads || []).map((t) => ({ isOutdated: false, line: 2, diffSide: 'RIGHT', resolvedBy: null, ...t, isResolved: (st.resolved || []).includes(t.id) || !!t.isResolved,
+    comments: { nodes: t.comments.map((c) => ({ databaseId: c.id, author: { login: c.author }, createdAt: c.at || '2026-11-10T00:00:00Z', url: c.url || `${t.id}-${c.id}`, body: c.body })) } })) }, comments: { nodes: (p.comments || []).map((c) => ({ author: { login: c.author }, createdAt: c.at, url: c.url || 'u', body: c.body || '' })) }, body: 'body' });
 let nextId = () => (st.seq = (st.seq || 1000) + 1);
 
 if (args[0] === 'auth') ok('logged in');
@@ -68,13 +69,20 @@ if (args[0] === 'api') {
     ok({ id: 500, node_id: 'R500', state: st.review.state, html_url: 'https://github.com/o/r/pull/1#pullrequestreview-500' });
   }
   if (/pulls\/\d+\/reviews\?/.test(path)) ok([st.review ? [{ id: 500, node_id: 'R500', state: st.review.state, user: { login: 'me' } }] : []]);
+  let mm;
+  if ((mm = /pulls\/(\d+)\/comments\/(\d+)\/replies$/.exec(path)) && method === 'POST') {
+    const id = nextId(); st.replies = [...(st.replies || []), { pr: Number(mm[1]), to: Number(mm[2]), body: body.body }]; ok({ id, html_url: `reply-${id}` });
+  }
+  if (/^repos\/o\/r\/issues$/.test(path) && method === 'POST') {
+    const number = 900 + (st.issues || []).length + 1; st.issues = [...(st.issues || []), { number, ...body }]; ok({ number, html_url: `https://github.com/o/r/issues/${number}` });
+  }
   if (/issues\/\d+\/comments$/.test(path) && method === 'POST') { st.issueComments = [...(st.issueComments || []), body.body]; ok({ id: 77, html_url: 'u77' }); }
   // Actions and branch state, per PR: p.runs [{id,name,status,conclusion,created_at,head_sha}], p.commitDate, p.behind, p.fork.
   const byHead = (sha) => Object.values(st.prs).find((p) => p.head === sha);
   let m;
   if ((m = /pulls\/(\d+)$/.exec(path)) && method === 'GET') {
     const p = pr(Number(m[1]));
-    ok({ number: p.number, head: { sha: p.head, repo: { full_name: p.fork ? 'f/r' : 'o/r' } }, base: { ref: 'main', repo: { full_name: 'o/r' } }, maintainer_can_modify: !!p.canModify });
+    ok({ number: p.number, state: 'open', head: { sha: p.head, ref: 'feature', repo: { full_name: p.fork ? 'f/r' : 'o/r' } }, base: { ref: 'main', repo: { full_name: 'o/r' } }, maintainer_can_modify: !!p.canModify });
   }
   if ((m = /pulls\/(\d+)\/update-branch$/.exec(path)) && method === 'PUT') {
     const p = pr(Number(m[1]));

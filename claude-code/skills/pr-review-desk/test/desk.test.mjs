@@ -200,3 +200,105 @@ test('approving: held workflow runs, and "Update branch" when the PR has been qu
   assert.ok(!ci.updatedByMe('o/r', 1, 'a'.repeat(40), 'f'.repeat(40)));
   await assert.rejects(ci.updateBranch('o/r', 1, 'a'.repeat(40)), /expected_head_sha/);
 });
+
+const threads = await import('../scripts/lib/threads.mjs');
+const merge = await import('../scripts/lib/merge.mjs');
+const server = await import('../scripts/lib/server.mjs');
+const setGh = (fn) => { const g = gh(); fn(g); fs.writeFileSync(STATE, JSON.stringify(g)); };
+
+test('approved PR with open threads: plan → resolve, follow-up issue, nudge; a thread that moved on is refused', async () => {
+  setGh((g) => {
+    g.prs[5] = { number: 5, title: '[fix][broker] Approved but blocked', author: 'author5', association: 'CONTRIBUTOR', head: '5'.repeat(40), updatedAt: '2026-11-20T00:00:00Z',
+      diff: diff1, reviewDecision: 'APPROVED', threads: [
+        { id: 'T1', path: 'a.txt', isOutdated: true, comments: [{ id: 11, author: 'me', body: 'rename this' }, { id: 12, author: 'author5', body: 'done' }] },
+        { id: 'T2', path: 'a.txt', comments: [{ id: 21, author: 'other', body: 'Consider caching the lookup' }], url: 'T2-url' },
+        { id: 'T3', path: 'a.txt', comments: [{ id: 31, author: 'me', body: 'missing null check' }] },
+      ] };
+  });
+  await triage.track('o/r', 5);
+  assert.deepEqual(threads.mergeBlock(db.pr('o/r', 5)), { open: 3, outdated: 1 });
+  const id = jobs.enqueue('o/r', 5, 'threads', {});
+  const ctx = await jobs.context(id);
+  assert.equal(ctx.openThreads.length, 3); assert.match(ctx.threadPlanOut, /threads\.json$/);
+  assert.match(jobs.workerPrompt(jobs.job(id)), /threads import/);
+  assert.throws(() => threads.importPlan(jobs.job(id), { threads: [{ threadId: 'NOPE', action: 'resolve' }] }), /not open threads/);
+  assert.throws(() => threads.importPlan(jobs.job(id), { threads: [{ threadId: 'T2', action: 'issue' }] }), /needs issue.title/);
+  threads.importPlan(jobs.job(id), { head: '5'.repeat(40), threads: [
+    { threadId: 'T1', verdict: 'ADDRESSED', action: 'resolve', evidence: 'renamed in 5555555' },
+    { threadId: 'T2', verdict: 'FOLLOW_UP', action: 'issue', reply: 'Good idea; tracked in {issue}.', issue: { title: '[improve][broker] Cache the lookup', body: 'The lookup runs per message.' } },
+    { threadId: 'T3', verdict: 'NOT_ADDRESSED', action: 'nag', reply: 'Could you add the null check before merging?' },
+  ] });
+  jobs.finish(id, 'done', { summary: 'plan written' });
+  const acts = threads.actions('o/r', 5);
+  assert.deepEqual(acts.map((a) => [a.thread_id, a.include]), [['T1', true], ['T2', false], ['T3', true]]);   // the other reviewer's thread starts unticked
+  // Lints apply as for a review.
+  threads.updateAction(acts[2].id, { reply: 'This fixes CVE-2026-1234.' });
+  await assert.rejects(threads.apply('o/r', 5), (e) => e.code === 'LINT');
+  threads.updateAction(acts[2].id, { reply: 'Could you add the null check before merging?' });
+  threads.updateAction(acts[1].id, { include: true });
+  // The author answers in T3 after the assessment: that one is refused, the others apply.
+  setGh((g) => { g.prs[5].threads[2].comments.push({ id: 32, author: 'author5', body: 'will do' }); g.prs[5].updatedAt = new Date().toISOString(); });
+  const r = await threads.apply('o/r', 5);
+  const by = Object.fromEntries(r.results.map((x) => [x.action, x]));
+  assert.equal(by.resolve.status, 'applied'); assert.equal(by.issue.status, 'applied'); assert.equal(by.issue.issue, 901);
+  assert.equal(by.nag.status, 'failed'); assert.match(by.nag.error, /new comment/);
+  const g = gh();
+  assert.deepEqual(g.resolved.filter((x) => /^T/.test(x)), ['T1', 'T2']);
+  assert.equal(g.issues[0].title, '[improve][broker] Cache the lookup'); assert.match(g.issues[0].body, /Follow-up from T2-21 in #5\./);
+  assert.deepEqual(g.replies.map((x) => [x.to, x.body]), [[21, 'Good idea; tracked in #901.']]);
+  assert.deepEqual(threads.mergeBlock(db.pr('o/r', 5)), { open: 1, outdated: 0 });
+  // By hand: follow-up issue and resolve on the remaining thread, with the default reply.
+  const manual = threads.addAction('o/r', 5, { threadId: 'T3', action: 'issue', issue: { title: 'Null check', body: '' } });
+  const r2 = await threads.apply('o/r', 5, { ids: [manual] });
+  assert.equal(r2.results[0].status, 'applied');
+  assert.match(gh().replies.at(-1).body, /tracked as a follow-up in #902/);
+  assert.equal(threads.mergeBlock(db.pr('o/r', 5)), null);
+});
+
+test('batch CI approval: pending runs on scanned heads only', async () => {
+  setGh((g) => {
+    g.prs[7] = { number: 7, title: '[fix][client] Needs CI', author: 'stranger', association: 'NONE', head: '7'.repeat(40), updatedAt: '2026-11-20T00:00:00Z', diff: diff1,
+      runs: [{ id: 970, name: 'CI', status: 'completed', conclusion: 'action_required', created_at: '2026-11-20T00:00:00Z', head_sha: '7'.repeat(40) }] };
+    g.prs[2].runs = [{ id: 920, name: 'CI', status: 'completed', conclusion: 'action_required', created_at: '2026-11-20T00:00:00Z', head_sha: 'b'.repeat(40) }];
+  });
+  await triage.track('o/r', 7);
+  const rows = await server.ciCheck('o/r', [7, 2]);
+  assert.deepEqual(rows.map((r) => [r.number, r.pending, r.blocked]), [[7, ['CI'], null], [2, ['CI'], 'security gate "flagged"']]);
+  assert.equal(db.item('o/r', 7).scan_sha, '7'.repeat(40));   // scanned on the way
+  const before = (gh().approved || []).length;
+  for (const r of rows.filter((x) => !x.blocked)) await ci.approveRuns('o/r', r.head);
+  assert.deepEqual(gh().approved.slice(before), [970]);
+});
+
+test('merge conflicts: merge the base branch, the worker resolves, the engine checks, the human pushes', async () => {
+  const sh = (cwd, ...a) => { const r = spawnSync('git', ['-C', cwd, ...a], { encoding: 'utf8' }); if (r.status !== 0) throw new Error(`git ${a.join(' ')}: ${r.stderr}`); return r.stdout.trim(); };
+  const up = path.join(TMP, 'up.git'); const co = path.join(TMP, 'co');
+  spawnSync('git', ['init', '--bare', '-q', up]); spawnSync('git', ['init', '-q', co]);
+  sh(co, 'config', 'user.email', 't@example.com'); sh(co, 'config', 'user.name', 'T'); sh(co, 'remote', 'add', 'origin', up);
+  sh(co, 'checkout', '-q', '-b', 'main');
+  fs.writeFileSync(path.join(co, 'a.txt'), 'one\n'); sh(co, 'add', '.'); sh(co, 'commit', '-qm', 'base'); sh(co, 'push', '-q', 'origin', 'main');
+  sh(co, 'checkout', '-q', '-b', 'pr'); fs.writeFileSync(path.join(co, 'a.txt'), 'one from the PR\n'); sh(co, 'commit', '-qam', 'pr change');
+  const head = sh(co, 'rev-parse', 'HEAD'); sh(co, 'push', '-q', 'origin', `pr:refs/pull/6/head`, 'pr:refs/heads/feature');
+  sh(co, 'checkout', '-q', 'main'); fs.writeFileSync(path.join(co, 'a.txt'), 'one from main\n'); sh(co, 'commit', '-qam', 'main change'); sh(co, 'push', '-q', 'origin', 'main');
+  const base = sh(co, 'rev-parse', 'HEAD');
+  db.run(`UPDATE repos SET checkout = ?, remote = 'origin' WHERE slug = 'o/r'`, co);
+  setGh((g) => { g.prs[6] = { number: 6, title: '[fix][broker] Conflicting', author: 'committer1', association: 'MEMBER', head, updatedAt: '2026-11-20T00:00:00Z', diff: diff1, mergeable: 'CONFLICTING' }; });
+  await triage.track('o/r', 6); await triage.scan('o/r', 6);
+  assert.equal(db.pr('o/r', 6).analysis.mergeable, 'CONFLICTING');
+  const id = jobs.enqueue('o/r', 6, 'merge', {});
+  assert.throws(() => merge.start(id), /security gate is not "clear"/);
+  db.run(`UPDATE items SET gate = 'clear', gate_sha = ? WHERE repo = 'o/r' AND number = 6`, head);
+  const s = merge.start(id);
+  assert.deepEqual(s.conflicts, ['a.txt']); assert.equal(s.base, base);
+  const wt = jobs.job(id).worktree;
+  assert.throws(() => merge.ready(id), /still in progress/);
+  fs.writeFileSync(path.join(wt, 'a.txt'), 'one from the PR and main\n'); sh(wt, 'add', 'a.txt'); sh(wt, 'commit', '-q', '--no-edit');
+  const m = merge.ready(id);
+  assert.equal(sh(wt, 'rev-list', '--parents', '-n', '1', 'HEAD').split(' ').length, 3);
+  jobs.finish(id, 'done', { summary: 'kept both lines' });
+  assert.equal(jobs.job(id).result.merge.mergeSha, m.mergeSha);   // the worker's report does not drop the checked commit
+  const r = await merge.push(id, { urlFor: () => up });
+  assert.equal(r.pushed, m.mergeSha);
+  assert.equal(spawnSync('git', ['--git-dir', up, 'rev-parse', 'refs/heads/feature'], { encoding: 'utf8' }).stdout.trim(), m.mergeSha);
+  await assert.rejects(merge.push(id, { urlFor: () => up }), /already pushed/);
+});

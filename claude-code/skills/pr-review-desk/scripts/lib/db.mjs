@@ -137,6 +137,27 @@ CREATE TABLE IF NOT EXISTS jobs (
   claimed_by TEXT, pid INTEGER, claude_session TEXT, log_path TEXT,
   created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT
 );
+-- Settling the open threads of an approved PR: one proposed action per thread, applied on the human's click.
+CREATE TABLE IF NOT EXISTS thread_actions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo TEXT NOT NULL, number INTEGER NOT NULL,
+  job_id INTEGER,                         -- the settle-threads job that proposed it; NULL when added by hand
+  head_sha TEXT,                          -- the head the assessment read
+  thread_id TEXT NOT NULL,                -- GraphQL thread id
+  path TEXT, line INTEGER, url TEXT,
+  reviewer TEXT,                          -- who opened the thread
+  last_comment_id TEXT,                   -- precondition: the thread must not have moved on since
+  verdict TEXT,                           -- ADDRESSED | OBSOLETE | NOT_ADDRESSED | FOLLOW_UP | NEEDS_HUMAN
+  action TEXT NOT NULL,                   -- resolve | reply-resolve | nag | issue | leave
+  reply TEXT,                             -- posted in the thread (nag, reply-resolve, issue)
+  issue_title TEXT, issue_body TEXT,
+  evidence TEXT,
+  include INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'proposed', -- proposed | applied | failed | superseded | skipped
+  result TEXT NOT NULL DEFAULT '{}',      -- reply url, issue url, error
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS thread_actions_pr ON thread_actions (repo, number, status);
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   at TEXT NOT NULL,

@@ -15,6 +15,9 @@ import * as review from './review.mjs';
 import * as jobs from './jobs.mjs';
 import * as autopilot from './autopilot.mjs';
 import * as ci from './ci.mjs';
+import * as threads from './threads.mjs';
+import * as merge from './merge.mjs';
+import * as P from './prt.mjs';
 import { scanSummary } from './scan.mjs';
 import { followUpReasons, draftStaleness } from './triage.mjs';
 
@@ -43,7 +46,7 @@ function state() {
 function items(repo, lane) {
   const where = [repo ? 'i.repo = ?' : '1=1', lane ? 'i.lane = ?' : `i.lane != 'done'`];
   const rows = db.all(`SELECT i.*, p.title, p.url, p.author, p.association, p.draft, p.head_sha, p.additions, p.deletions, p.changed_files, p.labels, p.ci,
-      p.updated_at, p.created_at pr_created_at, p.state, p.analysis
+      p.updated_at, p.created_at pr_created_at, p.state, p.analysis, p.review_decision
     FROM items i JOIN prs p ON p.repo = i.repo AND p.number = i.number WHERE ${where.join(' AND ')} ORDER BY i.score DESC LIMIT 400`,
   ...[repo, lane].filter(Boolean));
   return rows.map((x) => {
@@ -58,7 +61,9 @@ function items(repo, lane) {
       hold: x.hold, hold_until: x.hold_until, note: x.note,
       myLast: a.myLastReview ? { state: a.myLastReview.state, at: a.myLastReview.submittedAt, oid: a.myLastReview.oid } : null, headMoved: !!a.headMoved,
       followUp: followUpReasons(a, x.author, { draft: rv?.status === 'draft' ? rv : null, pr: { head_sha: x.head_sha, analysis: a } }),
-      threads: a.threadCounts || {},
+      threads: a.threadCounts || {}, reviewDecision: x.review_decision || null, mergeable: a.mergeable || null,
+      mergeBlock: threads.mergeBlock({ review_decision: x.review_decision, analysis: a }),
+      threadPlan: db.get(`SELECT COUNT(*) n FROM thread_actions WHERE repo = ? AND number = ? AND status IN ('proposed','failed')`, x.repo, x.number).n,
       review: rv ? { id: rv.id, status: rv.status, kind: rv.kind, stale: draftStaleness(rv, { head_sha: x.head_sha, analysis: a }).length > 0, comments: cs.filter((c) => c.include && c.state !== 'removed').length,
         staged: cs.filter((c) => c.state === 'staged').length, recommended: rv.recommended_event } : null,
       job: job ? { id: job.id, type: job.type, status: job.status } : null };
@@ -78,7 +83,33 @@ function prView(repo, number) {
       .map((j) => ({ ...j, args: db.J(j.args, {}), result: db.J(j.result) })),
     events: db.all('SELECT * FROM events WHERE repo = ? AND number = ? ORDER BY id DESC LIMIT 60', repo, number),
     execAllowed: jobs.execAllowed(repo, number, pr.head_sha),
+    openThreads: threads.openThreads(repo, number), mergeBlock: threads.mergeBlock(pr),
+    threadActions: db.all('SELECT id FROM thread_actions WHERE repo = ? AND number = ? ORDER BY id DESC LIMIT 60', repo, number).length
+      ? threads.actions(repo, number, { all: true }).filter((r) => r.status !== 'superseded').slice(-60) : [],
   };
+}
+
+/**
+ * Workflow runs waiting for approval on each PR's current head, and whether the desk may approve them: only for
+ * a head the security scan read and did not flag (approving runs executes the PR's code in CI).
+ */
+export async function ciCheck(repo, numbers) {
+  const core = await P.fetchPrsBatch(repo, numbers, { detail: false });
+  const out = [];
+  for (const n of numbers) {
+    const c = core.get(n); const row = { number: n, title: c?.title || db.pr(repo, n)?.title || '', pending: [], blocked: null };
+    out.push(row);
+    if (!c || c.state !== 'OPEN') { row.blocked = 'not open'; continue; }
+    if (db.pr(repo, n)?.head_sha !== c.headRefOid) await triage.track(repo, n);
+    let it = db.item(repo, n);
+    if (it.scan_sha !== c.headRefOid) it = await triage.scan(repo, n).catch((e) => { row.blocked = `scan failed: ${e.message.split('\n')[0]}`; return db.item(repo, n); });
+    row.head = c.headRefOid;
+    if (!row.blocked && it.scan_sha !== c.headRefOid) row.blocked = 'the current head is not scanned';
+    if (!row.blocked && it.gate_sha === c.headRefOid && ['flagged', 'suspicious', 'inconclusive'].includes(it.gate)) row.blocked = `security gate "${it.gate}"`;
+    const runs = await ci.runsFor(repo, c.headRefOid).catch((e) => { row.error = e.message.split('\n')[0]; return []; });
+    row.pending = runs.filter((r) => r.pending).map((r) => r.name || String(r.id));
+  }
+  return out;
 }
 
 const ACTIONS = {
@@ -152,6 +183,42 @@ const ACTIONS = {
   'comment-update': async (a) => review.updateComment(Number(a.id), a.patch || {}),
   'comment-remove': async (a) => { await review.removeComment(Number(a.id)); return {}; },
   'comment-note': (a) => { db.run(`UPDATE comments SET meta = json_set(meta, '$.note', ?) WHERE id = ?`, a.note || null, Number(a.id)); return {}; },
+  'resolve-conflicts': (a) => {
+    const n = Number(a.number); const it = db.item(a.repo, n); const pr = db.pr(a.repo, n);
+    if (['flagged', 'suspicious'].includes(it.gate) && it.gate_sha === pr.head_sha) throw new Error(`the security gate is "${it.gate}": no checkout for this head`);
+    if (!db.repo(a.repo).checkout) throw new Error(`no local checkout configured for ${a.repo} (Rules & repos)`);
+    return { job: jobs.enqueue(a.repo, n, 'merge', { instructions: a.instructions || null }) };
+  },
+  'merge-push': async (a) => merge.push(Number(a.job)),
+  'update-branch': async (a) => {
+    const n = Number(a.number); const it = db.item(a.repo, n); const pr = db.pr(a.repo, n);
+    if (['flagged', 'suspicious'].includes(it.gate) && it.gate_sha === pr.head_sha) throw new Error(`the security gate is "${it.gate}"`);
+    await ci.updateBranch(a.repo, n, pr.head_sha);
+    db.event(a.repo, n, `#${n}: requested "Update branch" (merge ${pr.base_ref})`);
+    ci.followUp(a.repo, n, pr.head_sha, { onDone: () => triage.track(a.repo, n).catch(() => {}) }).catch(() => {});
+    return { requested: true };
+  },
+  'settle-threads': (a) => {
+    const n = Number(a.number); const it = db.item(a.repo, n);
+    if (!threads.openThreads(a.repo, n).length) throw new Error(`#${n} has no open threads`);
+    return { job: jobs.enqueue(a.repo, n, 'threads', { instructions: a.instructions || null, static: it.gate !== 'clear' }) };
+  },
+  'thread-action-add': (a) => ({ id: threads.addAction(a.repo, Number(a.number), { threadId: a.threadId, action: a.kind || 'issue', verdict: a.verdict || 'FOLLOW_UP',
+    reply: a.reply || null, issue: a.issueTitle ? { title: a.issueTitle, body: a.issueBody || '' } : null, evidence: a.evidence || 'added by hand' }) }),
+  'thread-action-update': (a) => { threads.updateAction(Number(a.id), a.patch || {}); return {}; },
+  'threads-apply': async (a) => threads.apply(a.repo, Number(a.number), { ids: a.ids ? a.ids.map(Number) : null, ack: a.ack || [] }),
+  'ci-check': async (a) => ({ prs: await ciCheck(a.repo, (a.numbers || []).map(Number).slice(0, 50)) }),
+  'ci-approve': async (a) => {
+    const rows = await ciCheck(a.repo, (a.numbers || []).map(Number).slice(0, 50));
+    for (const r of rows) {
+      if (r.blocked || !r.pending.length) continue;
+      const ap = await ci.approveRuns(a.repo, r.head).catch((e) => ({ approved: [], errors: [e.message] }));
+      r.approved = ap.approved; r.errors = ap.errors;
+      if (ap.approved.length) db.event(a.repo, r.number, `#${r.number}: approved ${ap.approved.length} workflow run(s) on ${r.head.slice(0, 7)}: ${ap.approved.join(', ')}`);
+      if (ap.errors.length) db.event(a.repo, r.number, `#${r.number}: approving workflow runs failed: ${ap.errors.join('; ')}`, { level: 'warn' });
+    }
+    return { prs: rows };
+  },
   'cancel-job': (a) => { jobs.cancel(Number(a.job)); return {}; },
   'reply-job': (a) => { jobs.reply(Number(a.job), a.text); return {}; },
   budget: () => jobs.budget({ fresh: true }),
@@ -210,7 +277,7 @@ export function serve({ port = null, open = false } = {}) {
         const a = await readBody(req); const fn = ACTIONS[a.action];
         if (!fn) return send(400, { error: `unknown action ${a.action}` });
         const key = a.review ? `r${a.review}` : a.id ? `c${a.id}` : a.number ? `${a.repo}#${a.number}` : null;
-        const writes = ['stage', 'submit', 'sync-staged', 'discard', 'comment-update', 'comment-remove'].includes(a.action);
+        const writes = ['stage', 'submit', 'sync-staged', 'discard', 'comment-update', 'comment-remove', 'threads-apply', 'ci-approve', 'merge-push', 'update-branch'].includes(a.action);
         if (writes && key) {
           if (locks.get(key)) return send(409, { error: 'another GitHub action on this review is still running' });
           locks.set(key, true);
@@ -218,7 +285,7 @@ export function serve({ port = null, open = false } = {}) {
         try { const r = await fn(a); dispatch(); return send(200, r ?? {}); } finally { if (writes && key) locks.delete(key); }
       }
       send(404, { error: 'no such endpoint' });
-    } catch (e) { send(e.code === 'STALE' ? 409 : 400, { error: e.message, code: e.code || null }); }
+    } catch (e) { send(e.code === 'STALE' ? 409 : 400, { error: e.message, code: e.code || null, lint: e.lint || null }); }
   };
   function dispatch() {
     try { jobs.reapOrphans(running); jobs.dispatch(running); } catch (e) { console.error(`dispatch: ${e.message}`); }

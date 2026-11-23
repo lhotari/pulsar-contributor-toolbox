@@ -156,7 +156,7 @@ function scoreItem(repo, cfg, pr, raw, me, engagedReasons) {
 }
 
 function upsertPr(repo, raw, me) {
-  const analysis = { ...P.analyzePr(raw, me), authorActivity: authorActivity(raw) };
+  const analysis = { ...P.analyzePr(raw, me), authorActivity: authorActivity(raw), mergeable: raw.mergeable || null };
   // A merge from the base that I made with "Update branch" when approving is not new work from the author.
   if (analysis.headMoved && updatedByMe(repo, raw.number, analysis.myLastReview?.oid, raw.headRefOid)) { analysis.headMoved = false; analysis.headUpdatedByMe = true; }
   const labels = (raw.labels?.nodes || []).map((l) => l.name);

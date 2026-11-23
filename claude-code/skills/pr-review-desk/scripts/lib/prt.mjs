@@ -7,7 +7,7 @@ export const { gh, ghJson, graphql, rest, restAll, restRaw, viewerLogin, resolve
 export const {
   fetchPrsBatch, searchEngagedPrs, recentOpenPrs, prDiff, compareDiff, comparePr, myReviews, myThreads,
   startPendingReview, addReviewThread, addThreadReply, reviewComments, submitPendingReview, deletePendingReview,
-  pendingReviews, resolveThread, repoTree, describeApiError,
+  pendingReviews, resolveThread, replyToComment, repoTree, describeApiError,
 } = await import(`${PRT}/github.mjs`);
 export const { parseDiff, commentableAnchors, validateAnchor } = await import(`${PRT}/diff.mjs`);
 export const { blobUrl, pathIndex, linkifyCode, auditPermalinks, isSha } = await import(`${PRT}/links.mjs`);

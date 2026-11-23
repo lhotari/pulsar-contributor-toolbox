@@ -217,3 +217,5 @@ pre.effective { max-height: 520px; margin: 3px 0 0; }
 .toast.link { cursor: pointer; text-decoration: underline; }
 #submitChip::before { content: ''; display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; vertical-align: -1px; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+input.wide { width: 100%; box-sizing: border-box; margin: 4px 0; }
+.small.bad { color: var(--bad); }

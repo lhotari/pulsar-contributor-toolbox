@@ -10,7 +10,7 @@ export const QUIET_DAYS = 7;
 const isPending = (r) => r.status === 'action_required' || r.conclusion === 'action_required';
 const runAt = (r) => r.run_started_at || r.created_at;
 
-async function runsFor(repo, sha) {
+export async function runsFor(repo, sha) {
   const r = await P.rest('GET', `repos/${repo}/actions/runs?head_sha=${sha}&per_page=100`);
   return (r?.workflow_runs || []).map((x) => ({ id: x.id, name: x.name, event: x.event, status: x.status, conclusion: x.conclusion,
     at: runAt(x), url: x.html_url, pending: isPending(x) }));
