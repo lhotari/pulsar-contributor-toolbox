@@ -22,8 +22,14 @@ const HELP = `bpt — apache/pulsar backport sessions (state: ${db.DB_PATH})
   doctor
   serve [--port 8765] [--open]                      web UI + job runner + autopilot (port and addresses: servers.yaml, see lib/listen.mjs)
   url [--open]                                      the running server's links (one per bound address, with the token)
-  session create <id> --branches branch-4.2:4.2.6,branch-4.0:4.0.15<branch-4.2 (--since-pr N | --since-sha S) [--title T] [--repo DIR] [--remote NAME]
-  session list | show <id> | start-backport <id> | config <id> key=value...
+  session create <id> --branches branch-4.2:4.2.6,branch-4.0:4.0.15<branch-4.2 (--since-pr N | --since-sha S) [--title T] [--repo DIR] [--remote NAME] [--scope both|range|labelled]
+  session create <id> --after <previous-session> [--branches ...] [--title T] [--scope both|range|labelled]
+                                                    continue after the last master commit the previous session evaluated
+                                                    (scope: both = PRs after it and PRs labelled release/<version>; range; labelled only)
+  session next <previous-session>                   what --after would use: since-commit, branches (released versions bumped), title
+  session list [--all] | show <id> | start-backport <id> | config <id> key=value...   (list hides archived sessions unless --all)
+  session archive <id> [--reason T] | unarchive <id>   archived: read-only and hidden from the list
+  session delete <id>                               delete a session that never started backporting (others: archive)
   plan discover <id> [--no-blame]                   refresh PRs, branch presence, labels, dry runs, dependency hints
   plan triage-export <id> [--all] [--size 25]       batches + BRIEF.md for evaluator subagents (prints JSON)
   plan import <id> <verdicts.json>...
@@ -155,7 +161,7 @@ function runEngineJob(id) {
  */
 function sessionChangedBy(cmd, sub, pos, opt) {
   const readOnly = {
-    session: ['list', 'create', 'show', 'reopen'], plan: ['show', 'report', 'comments', ...(opt.apply ? [] : ['labels'])],
+    session: ['list', 'create', 'show', 'reopen', 'next', 'archive', 'unarchive', 'delete'], plan: ['show', 'report', 'comments', ...(opt.apply ? [] : ['labels'])],
     lane: ['show'], pick: ['diff'], report: true, decisions: pos[0] === undefined, job: true,
   }[cmd];
   if (readOnly === true || (Array.isArray(readOnly) && readOnly.includes(sub))) return null;
@@ -195,13 +201,22 @@ async function main() {
       return serve({ port: opt.port ? Number(opt.port) : null, open: !!opt.open });
     }
     case 'session': {
-      if (sub === 'list') return out(db.all('SELECT id, title, status, updated_at FROM sessions ORDER BY updated_at DESC'));
+      if (sub === 'list') {
+        return out(db.all('SELECT id, title, status, config, updated_at FROM sessions ORDER BY updated_at DESC')
+          .map(({ config, ...x }) => ({ ...x, archived: db.J(config, {}).archived?.at || null })).filter((x) => opt.all || !x.archived));
+      }
       if (sub === 'create') {
         const s = plan.createSession({ id: need(pos[0], 'session id'), title: opt.title, repo: opt.repo || plan.DEFAULT_REPO,
-          branches: plan.parseBranches(need(opt.branches, '--branches')), sincePr: opt['since-pr'] && Number(opt['since-pr']), sinceSha: opt['since-sha'], remote: opt.remote || null });
-        return out({ id: s.id, sinceSha: s.config.sinceSha, lanes: s.config.branches });
+          branches: opt.branches ? plan.parseBranches(opt.branches) : opt.after ? null : need(opt.branches, '--branches'),
+          sincePr: opt['since-pr'] && Number(opt['since-pr']), sinceSha: opt['since-sha'], remote: opt.remote || null,
+          scope: opt.scope || 'both', after: opt.after || null });
+        return out({ id: s.id, sinceSha: s.config.sinceSha, scope: s.config.scope, after: s.config.after, lanes: s.config.branches });
       }
       const sid = need(pos[0], 'session id');
+      if (sub === 'next') return out(plan.nextSession(sid));
+      if (sub === 'archive') return out(plan.archiveSession(sid, true, typeof opt.reason === 'string' ? opt.reason : null) ? 'archived' : 'already archived');
+      if (sub === 'unarchive') return out(plan.archiveSession(sid, false) ? 'unarchived' : 'not archived');
+      if (sub === 'delete') { plan.deleteSession(sid); return out('deleted'); }
       if (sub === 'show') return out({ ...db.session(sid), lanes: db.all('SELECT branch, release, phase, attention, test_pr_url FROM lanes WHERE session_id = ? ORDER BY seq', sid) });
       if (sub === 'reopen') { plan.reopenSession(sid, need(opt.reason, '--reason')); return out('ok'); }
       if (sub === 'start-backport') { db.run(`UPDATE sessions SET status = 'backporting', updated_at = ? WHERE id = ?`, db.now(), sid); db.event(sid, 'Backporting started'); return out('ok'); }

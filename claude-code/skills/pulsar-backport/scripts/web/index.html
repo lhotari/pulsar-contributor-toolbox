@@ -10,6 +10,7 @@
 <header class="top">
   <div class="brand">Pulsar backports</div>
   <select id="sessionPick" aria-label="Session"></select>
+  <label class="muted small"><input type="checkbox" id="showArchived"> archived</label>
   <button id="newSession" class="ghost">New session</button>
   <span class="grow"></span>
   <span id="conn" class="muted"></span>
@@ -19,11 +20,18 @@
   <form method="dialog" id="newForm">
     <h2>New backport session</h2>
     <label>Session id <input name="id" required pattern="[a-z0-9][a-z0-9._-]{2,60}" placeholder="2026-11-backports"></label>
+    <label>Continue after session <select name="after" id="newAfter"><option value="">— none: give the starting point —</option></select></label>
+    <p class="muted small" id="newAfterNote">Starts after the last master commit the chosen session evaluated, with its branches (a release that is already tagged moves to the next patch version).</p>
     <label>Title <input name="title" placeholder="Backports for 4.2.6 and 4.0.15"></label>
     <label>PRs merged after PR # <input name="sincePr" type="number" placeholder="21767"></label>
     <label>or after commit <input name="sinceSha" placeholder="sha (optional)"></label>
     <label>Branches <input name="branches" required value="branch-4.2:4.2.6,branch-4.0:4.0.15<branch-4.2"></label>
     <p class="muted small">Format: <code>branch:release</code>, comma separated. <code>&lt;branch-4.2</code> makes a lane reuse that lane's tested cherry-picks.</p>
+    <label>Evaluate <select name="scope">
+      <option value="both" selected>PRs merged after the starting point and PRs labelled release/&lt;version&gt;</option>
+      <option value="range">only PRs merged after the starting point</option>
+      <option value="labelled">only PRs labelled release/&lt;version&gt;</option>
+    </select></label>
     <menu><button value="cancel" class="ghost">Cancel</button><button value="ok" class="primary">Create and discover</button></menu>
   </form>
 </dialog>

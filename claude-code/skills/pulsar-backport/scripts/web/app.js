@@ -65,16 +65,42 @@ async function act(action, branch, args, confirmText) {
 // ---------- sessions ----------
 async function loadSessions() {
   S.sessions = await api('sessions');
-  const sel = $('#sessionPick'); sel.replaceChildren(...S.sessions.map((s) => h('option', { value: s.id, selected: s.id === S.sid }, `${s.title} (${s.id})`)));
-  if (!S.sessions.find((s) => s.id === S.sid)) S.sid = S.sessions[0]?.id || null;
+  // Archived sessions are hidden unless "archived" is checked (the open one stays listed).
+  const shown = S.sessions.filter((s) => $('#showArchived').checked || !s.archived || s.id === S.sid);
+  const sel = $('#sessionPick'); sel.replaceChildren(...shown.map((s) => h('option', { value: s.id, selected: s.id === S.sid }, `${s.title} (${s.id})${s.archived ? ' — archived' : ''}`)));
+  if (!shown.find((s) => s.id === S.sid)) S.sid = shown.find((s) => !s.archived)?.id || shown[0]?.id || null;
   sel.value = S.sid || '';
   $('#empty').hidden = !!S.sid; $('#session').hidden = !S.sid;
 }
 $('#sessionPick').onchange = (e) => { S.sid = e.target.value; S.plan = null; try { localStorage.setItem('bpt-session', S.sid); } catch {} refresh(true); };
-$('#newSession').onclick = () => $('#newDialog').showModal();
+$('#showArchived').onchange = async () => { await loadSessions(); refresh(true); };
+$('#newSession').onclick = () => {
+  const sel = $('#newAfter');
+  sel.replaceChildren(h('option', { value: '' }, '— none: give the starting point —'),
+    ...S.sessions.filter((s) => !s.archived || s.id === S.sid).map((s) => h('option', { value: s.id }, `${s.title} (${s.id})`)));
+  const els = $('#newForm').elements; els.sincePr.disabled = els.sinceSha.disabled = false;
+  $('#newAfterNote').textContent = 'Starts after the last master commit the chosen session evaluated, with its branches (a release that is already tagged moves to the next patch version).';
+  $('#newDialog').showModal();
+};
+$('#newAfter').onchange = async (e) => {
+  const f = $('#newForm').elements; const prev = e.target.value;
+  f.sincePr.disabled = f.sinceSha.disabled = !!prev;
+  if (!prev) return;
+  try {
+    const n = await api(`sessions/${encodeURIComponent(prev)}/next`);
+    f.branches.value = n.branches; f.title.value = n.title; f.sincePr.value = ''; f.sinceSha.value = n.sinceSha;
+    if (!f.id.value) {
+      const base = `${new Date().toISOString().slice(0, 7)}-${n.branches.split(',').map((x) => x.split(/[:<]/)[1]).filter(Boolean).join('-')}`;
+      let id = base; for (let i = 2; S.sessions.some((x) => x.id === id); i++) id = `${base}-${i}`;
+      f.id.value = id;
+    }
+    $('#newAfterNote').textContent = `Starts after ${short(n.sinceSha)} ${n.sinceTitle}. ${Object.entries(n.released).map(([b, r]) => `${b}: ${r ? 'released, next patch version' : 'not released yet, same version'}`).join('; ')}.`;
+  } catch (err) { toast(err.message, true); }
+};
 $('#newForm').addEventListener('submit', async (e) => {
   if (e.submitter?.value !== 'ok') return;
   const f = Object.fromEntries(new FormData(e.target));
+  if (f.after) { delete f.sincePr; f.sinceSha = e.target.elements.sinceSha.value; }
   try { const r = await api('sessions', f); S.sid = r.id; try { localStorage.setItem('bpt-session', r.id); } catch {} await loadSessions(); await refresh(true); toast('Session created; discovery queued'); }
   catch (err) { toast(err.message, true); }
 });
@@ -217,13 +243,21 @@ function renderSession() {
     s.comments?.pending || s.comments?.posted ? h('div', {}, `PR comments: ${s.comments.pending} queued (posted when every branch is done), ${s.comments.posted} posted`) : '');
   $('#autopilot').checked = !!s.config.autopilot; $('#runner').value = s.config.runner || 'headless'; $('#autoPushTest').checked = s.config.autoPushTest !== false;
   // A finished session is read-only: no actions, only its reports (the Report tab: download, VS Code, gist).
-  const finished = s.status === 'finished';
-  document.body.classList.toggle('finished', finished);
-  for (const id of ['#autopilot', '#runner', '#autoPushTest']) $(id).disabled = finished;
+  const finished = s.status === 'finished'; const archived = !!s.config.archived;
+  document.body.classList.toggle('finished', finished || archived);
+  for (const id of ['#autopilot', '#runner', '#autoPushTest']) $(id).disabled = finished || archived;
+  const lifecycle = sessionLifecycleButtons(s);
+  if (archived) {
+    $('#sessionActions').replaceChildren(h('div', { class: 'finishedNote' }, chip('archived', ''),
+      ` Archived ${when(s.config.archived.at)}${s.config.archived.reason ? ` (${s.config.archived.reason})` : ''}: read-only and hidden from the session list. The reports stay available (Report tab). `), ...lifecycle);
+    $('#lanes').replaceChildren(...s.lanes.map((l) => laneCard(l, s)));
+    renderTabs();
+    return;
+  }
   if (finished) {
     $('#sessionActions').replaceChildren(h('div', { class: 'finishedNote' }, chip('finished', 'done'),
       ' Read-only: every lane is done and the queued PR comments are posted. The reports stay available (Report tab). To correct something: ',
-      h('code', {}, `bpt session reopen ${S.sid} --reason "…"`)));
+      h('code', {}, `bpt session reopen ${S.sid} --reason "…"`)), ...lifecycle);
     $('#lanes').replaceChildren(...s.lanes.map((l) => laneCard(l, s)));
     renderTabs();
     return;
@@ -248,9 +282,26 @@ function renderSession() {
     const reason = prompt(`Abort backporting and start again after revisiting the decisions?\n\nResets ${resettable.map((l) => l.branch).join(', ')}: cancels their jobs, deletes the lane worktrees and picks, and deletes their test branches. Lanes already pushed to the real branch are kept. The plan and its decisions stay.\n\nReason:`, 'revisiting the backport decisions');
     if (reason !== null) act('abort-backport', null, { reason });
   }, 'ghost danger');
-  $('#sessionActions').replaceChildren(...A);
+  $('#sessionActions').replaceChildren(...A, ...lifecycle);
   $('#lanes').replaceChildren(...s.lanes.map((l) => laneCard(l, s)));
   renderTabs();
+}
+/** Archive / unarchive, and delete for a session that never started backporting. */
+function sessionLifecycleButtons(s) {
+  const out = [];
+  const post = async (what, args, msg) => {
+    try { await api(`sessions/${S.sid}/${what}`, args); toast(msg); if (what === 'delete') S.sid = null; await loadSessions(); await refresh(true); } catch (e) { toast(e.message, true); }
+  };
+  if (s.config.archived) out.push(h('button', { class: 'ghost', onclick: () => post('archive', { archived: false }, 'Unarchived') }, 'Unarchive'));
+  else {
+    out.push(h('button', { class: 'ghost', title: s.activeJobs?.length ? 'Cancel or wait for the active jobs first' : 'Read-only and hidden from the session list; can be unarchived',
+      onclick: () => { const reason = prompt(`Archive session ${S.sid}? It becomes read-only and is hidden from the session list (autopilot off). Reason (optional):`, ''); if (reason !== null) post('archive', { reason: reason || null }, 'Archived'); } }, 'Archive…'));
+  }
+  if (!s.deleteBlockers?.length) {
+    out.push(h('button', { class: 'ghost danger', title: 'Never started backporting: delete it with its plan and job logs',
+      onclick: () => { if (confirm(`Delete "${s.title}" (${S.sid}) permanently?\n\nIt never started backporting. Its plan, decisions, triage files and job logs are removed; nothing on GitHub changes.`)) post('delete', { confirm: S.sid }, `Deleted ${S.sid}`); } }, 'Delete…'));
+  }
+  return out;
 }
 async function setConfig(patch) { try { await api(`sessions/${S.sid}/config`, patch); toast('Saved'); refresh(true); } catch (e) { toast(e.message, true); } }
 $('#autopilot').onchange = (e) => setConfig({ autopilot: e.target.checked });

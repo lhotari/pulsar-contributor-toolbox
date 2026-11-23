@@ -21,10 +21,28 @@ export function parseBranches(spec) {
   });
 }
 
-export function createSession({ id, title, repo = DEFAULT_REPO, branches, sincePr, sinceSha, source = 'master', remote: remoteName = null }) {
+/**
+ * scope: which master PRs the plan evaluates —
+ *   'both' (default): every PR merged after the since-commit, and PRs labelled for the session's releases merged before it;
+ *   'range': only the PRs merged after the since-commit;
+ *   'labelled': only PRs labelled for the session's releases (release/<version>), wherever they are on master.
+ * after: a previous session; the new one starts after the last master commit that session evaluated.
+ */
+export const SCOPES = ['both', 'range', 'labelled'];
+export function createSession({ id, title, repo = DEFAULT_REPO, branches, sincePr, sinceSha, source = 'master', remote: remoteName = null, scope = 'both', after = null }) {
   if (!/^[a-z0-9][a-z0-9._-]{2,60}$/.test(id)) throw new Error('session id: lowercase letters, digits, . _ -');
   if (db.get('SELECT 1 FROM sessions WHERE id = ?', id)) throw new Error(`session ${id} exists`);
-  const cfg = { repo, remote: remoteName, source, branches, sincePr: sincePr || null, sinceSha: sinceSha || null, round: 0,
+  if (!SCOPES.includes(scope)) throw new Error(`scope must be one of ${SCOPES.join(', ')}`);
+  if (after) {
+    const n = nextSession(after);
+    if (!sinceSha && !sincePr) sinceSha = n.sinceSha;
+    if (!branches) branches = parseBranches(n.branches);
+    if (!title) title = n.title;
+    const pc = db.session(after).config;
+    repo = pc.repo || repo; remoteName = remoteName || pc.remote || null; source = pc.source || source;
+  }
+  if (!branches?.length) throw new Error('need --branches (or --after a previous session)');
+  const cfg = { repo, remote: remoteName, source, branches, sincePr: sincePr || null, sinceSha: sinceSha || null, round: 0, scope, after: after || null,
     runner: 'headless', autopilot: false, autoPushTest: true, maxClaudeWorkers: 1, maxReruns: 3,
     permissionMode: 'auto', model: null, testBranchPattern: '{branch}-backports-{id}' };
   const r = remote(cfg);
@@ -44,8 +62,88 @@ export function createSession({ id, title, repo = DEFAULT_REPO, branches, sinceP
         id, b.branch, b.release, b.seq, b.reuseFrom, ts);
     }
   });
-  db.event(id, `Session created: ${branches.map((b) => b.branch).join(', ')}, PRs merged after ${g.short(cfg.sinceSha)}`);
+  db.event(id, `Session created: ${branches.map((b) => b.branch).join(', ')}, ${scope === 'labelled' ? 'PRs labelled for the releases' : `PRs merged after ${g.short(cfg.sinceSha)}${scope === 'both' ? ' and PRs labelled for the releases' : ''}`}${after ? ` (continues ${after})` : ''}`);
   return db.session(id);
+}
+
+const bump = (v) => { const m = String(v || '').match(/^(\d+)\.(\d+)\.(\d+)$/); return m ? `${m[1]}.${m[2]}.${Number(m[3]) + 1}` : v; };
+
+/**
+ * What a session that continues `prev` starts from: the last master commit `prev` evaluated (master's head at its last
+ * discover, else its latest PR), its branches, and each release bumped to the next patch once its tag exists (a
+ * release that is not out yet stays: the new session adds to it). Returns {after, sinceSha, sinceTitle, branches, title, released}.
+ */
+export function nextSession(prev) {
+  const s = db.session(prev); const cfg = s.config; const repo = cfg.repo; const r = remote(cfg);
+  const resolve = (x) => x && g.git(repo, ['rev-parse', '--verify', '-q', `${x}^{commit}`], { allowFail: true });
+  let sha = null;
+  for (const x of [cfg.masterHeadSha, cfg.masterHead]) { const t = resolve(x); if (t?.ok) { sha = t.out; break; } }
+  if (!sha) sha = db.get('SELECT sha FROM items WHERE session_id = ? ORDER BY master_order DESC LIMIT 1', prev)?.sha || null;
+  if (!sha) throw new Error(`session ${prev} has evaluated no master commits yet (run discover first)`);
+  const lanes = db.all('SELECT branch, release, reuse_from FROM lanes WHERE session_id = ? ORDER BY seq', prev);
+  const released = {};
+  for (const l of lanes) {
+    if (!l.release) continue;
+    const tag = `v${l.release}`;
+    let ok = g.git(repo, ['rev-parse', '--verify', '-q', `refs/tags/${tag}`], { allowFail: true }).ok;
+    if (!ok) ok = !!g.git(repo, ['ls-remote', '--tags', r, `refs/tags/${tag}`], { allowFail: true }).out;
+    released[l.branch] = ok;
+  }
+  const next = lanes.map((l) => ({ ...l, release: l.release && released[l.branch] ? bump(l.release) : l.release }));
+  const branches = next.map((l) => `${l.branch}${l.release ? `:${l.release}` : ''}${l.reuse_from ? `<${l.reuse_from}` : ''}`).join(',');
+  const rel = next.map((l) => l.release).filter(Boolean);
+  return { after: prev, sinceSha: sha, sinceTitle: g.git(repo, ['log', '-1', '--format=%s', sha]), branches, released,
+    title: rel.length ? `Backports for ${rel.join(' and ')}` : `Backports after ${prev}` };
+}
+
+// --- archive and delete ---
+
+/** Archived sessions are hidden from the session list and read-only until unarchived. Nothing may be running. */
+export function archiveSession(sid, archived = true, reason = null) {
+  const s = db.session(sid);
+  if (archived) {
+    if (s.config.archived) return false;
+    const active = db.get(`SELECT COUNT(*) AS n FROM jobs WHERE session_id = ? AND status IN ('queued','running','waiting')`, sid).n;
+    if (active) throw new Error(`session ${sid} has ${active} active job(s); cancel them or wait before archiving`);
+    saveConfig(sid, { archived: { at: db.now(), reason: reason || null }, autopilot: false });
+    db.event(sid, `Session archived${reason ? `: ${reason}` : ''}. It is read-only and hidden from the session list`, { level: 'warn' });
+  } else {
+    if (!s.config.archived) return false;
+    saveConfig(sid, { archived: null });
+    db.event(sid, 'Session unarchived');
+  }
+  return true;
+}
+
+/** Why a session cannot be deleted ([] when it can): only a session that never started backporting. */
+export function deleteBlockers(sid) {
+  const s = db.session(sid); const why = [];
+  if (s.status !== 'planning') why.push(`it is ${s.status}`);
+  const started = db.all(`SELECT branch, phase FROM lanes WHERE session_id = ? AND (phase != 'not-started' OR worktree IS NOT NULL OR test_branch IS NOT NULL OR final_sha IS NOT NULL)`, sid);
+  if (started.length) why.push(`lanes started: ${started.map((l) => `${l.branch} (${l.phase})`).join(', ')}`);
+  if (db.get('SELECT 1 FROM picks WHERE session_id = ? LIMIT 1', sid)) why.push('it has cherry-picks');
+  if (db.get('SELECT 1 FROM ci_runs WHERE session_id = ? LIMIT 1', sid)) why.push('it has CI runs');
+  const active = db.get(`SELECT COUNT(*) AS n FROM jobs WHERE session_id = ? AND status IN ('queued','running','waiting')`, sid).n;
+  if (active) why.push(`${active} job(s) active`);
+  const posted = db.all(`SELECT pr FROM items WHERE session_id = ? AND json_extract(comment_state, '$.status') = 'posted'`, sid);
+  if (posted.length) why.push(`PR comments were posted: ${posted.map((x) => `#${x.pr}`).join(', ')}`);
+  return why;
+}
+
+/** Delete a session that never started backporting: its rows, job logs and session directory. Archive the others. */
+export function deleteSession(sid) {
+  db.session(sid);
+  const why = deleteBlockers(sid);
+  if (why.length) throw new Error(`session ${sid} cannot be deleted (${why.join('; ')}); archive it instead`);
+  const logs = db.all('SELECT log_path FROM jobs WHERE session_id = ? AND log_path IS NOT NULL', sid).map((j) => j.log_path);
+  db.tx(() => {
+    for (const t of ['ci_runs', 'analysis', 'events', 'jobs', 'picks', 'deps', 'targets', 'items', 'lanes']) db.run(`DELETE FROM ${t} WHERE session_id = ?`, sid);
+    db.run('DELETE FROM sessions WHERE id = ?', sid);
+  });
+  const dir = sessionDir(sid);
+  for (const f of logs) { try { if (!path.resolve(f).startsWith(path.resolve(dir) + path.sep)) fs.rmSync(f, { force: true }); } catch {} }
+  fs.rmSync(dir, { recursive: true, force: true });
+  return true;
 }
 
 export function saveConfig(sid, patch) {
@@ -83,27 +181,33 @@ export function discover(sid, { log = console.log, blame = true } = {}) {
   log(`fetching ${r}: ${cfg.source} ${branches.join(' ')}`);
   g.fetch(repo, r, [cfg.source, ...branches]);
   const masterRef = `${r}/${cfg.source}`;
-  const commits = g.firstParentCommits(repo, cfg.sinceSha, masterRef).filter((c) => c.pr);
+  const scope = cfg.scope || 'both';
+  const allCommits = g.firstParentCommits(repo, cfg.sinceSha, masterRef).filter((c) => c.pr);
+  const position = new Map(allCommits.map((c, i) => [c.pr, i]));
   const onBranch = Object.fromEntries(branches.map((b) => [b, g.pickedOnBranch(repo, `${r}/${b}`, masterRef)]));
   const known = new Map(db.all('SELECT pr, round FROM items WHERE session_id = ?', sid).map((x) => [x.pr, x.round]));
   const round = (cfg.round || 0) + 1;
-  log(`${commits.length} PRs on ${cfg.source} after ${g.short(cfg.sinceSha)}; fetching labels and descriptions`);
-  const meta = gh.prMeta(commits.map((c) => c.pr));
+  log(`${allCommits.length} PRs on ${cfg.source} after ${g.short(cfg.sinceSha)}; fetching labels and descriptions`);
+  const meta = gh.prMeta(allCommits.map((c) => c.pr));
+  const releaseLabels = sessionReleaseLabels(sid);
+  // 'labelled': only the PRs labelled for the session's releases (and the ones already in the plan stay).
+  const commits = scope !== 'labelled' ? allCommits : allCommits.filter((c) => known.has(c.pr)
+    || releaseLabels.some((x) => (meta.get(c.pr)?.labels || []).includes(x)));
   const bodies = path.join(sessionDir(sid), 'prbody');
   fs.mkdirSync(bodies, { recursive: true });
   const heads = Object.fromEntries(branches.map((b) => [b, g.rev(repo, `${r}/${b}`)]));
-  const order = new Map(commits.map((c, i) => [c.pr, i]));
+  const order = position;
   log('matching branch-specific commits (patch-id, references, titles, upgrades, labels)');
   const equivs = Object.fromEntries(branches.map((b) => [b, findEquivalents(cfg, `${r}/${b}`, masterRef, commits, meta, onBranch[b], b)]));
-  const shaToPr = new Map(commits.map((c) => [c.sha, c.pr]));
-  const releaseLabels = sessionReleaseLabels(sid);
+  const shaToPr = new Map(allCommits.map((c) => [c.sha, c.pr]));
   let added = 0; let dry = 0;
   const newlyPicked = [];
   for (const [i, c] of commits.entries()) {
     const m = meta.get(c.pr) || { labels: [], body: '' };
+    const at = position.get(c.pr);
     if (m.body) fs.writeFileSync(path.join(bodies, `${c.pr}.md`), m.body);
     const isNew = !known.has(c.pr);
-    const cls = upsertCommit(sid, { repo, branches, onBranch, equivs, heads, newlyPicked, releaseLabels }, c, i, m, isNew ? round : known.get(c.pr));
+    const cls = upsertCommit(sid, { repo, branches, onBranch, equivs, heads, newlyPicked, releaseLabels }, c, at, m, isNew ? round : known.get(c.pr));
     if (isNew) added++;
     dry += cls.dry;
     if (blame && !cls.excluded && branches.some((b) => !(onBranch[b].prs.has(c.pr) || onBranch[b].shas.has(c.sha)))) {
@@ -115,11 +219,12 @@ export function discover(sid, { log = console.log, blame = true } = {}) {
     }
     if (i % 50 === 49) log(`  ${i + 1}/${commits.length}`);
   }
-  const labelled = pullInLabelled(sid, new Set(commits.map((c) => c.pr)), { log });
+  const labelled = scope === 'range' ? { added: [], missing: [], failed: [] } : pullInLabelled(sid, new Set(allCommits.map((c) => c.pr)), { log });
   const pulled = pullInDependencies(sid, { log, refresh: true });
-  saveConfig(sid, { round, lastDiscover: db.now(), masterHead: g.short(g.rev(repo, masterRef)),
+  const headSha = g.rev(repo, masterRef);
+  saveConfig(sid, { round, lastDiscover: db.now(), masterHead: g.short(headSha), masterHeadSha: headSha,
     heads: Object.fromEntries(branches.map((b) => [b, g.short(heads[b])])) });
-  const summary = { round, total: commits.length, added, dryRuns: dry, newlyPicked, pulledIn: pulled.added, depsNotOnMaster: pulled.missing,
+  const summary = { round, scope, total: commits.length, onMaster: allCommits.length, added, dryRuns: dry, newlyPicked, pulledIn: pulled.added, depsNotOnMaster: pulled.missing,
     labelledPulledIn: labelled.added, labelledNotOnMaster: labelled.missing, labelSearchFailed: labelled.failed };
   db.event(sid, `Discover round ${round}: ${commits.length} PRs, ${added} new, ${newlyPicked.length} newly on a branch`
     + `${labelled.added.length ? `, ${labelled.added.length} release-labelled PR(s) from before the range` : ''}`, { data: summary });

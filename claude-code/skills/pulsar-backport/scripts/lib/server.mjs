@@ -65,7 +65,7 @@ function sessionSummary(sid) {
     posted: db.get(`SELECT COUNT(*) n FROM items WHERE session_id = ? AND json_extract(comment_state, '$.status') = 'posted'`, sid).n };
   let needed = [];
   try { needed = control.list(sid); } catch (e) { needed = [{ key: 'error', kind: 'error', title: 'Could not compute the open decisions', text: e.message, options: [] }]; }
-  return { ...s, lanes, decisions, verdicts, openDeps, activeJobs, review, comments, needed };
+  return { ...s, lanes, decisions, verdicts, openDeps, activeJobs, review, comments, needed, deleteBlockers: plan.deleteBlockers(sid) };
 }
 
 /** Actions that do not change a session: allowed on a finished one (reports, their files and gists). */
@@ -156,10 +156,14 @@ export function serve({ port = null, open = false } = {}) {
     try {
       const m = req.method;
       if (parts[0] === 'sessions' && parts.length === 1) {
-        if (m === 'GET') return send(200, db.all('SELECT id, title, status, updated_at, created_at FROM sessions ORDER BY updated_at DESC'));
+        if (m === 'GET') {
+          return send(200, db.all('SELECT id, title, status, config, updated_at, created_at FROM sessions ORDER BY updated_at DESC')
+            .map(({ config, ...x }) => ({ ...x, archived: db.J(config, {}).archived?.at || null })));
+        }
         if (m === 'POST') {
           const a = await body(req);
-          const s = plan.createSession({ id: a.id, title: a.title, repo: a.repo || plan.DEFAULT_REPO, branches: plan.parseBranches(a.branches),
+          const s = plan.createSession({ id: a.id, title: a.title || null, repo: a.repo || plan.DEFAULT_REPO,
+            branches: a.branches ? plan.parseBranches(a.branches) : null, after: a.after || null, scope: a.scope || 'both',
             sincePr: a.sincePr ? Number(a.sincePr) : null, sinceSha: a.sinceSha || null });
           if (a.discover !== false) jobs.enqueue(s.id, null, 'discover');
           return send(200, { id: s.id });
@@ -167,7 +171,11 @@ export function serve({ port = null, open = false } = {}) {
       }
       if (parts[0] === 'sessions' && parts[1]) {
         const sid = parts[1]; const what = parts[2];
-        // A finished session is read-only; its report actions (below) still work.
+        // Archive, unarchive and delete work on finished and archived sessions (delete only if it never started).
+        if (what === 'next' && m === 'GET') return send(200, plan.nextSession(sid));
+        if (what === 'archive' && m === 'POST') { const a = await body(req); return send(200, { changed: plan.archiveSession(sid, a.archived !== false, a.reason || null) }); }
+        if (what === 'delete' && m === 'POST') { const a = await body(req); if (a.confirm !== sid) throw new Error('type the session id to confirm'); plan.deleteSession(sid); return send(200, { deleted: sid }); }
+        // A finished or archived session is read-only; its report actions (below) still work.
         if (m === 'POST' && what !== 'action') db.assertEditable(sid);
         if (!what && m === 'GET') return send(200, sessionSummary(sid));
         if (what === 'plan' && m === 'GET') return send(200, plan.planView(sid));

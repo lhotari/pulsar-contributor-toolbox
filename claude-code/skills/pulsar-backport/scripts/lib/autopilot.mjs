@@ -19,6 +19,7 @@ function attemptsFor(sid, branch, type, key) {
 export function advance(sid, { force = false } = {}) {
   const s = db.session(sid); const cfg = s.config;
   if (s.status === 'finished') return [{ note: 'the session is finished (read-only)' }];
+  if (cfg.archived) return [{ note: 'the session is archived (read-only)' }];
   if (s.status !== 'backporting') return [{ note: 'the session is still planning; start backporting first' }];
   const steps = [];
   const lanes = db.all('SELECT * FROM lanes WHERE session_id = ? ORDER BY seq', sid).map((l) => ({ ...l, ci: db.J(l.ci, {}) }));

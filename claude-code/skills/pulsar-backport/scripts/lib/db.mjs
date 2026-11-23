@@ -222,7 +222,8 @@ export function session(id) {
  * writes, job queue, autopilot) that calls this. Reading it, its reports and gists of them stay possible.
  */
 export function assertEditable(id) {
-  const s = get('SELECT status FROM sessions WHERE id = ?', id);
+  const s = get('SELECT status, config FROM sessions WHERE id = ?', id);
+  if (s && J(s.config, {}).archived) throw new Error(`session ${id} is archived and read-only; unarchive it first: bpt session unarchive ${id}`);
   if (s?.status === 'finished') throw new Error(`session ${id} is finished and read-only; reopen it only to correct it: bpt session reopen ${id} --reason T`);
 }
 

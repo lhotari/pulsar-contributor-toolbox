@@ -41,6 +41,18 @@ node "$BPT" session create <id> --since-pr 21767 \
 node "$BPT" plan discover <id>
 ```
 
+- **Continue after a previous session** (the usual way to start the next round):
+
+  ```bash
+  node "$BPT" session next <previous-id>        # what it would use: since-commit, branches, title
+  node "$BPT" session create <id> --after <previous-id> [--scope both|range|labelled] [--branches ...] [--title T]
+  ```
+
+  The new session starts after the last master commit the previous one evaluated (master's head at its last discover). It takes over the previous session's branches, repo and remote. A release whose tag already exists (`v4.2.6`) moves to the next patch version; one that is not out yet stays, and the new session adds to it. In the UI, choose the session under "Continue after session" in the New session dialog.
+- **Scope** (`--scope`, the dialog's "Evaluate"; `session config <id> scope=...` changes it later):
+  - `both` (default): the PRs merged after the starting point, plus the PRs labelled `release/<version>` merged before it.
+  - `range`: only the PRs after the starting point.
+  - `labelled`: only the PRs labelled for the session's releases, wherever they are on master.
 - `branch:release` per target; `<branch-4.2` makes the 4.0 lane reuse the tested 4.2 cherry-picks. Order matters: lanes run in the listed order.
 - **Already on a branch via a branch-specific PR** (e.g. `[improve][meta][branch-4.2] Upgrade Oxia Java client to 0.10.4 (#27227)` for master #27226) is detected and shown as "on branch (equivalent)": identical patch-id, the branch commit or its PR description referencing the master PR or commit, the same normalized title, a newer upgrade of the same dependency on the branch, or a `cherry-picked/<branch>` label on the master PR. The user can reject a match ("Not the same", or `plan equiv <id> <pr> <branch>`); later discovers keep that.
 - `discover` lists first-parent master commits after the since-commit, marks what is already on each branch (PR number in the subject or `cherry picked from` trailer), fetches labels and PR descriptions, applies the **pre-filter**, dry-runs each in-scope PR on each branch with `git merge-tree`, and records **blame dependency hints**: in-range master commits that last changed the lines a PR modifies, missing from the branch.
@@ -71,6 +83,12 @@ node "$BPT" plan discover <id>
 ## Comments for skipped PRs
 
 A PR that is skipped but still worth having on the branches (e.g. its fix depends on a PR that won't be backported) can get a **queued comment**: the row's details in the UI ("Insert \"needs a separate backport\"" fills in the skipped branches), or `plan comment <id> <pr> --separate-backport` / `--text T` / `--clear`. Queued comments are posted from the user's gh account automatically once every lane is done (all branches pushed and green), each at most once; `plan comments <id>` lists them. Only queue comments the user asked for.
+
+## Archive or delete a session
+
+- `session archive <id> [--reason T]` hides a session from the list (`session list --all` and the UI's "archived" checkbox show it again). It also makes the session read-only and turns autopilot off. It is refused while jobs are active. `session unarchive <id>` undoes it. Reports, downloads and gists still work.
+- `session delete <id>` removes a session that never started backporting, with its plan, decisions, triage files and job logs. Nothing on GitHub changes. A session that is backporting or finished, or that has picks, CI runs, active jobs or posted PR comments, can only be archived. The UI offers Delete… only when it is allowed, and asks for confirmation.
+- Archive or delete only when the user asks.
 
 ## Report
 

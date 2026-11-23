@@ -638,3 +638,49 @@ test('PRs labelled for the release join the plan; changes already on the branch 
     fs.rmSync(path.join(tmp, 'graphql.json'), { force: true }); fs.rmSync(path.join(tmp, 'labelled'), { recursive: true, force: true });
   }
 });
+
+test('a session continues after the previous one: range, labelled only, or both; archive and delete', () => {
+  const prev = 'labelled-session';
+  sh(repo, 'checkout', '-q', '--detach', 'origin/master');
+  const f = (n) => path.join(repo, 'mod/src/main/java', n);
+  fs.writeFileSync(f('Next.java'), lines(30, 'next')); commit('[fix][broker] After the previous session (#130)');
+  edit2(repo, 'Next.java', 15, 'labelled'); commit('[fix][broker] Labelled after the previous session (#131)');
+  sh(repo, 'push', '-q', 'origin', 'HEAD:refs/heads/master');
+  // v4.2.6 is not tagged: the next session adds to 4.2.6. Tagged, it moves to 4.2.7.
+  const n = plan.nextSession(prev);
+  assert.equal(n.sinceSha, db.session(prev).config.masterHeadSha);
+  assert.match(n.sinceTitle, /#122/);
+  assert.equal(n.branches, 'branch-4.2:4.2.6,branch-4.0:4.0.15<branch-4.2');
+  sh(repo, 'tag', 'v4.2.6', 'origin/branch-4.2');
+  assert.equal(plan.nextSession(prev).branches, 'branch-4.2:4.2.7,branch-4.0:4.0.15<branch-4.2');
+  assert.equal(plan.nextSession(prev).title, 'Backports for 4.2.7 and 4.0.15');
+  sh(repo, 'tag', '-d', 'v4.2.6');
+  fs.mkdirSync(path.join(tmp, 'labelled'), { recursive: true });
+  fs.writeFileSync(path.join(tmp, 'labelled', 'release_4.2.6.json'), JSON.stringify([118, 131].map((x) => ({ number: x, title: `#${x}`, baseRefName: 'master' }))));
+  const meta = (x) => [`p${x}`, { number: x, body: '', mergedAt: null, author: null, labels: { nodes: [{ name: 'release/4.2.6' }] } }];
+  fs.writeFileSync(path.join(tmp, 'graphql.json'), JSON.stringify({ data: { repository: Object.fromEntries([meta(118), meta(131)]) } }));
+  try {
+    const prs = (sid) => plan.planView(sid).items.map((i) => i.pr).sort((a, b) => a - b);
+    for (const [sid, scope, want] of [['next-range', 'range', [130, 131]], ['next-labelled', 'labelled', [118, 131]], ['next-both', 'both', [118, 130, 131]]]) {
+      const s = plan.createSession({ id: sid, after: prev, scope });
+      assert.equal(s.config.after, prev); assert.equal(s.config.sinceSha, n.sinceSha); assert.equal(s.config.scope, scope);
+      plan.discover(sid, { log: () => {}, blame: false });
+      assert.deepEqual(prs(sid), want, scope);
+    }
+  } finally {
+    fs.rmSync(path.join(tmp, 'graphql.json'), { force: true }); fs.rmSync(path.join(tmp, 'labelled'), { recursive: true, force: true });
+  }
+  // Archive: read-only (jobs and edits refused) until unarchived.
+  assert.equal(plan.archiveSession('next-range', true, 'superseded'), true);
+  assert.equal(db.session('next-range').config.autopilot, false);
+  assert.throws(() => jobs.enqueue('next-range', null, 'discover'), /archived and read-only/);
+  assert.equal(plan.archiveSession('next-range', false), true);
+  db.assertEditable('next-range');
+  // Delete: only a session that never started backporting.
+  assert.deepEqual(plan.deleteBlockers('next-both'), []);
+  plan.deleteSession('next-both');
+  assert.equal(db.get('SELECT 1 x FROM sessions WHERE id = ?', 'next-both'), undefined);
+  assert.equal(db.get('SELECT COUNT(*) n FROM items WHERE session_id = ?', 'next-both').n, 0);
+  assert.ok(!fs.existsSync(plan.sessionDir('next-both')));
+  assert.throws(() => plan.deleteSession(SID), /cannot be deleted .*archive it instead/);
+});
