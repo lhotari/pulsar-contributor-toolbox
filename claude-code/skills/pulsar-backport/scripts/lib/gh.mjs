@@ -31,6 +31,13 @@ export function prMeta(prs, repo = REPO) {
   return out;
 }
 
+/** Merged PRs into `base` that carry a label: [{number, title}]. Null when gh fails (a failed search is not "none"). */
+export function mergedPrsWithLabel(label, { base = 'master', limit = 1000 } = {}, repo = REPO) {
+  const list = gh(['pr', 'list', '-R', repo, '--state', 'merged', '--base', base, '--label', label,
+    '--json', 'number,title,baseRefName', '--limit', String(limit)], { json: true, allowFail: true });
+  return Array.isArray(list) ? list.filter((p) => !p.baseRefName || p.baseRefName === base).map((p) => ({ number: p.number, title: p.title })) : null;
+}
+
 export function editLabels(pr, { add = [], remove = [] }, repo = REPO) {
   const args = ['pr', 'edit', String(pr), '-R', repo];
   for (const l of add) args.push('--add-label', l);

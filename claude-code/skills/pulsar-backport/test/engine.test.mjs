@@ -14,8 +14,11 @@ const ghLog = path.join(tmp, 'gh.log');
 fs.writeFileSync(path.join(bin, 'gh'), `#!/bin/sh
 echo "$@" >> ${ghLog}
 case "$1 $2" in
-  "api graphql") echo '{"data":{"repository":{}}}' ;;
-  "pr list") echo '[]' ;;
+  "api graphql") if [ -f ${tmp}/graphql.json ]; then cat ${tmp}/graphql.json; else echo '{"data":{"repository":{}}}'; fi ;;
+  "pr list")
+    L=""; prev=""; for a in "$@"; do [ "$prev" = "--label" ] && L="$a"; prev="$a"; done
+    f="${tmp}/labelled/$(echo "$L" | tr / _).json"
+    if [ -n "$L" ] && [ -f "$f" ]; then cat "$f"; else echo '[]'; fi ;;
   "pr create") cat >/dev/null; echo 'https://github.com/apache/pulsar/pull/9001' ;;
   "pr checks") echo '[{"name":"unit","bucket":"pass","link":"l","workflow":"Pulsar CI"}]' ;;
   "run list") echo '[{"databaseId":1,"name":"Pulsar CI","status":"completed","conclusion":"success","url":"u","event":"workflow_dispatch"},{"databaseId":2,"name":"Pulsar CI Flaky","status":"completed","conclusion":"success","url":"u2","event":"workflow_dispatch"},{"databaseId":3,"name":"CI - Go Functions","status":"completed","conclusion":"skipped","url":"u3","event":"workflow_dispatch"},{"databaseId":4,"name":"CI - Python Functions","status":"completed","conclusion":"success","url":"u4","event":"workflow_dispatch"}]' ;;
@@ -102,7 +105,10 @@ test('verdict import (legacy keys) and accept recommendations', () => {
   const t = (pr, b = 'branch-4.2') => db.get('SELECT decision, decision_source, recommendation FROM targets WHERE session_id = ? AND pr = ? AND branch = ?', SID, pr, b);
   assert.deepEqual({ ...t(101) }, { decision: 'backport', decision_source: 'recommended', recommendation: 'backport' });
   assert.equal(t(102).decision, 'skip');
-  assert.deepEqual(plan.labelPlan(SID).add.map((x) => x.pr).sort(), [101, 101, 103, 103]);
+  assert.deepEqual(plan.labelPlan(SID).add.filter((x) => x.kind === 'decision').map((x) => x.pr).sort(), [101, 101, 103, 103]);
+  // Branch-specific PRs found by title or patch-id: the master PR gets the missing cherry-picked label (no release
+  // label: there is no previous release tag); a newer upgrade of the dependency (#107) is a different change.
+  assert.deepEqual(plan.labelPlan(SID).add.filter((x) => x.kind === 'on-branch').map((x) => `${x.pr} ${x.label}`).sort(), ['106 cherry-picked/branch-4.2', '108 cherry-picked/branch-4.2']);
   assert.equal(plan.planView(SID).items.find((i) => i.pr === 103).assessment.value, 'high');
   // #103 depends on #102: they form a group and change together.
   assert.deepEqual(plan.planView(SID).items.find((i) => i.pr === 103).groups['branch-4.2'], [102, 103]);
@@ -588,3 +594,47 @@ test('diff review: picks are reviewed after picking, a concern holds the squash,
 });
 
 function edit2(dir, f, i, text) { const p = path.join(dir, 'mod/src/main/java', f); const a = fs.readFileSync(p, 'utf8').split('\n'); a[i - 1] = text; fs.writeFileSync(p, a.join('\n')); }
+
+test('PRs labelled for the release join the plan; changes already on the branch get the missing labels', () => {
+  sh(repo, 'fetch', '-q', 'origin'); sh(repo, 'checkout', '-q', '--detach', 'origin/branch-4.2');
+  sh(repo, 'tag', 'v4.2.5');   // the branch's previous release
+  sh(repo, 'checkout', '-q', '--detach', 'origin/master');
+  const f = (n) => path.join(repo, 'mod/src/main/java', n);
+  fs.writeFileSync(f('Lab.java'), lines(40, 'lab')); const c117 = commit('[fix][broker] Add Lab (#117)');
+  edit2(repo, 'Lab.java', 2, 'fixed line 2'); commit('[fix][broker] Labelled fix not picked yet (#118)');
+  edit2(repo, 'Lab.java', 10, 'fixed line 10'); const c119 = commit('[fix][broker] Labelled fix with its own branch PR (#119)');
+  edit2(repo, 'Lab.java', 18, 'since'); commit('[fix][broker] Since point (#120)');
+  edit2(repo, 'Lab.java', 26, 'ci'); commit('[improve][ci] Labelled CI change (#121)');
+  edit2(repo, 'Lab.java', 34, 'fixed line 34'); const c122 = commit('[fix][broker] Picked by someone else (#122)');
+  sh(repo, 'push', '-q', 'origin', 'HEAD:refs/heads/master');
+  // branch-4.2 after v4.2.5: #117 cherry-picked, a branch-specific PR for #119, #122 cherry-picked; no labels set.
+  sh(repo, 'checkout', '-q', '--detach', 'origin/branch-4.2');
+  sh(repo, 'cherry-pick', '-x', c117);
+  sh(repo, 'cherry-pick', '-n', c119); sh(repo, 'commit', '-q', '-m', '[fix][broker][branch-4.2] Fix line ten on 4.2 (#320)\n\nThis is a backport of apache/pulsar#119 adapted to branch-4.2.');
+  sh(repo, 'cherry-pick', '-x', c122);
+  sh(repo, 'push', '-q', 'origin', 'HEAD:refs/heads/branch-4.2');
+  fs.mkdirSync(path.join(tmp, 'labelled'), { recursive: true });
+  fs.writeFileSync(path.join(tmp, 'labelled', 'release_4.2.6.json'), JSON.stringify([118, 119, 121].map((n) => ({ number: n, title: `#${n}`, baseRefName: 'master' }))));
+  const meta = (n, labels) => [`p${n}`, { number: n, body: '', mergedAt: null, author: null, labels: { nodes: labels.map((name) => ({ name })) } }];
+  fs.writeFileSync(path.join(tmp, 'graphql.json'), JSON.stringify({ data: { repository: Object.fromEntries([meta(118, ['release/4.2.6']), meta(119, ['release/4.2.6']), meta(121, ['release/4.2.6'])]) } }));
+  try {
+    const sid = 'labelled-session';
+    plan.createSession({ id: sid, repo, remote: 'origin', sincePr: 120, branches: plan.parseBranches('branch-4.2:4.2.6,branch-4.0:4.0.15<branch-4.2') });
+    const r = plan.discover(sid, { log: () => {}, blame: false });
+    assert.deepEqual(r.labelledPulledIn.sort(), [118, 119]);
+    const by = Object.fromEntries(plan.planView(sid).items.map((i) => [i.pr, i]));
+    assert.deepEqual(by[118].stats.labelledIn, ['release/4.2.6']); assert.ok(by[118].master_order < 0);
+    assert.equal(by[118].targets['branch-4.2'].on_branch, 0, 'labelled but not picked: it is in the plan to decide');
+    assert.equal(by[119].targets['branch-4.2'].on_branch, 2); assert.equal(by[119].targets['branch-4.2'].equiv.via, 'reference');
+    assert.equal(by[121].excluded, null, 'a release label overrides the pre-filter');
+    assert.equal(by[122].targets['branch-4.2'].on_branch, 1);
+    const lp = plan.labelPlan(sid);
+    assert.equal(lp.cycles['branch-4.2'], 'v4.2.5'); assert.equal(lp.cycles['branch-4.0'], null);
+    const onb = lp.add.filter((x) => x.kind === 'on-branch').map((x) => `${x.pr} ${x.label}`).sort();
+    assert.deepEqual(onb, ['119 cherry-picked/branch-4.2', '122 cherry-picked/branch-4.2', '122 release/4.2.6']);
+    // The next discover refreshes the labelled PRs and adds nothing twice.
+    assert.deepEqual(plan.discover(sid, { log: () => {}, blame: false }).labelledPulledIn, []);
+  } finally {
+    fs.rmSync(path.join(tmp, 'graphql.json'), { force: true }); fs.rmSync(path.join(tmp, 'labelled'), { recursive: true, force: true });
+  }
+});

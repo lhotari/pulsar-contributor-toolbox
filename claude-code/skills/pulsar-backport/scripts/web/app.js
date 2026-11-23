@@ -259,8 +259,13 @@ $('#autoPushTest').onchange = (e) => setConfig({ autoPushTest: e.target.checked 
 
 async function showLabels() {
   const lp = await api(`sessions/${S.sid}/labels`);
-  const msg = `Release labels implied by the decisions:\n  add: ${lp.add.length} (${lp.add.slice(0, 20).map((x) => `#${x.pr} ${x.label}`).join(', ')}${lp.add.length > 20 ? ', …' : ''})\n  remove: ${lp.remove.length} (${lp.remove.map((x) => `#${x.pr} ${x.label}`).join(', ')})\n\nOK applies the additions on GitHub. Removals are applied only if you confirm them next.`;
-  if (!lp.add.length && !lp.remove.length) { toast('Labels already match the decisions'); return; }
+  const list = (xs) => `${xs.slice(0, 20).map((x) => `#${x.pr} ${x.label}`).join(', ')}${xs.length > 20 ? ', …' : ''}`;
+  const dec = lp.add.filter((x) => x.kind !== 'on-branch'); const onb = lp.add.filter((x) => x.kind === 'on-branch');
+  const tags = Object.entries(lp.cycles || {}).map(([b, t]) => `${b} since ${t || '(no previous release tag)'}`).join(', ');
+  const msg = `Release labels implied by the decisions:\n  add: ${dec.length} (${list(dec)})\n  remove: ${lp.remove.length} (${list(lp.remove)})\n`
+    + `Master PRs already on a branch (cherry-picked or through a branch-specific PR) with missing labels:\n  add: ${onb.length} (${list(onb)})\n  release labels only for changes that reached the branch after its previous release: ${tags}\n\n`
+    + 'OK applies the additions on GitHub. Removals are applied only if you confirm them next.';
+  if (!lp.add.length && !lp.remove.length) { toast('Labels already match the decisions and the branches'); return; }
   if (!confirm(msg)) return;
   const removals = lp.remove.length ? confirm(`Also remove ${lp.remove.length} release label(s) from PRs decided "skip"?`) : false;
   act('apply-labels', null, { removals });
@@ -411,6 +416,8 @@ function planRow(it, lanes, mode, inGroup) {
     h('td', { class: 'title' }, prLink(it.pr), ' ', it.round === S.summary.config.round && S.summary.config.round > 1 ? chip('new', 'new') : null, ' ', strip(it.title),
       it.kind === 'flaky' ? h('span', {}, ' ', chip('flaky', '')) : null,
       it.stats?.pulledIn?.length ? h('span', { title: `Merged before the plan's first PR; added because ${it.stats.pulledIn.map((x) => `#${x}`).join(', ')} depend(s) on it` }, ' ', chip(`dependency of ${it.stats.pulledIn.map((x) => `#${x}`).join(', ')}`, 'maybe')) : null,
+      it.stats?.labelledIn?.length ? h('span', { title: `Merged before the plan's first PR; added because it is labelled ${it.stats.labelledIn.join(', ')}` }, ' ', chip(`labelled ${it.stats.labelledIn.map((x) => x.replace('release/', '')).join(', ')}`, 'maybe'))
+        : it.stats?.releaseLabels?.length ? h('span', { title: `Labelled ${it.stats.releaseLabels.join(', ')}: evaluated even if the pre-filter would leave it out` }, ' ', chip(it.stats.releaseLabels.map((x) => x.replace('release/', '')).join(', '), '')) : null,
       it.comment ? h('span', { title: it.comment }, ' ', commentChip(it)) : null,
       it.excluded ? h('div', { class: 'small muted' }, `excluded: ${it.excluded}`) : null,
       a.impact ? h('div', { class: 'small muted' }, a.impact) : null),

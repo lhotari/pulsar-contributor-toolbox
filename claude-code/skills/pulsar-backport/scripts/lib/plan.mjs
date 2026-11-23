@@ -96,13 +96,14 @@ export function discover(sid, { log = console.log, blame = true } = {}) {
   log('matching branch-specific commits (patch-id, references, titles, upgrades, labels)');
   const equivs = Object.fromEntries(branches.map((b) => [b, findEquivalents(cfg, `${r}/${b}`, masterRef, commits, meta, onBranch[b], b)]));
   const shaToPr = new Map(commits.map((c) => [c.sha, c.pr]));
+  const releaseLabels = sessionReleaseLabels(sid);
   let added = 0; let dry = 0;
   const newlyPicked = [];
   for (const [i, c] of commits.entries()) {
     const m = meta.get(c.pr) || { labels: [], body: '' };
     if (m.body) fs.writeFileSync(path.join(bodies, `${c.pr}.md`), m.body);
     const isNew = !known.has(c.pr);
-    const cls = upsertCommit(sid, { repo, branches, onBranch, equivs, heads, newlyPicked }, c, i, m, isNew ? round : known.get(c.pr));
+    const cls = upsertCommit(sid, { repo, branches, onBranch, equivs, heads, newlyPicked, releaseLabels }, c, i, m, isNew ? round : known.get(c.pr));
     if (isNew) added++;
     dry += cls.dry;
     if (blame && !cls.excluded && branches.some((b) => !(onBranch[b].prs.has(c.pr) || onBranch[b].shas.has(c.sha)))) {
@@ -114,12 +115,39 @@ export function discover(sid, { log = console.log, blame = true } = {}) {
     }
     if (i % 50 === 49) log(`  ${i + 1}/${commits.length}`);
   }
+  const labelled = pullInLabelled(sid, new Set(commits.map((c) => c.pr)), { log });
   const pulled = pullInDependencies(sid, { log, refresh: true });
   saveConfig(sid, { round, lastDiscover: db.now(), masterHead: g.short(g.rev(repo, masterRef)),
     heads: Object.fromEntries(branches.map((b) => [b, g.short(heads[b])])) });
-  const summary = { round, total: commits.length, added, dryRuns: dry, newlyPicked, pulledIn: pulled.added, depsNotOnMaster: pulled.missing };
-  db.event(sid, `Discover round ${round}: ${commits.length} PRs, ${added} new, ${newlyPicked.length} newly on a branch`, { data: summary });
+  const summary = { round, total: commits.length, added, dryRuns: dry, newlyPicked, pulledIn: pulled.added, depsNotOnMaster: pulled.missing,
+    labelledPulledIn: labelled.added, labelledNotOnMaster: labelled.missing, labelSearchFailed: labelled.failed };
+  db.event(sid, `Discover round ${round}: ${commits.length} PRs, ${added} new, ${newlyPicked.length} newly on a branch`
+    + `${labelled.added.length ? `, ${labelled.added.length} release-labelled PR(s) from before the range` : ''}`, { data: summary });
   return summary;
+}
+
+/** The release labels of the session's lanes ("release/4.2.6", ...). */
+export function sessionReleaseLabels(sid) {
+  return db.all('SELECT release FROM lanes WHERE session_id = ? AND release IS NOT NULL ORDER BY seq', sid).map((l) => `release/${l.release}`);
+}
+
+/**
+ * Master PRs labelled for one of the session's releases that were merged before the plan's range (someone tagged
+ * them for the release and they have not been picked, or they reached the branch through a branch-specific PR).
+ * They join the plan like a pulled-in dependency, are never pre-filtered, and are refreshed on every discover.
+ * Returns {added, missing, failed}.
+ */
+export function pullInLabelled(sid, inRange, { log = () => {} } = {}) {
+  const cfg = db.session(sid).config;
+  const want = new Map(); const failed = [];
+  for (const label of sessionReleaseLabels(sid)) {
+    const list = gh.mergedPrsWithLabel(label, { base: cfg.source });
+    if (!list) { failed.push(label); log(`searching PRs labelled ${label} failed; labelled PRs before the range are not refreshed`); continue; }
+    for (const p of list) if (!inRange.has(p.number)) (want.get(p.number) || want.set(p.number, []).get(p.number)).push(label);
+  }
+  const r = importPrs(sid, new Map([...want.keys()].map((pr) => [pr, []])), { log,
+    reasonFor: (pr) => `labelled ${want.get(pr).join(', ')}`, statsFor: (pr) => ({ labelledIn: want.get(pr) }) });
+  return { ...r, failed };
 }
 
 /**
@@ -127,8 +155,11 @@ export function discover(sid, { log = console.log, blame = true } = {}) {
  * (on the branch, an equivalent branch commit, or a dry-run cherry-pick). Returns the class plus the dry-run count.
  */
 function upsertCommit(sid, ctx, c, order, m, round, extraStats = {}) {
-  const { repo, branches, onBranch, equivs, heads, newlyPicked } = ctx;
+  const { repo, branches, onBranch, equivs, heads, newlyPicked, releaseLabels = [] } = ctx;
   const cls = classify(c.title);
+  // Someone labelled it for one of the session's releases: it is evaluated whatever its title says.
+  const labelled = releaseLabels.filter((x) => (m.labels || []).includes(x));
+  if (labelled.length) cls.excluded = null;
   const stats = g.commitFiles(repo, c.sha);
   db.run(`INSERT INTO items (session_id, pr, sha, master_order, title, merged_at, kind, excluded, labels, stats, round)
           VALUES (?,?,?,?,?,?,?,?,?,?,?)
@@ -137,7 +168,7 @@ function upsertCommit(sid, ctx, c, order, m, round, extraStats = {}) {
             stats = json_patch(items.stats, excluded.stats),
             excluded = CASE json_extract(items.stats, '$.include') WHEN 1 THEN NULL WHEN 0 THEN 'manual exclude' ELSE excluded.excluded END`,
     sid, c.pr, c.sha, order, c.title, m.mergedAt || c.date, cls.kind, extraStats.include === 1 ? null : cls.excluded, db.S(m.labels),
-    db.S({ comp: cls.comp, files: stats.files.length, main: stats.main.length, add: stats.add, del: stats.del, ...extraStats }), round);
+    db.S({ comp: cls.comp, files: stats.files.length, main: stats.main.length, add: stats.add, del: stats.del, releaseLabels: labelled, ...extraStats }), round);
   let dry = 0;
   for (const b of branches) {
     let on = onBranch[b].prs.has(c.pr) || onBranch[b].shas.has(c.sha) ? 1 : 0;
@@ -192,7 +223,7 @@ export function addPrs(sid, prs, { reason, log = () => {} } = {}) {
 }
 
 /** want: Map<pr, dependency edges that need it> (empty: added for `reason`). */
-function importPrs(sid, want, { log = () => {}, reason = null } = {}) {
+function importPrs(sid, want, { log = () => {}, reason = null, reasonFor = () => reason, statsFor = null } = {}) {
   const s = db.session(sid); const cfg = s.config; const repo = cfg.repo; const r = remote(cfg);
   const masterRef = `${r}/${cfg.source}`;
   const out = { added: [], missing: [] };
@@ -217,15 +248,15 @@ function importPrs(sid, want, { log = () => {}, reason = null } = {}) {
     const order = -Number(g.git(repo, ['rev-list', '--first-parent', '--count', `${c.sha}..${cfg.sinceSha}`]));
     const via = [...new Set(es.map((e) => e.pr))];
     const isNew = !db.get('SELECT 1 FROM items WHERE session_id = ? AND pr = ?', sid, pr);
-    upsertCommit(sid, { repo, branches, onBranch, equivs, heads, newlyPicked }, c, order, meta.get(pr) || { labels: [] }, cfg.round || 1,
-      { pulledIn: via, include: 1 });   // named as a dependency: never pre-filtered out
+    upsertCommit(sid, { repo, branches, onBranch, equivs, heads, newlyPicked, releaseLabels: sessionReleaseLabels(sid) }, c, order, meta.get(pr) || { labels: [] }, cfg.round || 1,
+      statsFor ? { ...statsFor(pr), include: 1 } : { pulledIn: via, include: 1 });   // named as a dependency or labelled: never pre-filtered out
     if (!isNew) continue;   // refreshed (branch presence, dry runs); decided and announced when it came in
     for (const e of es.filter((x) => x.status === 'accepted')) {
       db.run(`UPDATE targets SET decision = 'backport', decision_source = 'user', decision_note = COALESCE(decision_note, ?), decided_at = ?
               WHERE session_id = ? AND pr = ? AND (? IS NULL OR branch = ?) AND on_branch = 0`, `dependency of #${e.pr}`, db.now(), sid, pr, e.branch, e.branch);
     }
     out.added.push(pr);
-    const why = via.length ? `needed as a dependency of ${via.map((x) => `#${x}`).join(', ')}` : reason || 'added by the user';
+    const why = via.length ? `needed as a dependency of ${via.map((x) => `#${x}`).join(', ')}` : reasonFor(pr) || 'added by the user';
     db.event(sid, `#${pr} added to the plan: merged before the plan's range, ${why}`);
     log(`pulled in #${pr} (${why})`);
   }
@@ -259,7 +290,10 @@ export function findEquivalents(cfg, branchRef, masterRef, commits, meta, onB, b
   }
   // 2. explicit references in branch commit messages and in the branch PRs' descriptions
   const cutoff = Date.parse(g.git(repo, ['log', '-1', '--format=%cI', cfg.sinceSha])) - 45 * 864e5;
-  const recent = bcommits.filter((b) => Date.parse(b.date) >= cutoff);
+  // Branch commits near the plan's range, and everything since the branch's previous release (a branch-specific PR
+  // for a release-labelled master PR merged long before the range is in this release's cycle).
+  const cycle = releaseCycle(cfg, branch);
+  const recent = bcommits.filter((b) => Date.parse(b.date) >= cutoff || cycle?.commits.has(b.sha));
   const branchPrBodies = gh.prMeta([...new Set(recent.map((b) => b.pr).filter((p) => p && !masterPrs.has(p)))]);
   for (const b of recent) {
     const text = `${b.body}
@@ -287,6 +321,36 @@ ${branchPrBodies.get(b.pr)?.body || ''}`;
       hit(c.pr, 'label', { sha: null, subject: null, pr: null }, `labelled cherry-picked/${branch}, but no matching commit was found`);
     }
   }
+  return out;
+}
+
+/**
+ * What reached a branch since its previous release: release 4.2.6 → the commits in v4.2.5..<remote>/branch-4.2.
+ * Returns {tag, prs (master PR numbers in subjects), shas (cherry-picked-from master shas), commits (branch shas)}, or
+ * null when the release is x.y.0 or the tag cannot be found (fetched once when missing). Cached per process.
+ */
+const cycleCache = new Map();
+export function releaseCycle(cfg, branch) {
+  const release = (cfg.branches || []).find((b) => b.branch === branch)?.release;
+  const m = release?.match(/^(\d+)\.(\d+)\.(\d+)$/);
+  if (!m || Number(m[3]) === 0) return null;
+  const tag = `v${m[1]}.${m[2]}.${Number(m[3]) - 1}`; const ref = remoteRef(cfg, branch);
+  const key = `${cfg.repo}|${tag}|${ref}|${g.git(cfg.repo, ['rev-parse', '--verify', '-q', ref], { allowFail: true }).out}`;
+  if (cycleCache.has(key)) return cycleCache.get(key);
+  const has = () => g.git(cfg.repo, ['rev-parse', '--verify', '-q', `refs/tags/${tag}^{commit}`], { allowFail: true }).ok;
+  if (!has()) g.git(cfg.repo, ['fetch', '--quiet', '--no-tags', remote(cfg), `+refs/tags/${tag}:refs/tags/${tag}`], { allowFail: true });
+  let out = null;
+  if (has()) {
+    const list = g.commitsWithBodies(cfg.repo, `refs/tags/${tag}..${ref}`);
+    const prs = new Set(); const shas = new Set();
+    for (const c of list) {
+      if (/^Revert\b/.test(c.subject)) continue;
+      for (const x of c.subject.matchAll(/\(#(\d+)\)/g)) prs.add(Number(x[1]));
+      for (const x of c.body.matchAll(/cherry picked from commit ([0-9a-f]{40})/g)) shas.add(x[1]);
+    }
+    out = { tag, prs, shas, commits: new Set(list.map((c) => c.sha)) };
+  }
+  cycleCache.set(key, out);
   return out;
 }
 
@@ -649,20 +713,44 @@ export function planView(sid) {
   };
 }
 
-/** Release-label changes implied by the decisions. */
+// Equivalents that say the master PR's change is on the branch: not a newer upgrade of the same dependency (a
+// different change) and not the label itself (nothing to add).
+const LABELLING_EQUIV = ['patch-id', 'reference', 'title'];
+
+/**
+ * Label changes on the master PRs:
+ * - kind 'decision': release labels implied by the decisions (added for backport, removed for skip);
+ * - kind 'on-branch': a master PR whose change is already on the branch, cherry-picked or through a branch-specific
+ *   PR, gets cherry-picked/<branch> when it is missing, and release/<release> when it reached the branch after the
+ *   branch's previous release tag, so it shows up in the release notes.
+ * Returns {add: [{pr, label, kind, why}], remove, cycles: {branch: previous tag | null}}.
+ */
 export function labelPlan(sid) {
+  const cfg = db.session(sid).config;
   const { lanes, items } = planView(sid);
-  const add = []; const remove = [];
+  const add = []; const remove = []; const cycles = {};
+  for (const l of lanes) cycles[l.branch] = l.release ? releaseCycle(cfg, l.branch) : null;
   for (const it of items) {
     for (const l of lanes) {
-      if (!l.release) continue;
-      const t = it.targets[l.branch]; if (!t || t.on_branch) continue;
-      const label = `release/${l.release}`; const has = it.labels.includes(label);
-      if (t.decision === 'backport' && !has) add.push({ pr: it.pr, label });
-      if (t.decision === 'skip' && has) remove.push({ pr: it.pr, label });
+      const t = it.targets[l.branch]; if (!t) continue;
+      const label = l.release ? `release/${l.release}` : null; const has = (x) => it.labels.includes(x);
+      if (!t.on_branch) {
+        if (!label) continue;
+        if (t.decision === 'backport' && !has(label)) add.push({ pr: it.pr, label, kind: 'decision', why: `decided backport to ${l.branch}` });
+        if (t.decision === 'skip' && has(label)) remove.push({ pr: it.pr, label, kind: 'decision', why: `decided skip for ${l.branch}` });
+        continue;
+      }
+      const e = t.on_branch === 2 ? t.equiv : null;
+      if (e && (e.rejected || !LABELLING_EQUIV.includes(e.via))) continue;
+      const via = e ? `${e.subject || e.commit} (${e.via})` : 'cherry-picked';
+      const picked = `cherry-picked/${l.branch}`;
+      if (!has(picked)) add.push({ pr: it.pr, label: picked, kind: 'on-branch', why: `on ${l.branch}: ${via}` });
+      const cyc = cycles[l.branch];
+      const inCycle = cyc && (e ? cyc.commits.has(e.commit) : cyc.prs.has(it.pr) || cyc.shas.has(it.sha));
+      if (label && inCycle && !has(label)) add.push({ pr: it.pr, label, kind: 'on-branch', why: `on ${l.branch} since ${cyc.tag}: ${via}` });
     }
   }
-  return { add, remove };
+  return { add, remove, cycles: Object.fromEntries(Object.entries(cycles).map(([b, c]) => [b, c?.tag || null])) };
 }
 
 export function applyLabels(sid, { removals = false } = {}) {

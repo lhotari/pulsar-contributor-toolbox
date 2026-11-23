@@ -44,6 +44,7 @@ node "$BPT" plan discover <id>
 - `branch:release` per target; `<branch-4.2` makes the 4.0 lane reuse the tested 4.2 cherry-picks. Order matters: lanes run in the listed order.
 - **Already on a branch via a branch-specific PR** (e.g. `[improve][meta][branch-4.2] Upgrade Oxia Java client to 0.10.4 (#27227)` for master #27226) is detected and shown as "on branch (equivalent)": identical patch-id, the branch commit or its PR description referencing the master PR or commit, the same normalized title, a newer upgrade of the same dependency on the branch, or a `cherry-picked/<branch>` label on the master PR. The user can reject a match ("Not the same", or `plan equiv <id> <pr> <branch>`); later discovers keep that.
 - `discover` lists first-parent master commits after the since-commit, marks what is already on each branch (PR number in the subject or `cherry picked from` trailer), fetches labels and PR descriptions, applies the **pre-filter**, dry-runs each in-scope PR on each branch with `git merge-tree`, and records **blame dependency hints**: in-range master commits that last changed the lines a PR modifies, missing from the branch.
+- **PRs labelled for the session's releases** (`release/4.2.6`, `release/4.0.15`: someone tagged them for the release) are always considered, replacing a manual `ptbx_cherry_pick_check`. A labelled PR merged before the plan's range is pulled in like a dependency (marked "labelled 4.2.6" in the list, placed before the range in master order) and refreshed on every discover. A labelled PR in the range is never pre-filtered out. Each one then shows whether it is still missing (to triage and decide), cherry-picked already, or on the branch through a branch-specific PR (the equivalence checks above also look at every branch commit since the previous release tag). `discover` reports `labelledPulledIn`, `labelledNotOnMaster` and `labelSearchFailed`.
 - Pre-filter (matches the user's standing scope): `[fix]` except `[fix][ci]`/`[fix][build]`; `[improve]` except test/ci/build/pip/doc. CI speed-ups and large test refactorings that aren't bug fixes stay out; flaky-test fixes (`[fix][test]`) are in, but only picked with justification beyond speed. The user can include or exclude single PRs in the UI.
 
 ## Triage
@@ -77,7 +78,10 @@ A PR that is skipped but still worth having on the branches (e.g. its fix depend
 
 ## Labels
 
-`node "$BPT" plan labels <id>` prints the release-label additions and removals implied by the decisions. **Applying them is the user's call**: the UI's "Labels…" button, or `plan labels <id> --apply [--removals]` only after explicit approval in chat.
+`node "$BPT" plan labels <id>` prints the label changes on the master PRs. **Applying them is the user's call**: the UI's "Labels…" button, or `plan labels <id> --apply [--removals]` only after explicit approval in chat. There are two kinds:
+
+- `decision`: release labels implied by the decisions (added for backport; for skip, removed only with `--removals`).
+- `on-branch`: a master PR whose change is already on a branch, cherry-picked by someone or through a branch-specific PR (equivalence via patch-id, reference or title; not "newer upgrade" or a rejected match). It gets `cherry-picked/<branch>` when that is missing, and `release/<version>` when the change reached the branch after the branch's previous release tag (`v4.2.5` for 4.2.6; fetched if missing, no release label for x.y.0). That way the master PR shows up in the release notes. `cycles` in the output names the tag used per branch.
 
 ## Gotchas
 
