@@ -265,7 +265,7 @@ function renderSession() {
   const A = [];
   const btn = (label, fn, cls) => A.push(h('button', { class: cls, onclick: fn }, label));
   btn('Discover new PRs', () => act('discover'));
-  btn('Triage untriaged (Claude)', () => act('triage', null, { instructions: prompt('Extra instructions for the triage worker (optional)') || undefined }));
+  btn('Triage untriaged (Claude, one worker per batch)', () => act('triage', null, { instructions: prompt('Extra instructions for the triage worker (optional)') || undefined }));
   btn('Reset to recommendations…', async () => {
     const all = confirm('Reset decisions to the recommendations.\n\nOK: only the ones you have not changed yourself.\nCancel: choose next whether to reset everything.') ? false
       : confirm('Reset ALL decisions, including your own, to the recommendations?') ? true : null;

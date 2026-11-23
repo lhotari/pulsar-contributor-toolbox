@@ -116,8 +116,10 @@ If the conflict shows the pick needs an earlier PR (the conflict hints list cand
 - **A pick needs another PR**: `job ask` with `--propose dep:<pr>:<dep>`.
 Finish with `job done` summarising each failure and what you did.
 
-### triage
-Follow the pulsar-backport-plan skill's *Triage* section for the session.
+### triage-batch and triage-import
+The UI's Triage button queues an engine `triage` job. It exports the batches and queues one `triage-batch` worker per batch. Up to `maxTriageWorkers` of them run at a time (default 4). When the last one finishes, a `triage-import` worker is queued.
+- `triage-batch`: read the brief, evaluate the batch yourself and write the verdict file. Do not use subagents: a headless `claude -p` stops background subagents 10 minutes after its last turn.
+- `triage-import`: spot-check the verdict files (the pulsar-backport-plan skill's *Triage* step 3), fix them where they are wrong, and run `plan import`.
 
 ## Changing course while backporting
 

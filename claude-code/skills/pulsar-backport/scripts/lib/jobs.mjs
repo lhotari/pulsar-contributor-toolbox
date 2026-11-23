@@ -10,15 +10,21 @@ import { sessionDir } from './plan.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const BPT = path.resolve(HERE, '..', 'bpt.mjs');
-export const ENGINE = ['discover', 'start-lane', 'pick-all', 'push-test', 'rerun', 'squash', 'finalize', 'push-final-fix', 'apply-labels', 'post-comments', 'abort'];
-export const CLAUDE = ['triage', 'resolve', 'verify', 'fix-ci', 'review'];
+export const ENGINE = ['discover', 'triage', 'start-lane', 'pick-all', 'push-test', 'rerun', 'squash', 'finalize', 'push-final-fix', 'apply-labels', 'post-comments', 'abort'];
+// Triage: the engine job 'triage' exports the batches and queues one 'triage-batch' worker per batch (they run in
+// parallel, each evaluating its batch itself: a headless claude -p stops background subagents 10 minutes after its last
+// turn, so a worker must not hand the batches to subagents). When the last batch worker finishes, 'triage-import'
+// spot-checks the verdict files and imports them.
+export const CLAUDE = ['resolve', 'verify', 'fix-ci', 'review', 'triage-batch', 'triage-import'];
 export const ACTIVE = ['queued', 'running', 'waiting'];
 
 export function enqueue(sid, branch, type, args = {}) {
   if (sid) db.assertEditable(sid);
   const runner = ENGINE.includes(type) ? 'engine' : CLAUDE.includes(type) ? 'claude' : null;
   if (!runner) throw new Error(`unknown job type ${type}`);
-  const dup = db.get(`SELECT id FROM jobs WHERE session_id = ? AND IFNULL(branch,'') = IFNULL(?,'') AND type = ? AND status IN ('queued','running','waiting')`, sid, branch, type);
+  // One active job per session, branch and type; triage batches are told apart by their batch.
+  const dup = db.get(`SELECT id FROM jobs WHERE session_id = ? AND IFNULL(branch,'') = IFNULL(?,'') AND type = ? AND status IN ('queued','running','waiting')
+                      AND IFNULL(json_extract(args, '$.batch'), '') = IFNULL(?, '')`, sid, branch, type, args.batch ?? null);
   if (dup) return dup.id;
   const r = db.run('INSERT INTO jobs (session_id, branch, type, runner, args, created_at) VALUES (?,?,?,?,?,?)',
     sid, branch, type, runner, db.S(args), db.now());
@@ -41,8 +47,23 @@ export function finish(id, status, result) {
   const j = job(id);
   db.run('UPDATE jobs SET status = ?, result = ?, finished_at = ?, pid = NULL WHERE id = ?', status, db.S(result ?? null), db.now(), id);
   const msg = result?.summary || result?.error || result?.question || '';
-  db.event(j.session_id, `${j.type}${j.args.pr ? ` #${j.args.pr}` : ''} ${status}${msg ? `: ${String(msg).slice(0, 500)}` : ''}`,
+  db.event(j.session_id, `${j.type}${j.args.pr ? ` #${j.args.pr}` : ''}${j.args.batch ? ` ${j.args.batch}` : ''} ${status}${msg ? `: ${String(msg).slice(0, 500)}` : ''}`,
     { branch: j.branch, job: id, level: status === 'failed' ? 'error' : status === 'waiting' ? 'attention' : 'info' });
+  if (j.type === 'triage-batch' && status !== 'waiting') afterTriageBatch(j);
+}
+
+/** The last batch worker of a triage round is done: queue the import of the verdict files that were written. */
+function afterTriageBatch(j) {
+  const { dir, round } = j.args;
+  const siblings = db.all(`SELECT id, status, args FROM jobs WHERE session_id = ? AND type = 'triage-batch'`, j.session_id)
+    .map((x) => ({ ...x, args: db.J(x.args, {}) })).filter((x) => x.args.dir === dir);
+  if (siblings.some((x) => ACTIVE.includes(x.status))) return;
+  const written = siblings.filter((x) => x.args.out && fs.existsSync(x.args.out));
+  const missing = siblings.filter((x) => !(x.args.out && fs.existsSync(x.args.out))).map((x) => x.args.batch);
+  if (!written.length) { db.event(j.session_id, `Triage round ${round}: no batch wrote verdicts (${missing.join(', ')}); nothing to import`, { level: 'error' }); return; }
+  try {
+    enqueue(j.session_id, null, 'triage-import', { dir, round, files: written.map((x) => x.args.out), missing, instructions: j.args.instructions });
+  } catch (e) { db.event(j.session_id, `Queuing the triage import failed: ${e.message}`, { level: 'error' }); }
 }
 
 /** An interactive Claude Code session takes the oldest queued Claude job. */
@@ -94,7 +115,8 @@ Analysis (the picks listed for it), for the backport report: node ${BPT} pick an
 When another branch already has an analysis for the PR, reuse what still holds (what it fixes is the same) and check the relevance and compatibility for ${j.branch}.
 
 Judge each pick on its own; keep it short and concrete. When every listed pick is recorded, finish with job done ${j.id} --summary "<counts, the concerns and any breaking changes>".`,
-    triage: `Triage the untriaged PRs of the plan: follow the pulsar-backport-plan skill's "Triage" section (export batches, run evaluator subagents, import the verdicts).`,
+    'triage-batch': `Evaluate one triage batch yourself, in this session: read ${j.args.brief} and follow it exactly. Your batch file is ${j.args.file}; write the result to ${j.args.out}. Put helper scripts in ${j.args.dir}, never in the repo worktree or /tmp. Do not hand the work to subagents (the Agent tool): this headless session stops background subagents 10 minutes after its last turn, and the engine already runs the other batches in parallel. When the result file is written and is valid JSON in the brief's format, finish with job done ${j.id} --summary "<counts of pick/maybe/skip/already>".`,
+    'triage-import': `Import the triage verdicts of round ${j.args.round}: ${(j.args.files || []).join(' ')}.${(j.args.missing || []).length ? ` These batches wrote no verdicts (their worker failed): ${j.args.missing.join(', ')}; say so in the summary, their PRs stay untriaged.` : ''} First spot-check, as the pulsar-backport-plan skill's "Triage" section step 3 says: for every pick with medium+ risk, every skip whose reason is "depends on an absent PR", and every high-severity item, verify the load-bearing claim yourself in the session's repo (job show: session.repo), read-only and without checkout: git log <remote>/<branch> --grep='(#X)', git show <remote>/<branch>:<path>. Fix the JSON where it is wrong and say so in the PR's note. Do it yourself, without subagents. Then run node ${BPT} plan import ${j.session_id} <the files> and finish with job done ${j.id} --summary "<imported counts, the corrections you made>".`,
   }[j.type] || '';
   return `${head}\n\n${extra}${j.args.instructions ? `\n\nUser instructions: ${j.args.instructions}` : ''}`;
 }

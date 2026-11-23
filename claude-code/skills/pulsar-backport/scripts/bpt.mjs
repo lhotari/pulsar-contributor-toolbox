@@ -122,7 +122,7 @@ function jobContext(id) {
       ctx.modules = [...new Set(files.map((f) => f.split('/src/')[0]).filter((m) => m && !m.includes('.')))].sort();
     }
   }
-  if (j.type === 'triage') ctx.planSkill = path.join(SKILLS, 'pulsar-backport-plan', 'SKILL.md');
+  if (['triage-batch', 'triage-import'].includes(j.type)) ctx.planSkill = path.join(SKILLS, 'pulsar-backport-plan', 'SKILL.md');
   return ctx;
 }
 
@@ -134,6 +134,14 @@ function runEngineJob(id) {
     let summary;
     switch (j.type) {
       case 'discover': { const r = plan.discover(sid); summary = `round ${r.round}: ${r.total} PRs, ${r.added} new`; break; }
+      case 'triage': {
+        // One worker per batch, in parallel; the import is queued when the last one finishes (jobs.finish).
+        const t = plan.exportTriage(sid, { all: !!j.args.all, size: Number(j.args.size || 25), briefTemplate: path.join(SKILLS, 'pulsar-backport-plan', 'references', 'triage-brief.md') });
+        const round = db.session(sid).config.round;
+        const queued = t.batches.map((x) => jobs.enqueue(sid, null, 'triage-batch', { batch: x.name, file: x.file, out: x.out, brief: t.brief, dir: t.dir, round, count: x.count, instructions: j.args.instructions }));
+        summary = t.batches.length ? `${t.total} PRs in ${t.batches.length} batches: ${t.batches.map((x) => `${x.name} (${x.count})`).join(', ')}; worker jobs ${queued.join(', ')}` : 'nothing to triage';
+        break;
+      }
       case 'start-lane': lane.startLane(sid, b); // fall through: picking starts right away
       case 'pick-all': { const r = lane.pickAll(sid, b); summary = `${r.results.filter((x) => x.status === 'picked').length} picked, stopped at ${r.last.status}${r.last.pr ? ` #${r.last.pr}` : ''}`; break; }
       case 'push-test': { const r = lane.pushTest(sid, b); summary = `pushed ${r.testBranch}, dispatched ${r.dispatched.join(', ') || 'no workflow'}`; break; }

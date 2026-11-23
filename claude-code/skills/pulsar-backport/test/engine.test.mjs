@@ -684,3 +684,26 @@ test('a session continues after the previous one: range, labelled only, or both;
   assert.ok(!fs.existsSync(plan.sessionDir('next-both')));
   assert.throws(() => plan.deleteSession(SID), /cannot be deleted .*archive it instead/);
 });
+
+test('triage runs one worker per batch and imports when the last one is done', () => {
+  const sid = 'next-labelled';   // planning, untriaged PRs
+  const cli = (...args) => execFileSync(process.execPath, [path.join(path.dirname(new URL(import.meta.url).pathname), '../scripts/bpt.mjs'), ...args], { encoding: 'utf8', stdio: 'pipe' });
+  const t = jobs.enqueue(sid, null, 'triage', { size: 1 });
+  assert.equal(jobs.job(t).runner, 'engine');
+  cli('job', 'run', String(t));
+  assert.equal(jobs.job(t).status, 'done', JSON.stringify(jobs.job(t).result));
+  const batches = db.all(`SELECT id, runner, args FROM jobs WHERE session_id = ? AND type = 'triage-batch' ORDER BY id`, sid).map((x) => ({ ...x, args: db.J(x.args) }));
+  assert.ok(batches.length >= 2, 'one job per batch (size 1)');
+  assert.ok(batches.every((b) => b.runner === 'claude' && b.args.out && b.args.brief));
+  assert.match(jobs.workerPrompt(jobs.job(batches[0].id)), /Do not hand the work to subagents/);
+  // The first batch writes its verdicts; nothing is imported while another batch runs.
+  fs.writeFileSync(batches[0].args.out, '[]');
+  jobs.finish(batches[0].id, 'done', { summary: 'ok' });
+  assert.equal(db.get(`SELECT COUNT(*) n FROM jobs WHERE session_id = ? AND type = 'triage-import'`, sid).n, 0);
+  for (const b of batches.slice(1)) jobs.finish(b.id, 'failed', { error: 'worker exited' });
+  const imp = db.get(`SELECT id, args FROM jobs WHERE session_id = ? AND type = 'triage-import'`, sid);
+  const a = db.J(imp.args);
+  assert.deepEqual(a.files, [batches[0].args.out]);
+  assert.deepEqual(a.missing, batches.slice(1).map((b) => b.args.batch));
+  assert.match(jobs.workerPrompt(jobs.job(imp.id)), /wrote no verdicts/);
+});

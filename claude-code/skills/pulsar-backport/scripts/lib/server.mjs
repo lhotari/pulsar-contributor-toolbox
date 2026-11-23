@@ -72,7 +72,7 @@ function sessionSummary(sid) {
 const READ_ONLY_ACTIONS = ['report', 'report-open', 'report-gist'];
 const ACTIONS = {
   discover: (sid) => ({ job: jobs.enqueue(sid, null, 'discover') }),
-  triage: (sid, b, a) => ({ job: jobs.enqueue(sid, null, 'triage', { instructions: a.instructions }) }),
+  triage: (sid, b, a) => ({ job: jobs.enqueue(sid, null, 'triage', { instructions: a.instructions, all: !!a.all }) }),
   'post-comments': (sid) => ({ job: jobs.enqueue(sid, null, 'post-comments') }),
   'apply-labels': (sid, b, a) => ({ job: jobs.enqueue(sid, null, 'apply-labels', { removals: !!a.removals }) }),
   report: (sid) => {

@@ -61,6 +61,8 @@ node "$BPT" plan discover <id>
 
 ## Triage
 
+From the UI ("Triage untriaged"), triage runs as jobs. The engine exports the batches. One headless worker per batch evaluates it, up to 4 at a time (`session config <id> maxTriageWorkers=N`). Then an import worker spot-checks the verdicts and imports them. Headless workers must not use subagents: `claude -p` stops background subagents 10 minutes after its last turn. When you triage from an interactive session, follow the steps below.
+
 1. `node "$BPT" plan triage-export <id>` writes batch files (≈25 PRs, grouped broker/client/flaky/other) and a filled-in `BRIEF.md` into `~/workspace-pulsar/pulsar-cherry-picking/sessions/<id>/triage/round-N/`, and prints them as JSON. Only PRs without a verdict are exported (`--all` re-exports everything).
 2. Launch one **read-only** evaluator subagent per batch, in parallel, with a prompt like: *"Read `<dir>/BRIEF.md` and follow it exactly. Your batch file is `<batch>`; write the result to `<out>`. Put helper scripts in `<dir>`, never in the repo worktree or /tmp."* The brief forbids checkout, builds and writes outside the result file — the main clone is shared.
 3. **Spot-check before importing.** Evaluators are confidently wrong sometimes, mostly on "X is not on the branch" and "master-only" claims. For every `pick` with medium+ risk, every `skip` whose reason is "depends on an absent PR", and every high-severity item, verify the load-bearing claim yourself (`git log origin/branch-4.2 --grep='(#X)'`, `git show origin/branch-4.2:<path>`). Fix the JSON where it is wrong and say so in the PR's `note`.

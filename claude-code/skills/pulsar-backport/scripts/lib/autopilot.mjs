@@ -129,8 +129,10 @@ export function dispatch(running) {
     const j = jobs.job(j0.id); const cfg = db.session(j.session_id).config;
     if (j.runner === 'claude') {
       if (cfg.runner === 'interactive') continue;
-      const busy = db.get(`SELECT COUNT(*) n FROM jobs WHERE runner = 'claude' AND status = 'running' AND claimed_by = 'server'`).n;
-      if (busy >= (cfg.maxClaudeWorkers || 1)) continue;
+      // Triage batches have their own limit (they are short and independent); other workers share maxClaudeWorkers.
+      const batch = j.type === 'triage-batch';
+      const busy = db.get(`SELECT COUNT(*) n FROM jobs WHERE runner = 'claude' AND status = 'running' AND claimed_by = 'server' AND (type = 'triage-batch') = ?`, batch ? 1 : 0).n;
+      if (busy >= (batch ? cfg.maxTriageWorkers || 4 : cfg.maxClaudeWorkers || 1)) continue;
     }
     if (j.branch && db.get(`SELECT 1 FROM jobs WHERE session_id = ? AND branch = ? AND status = 'running' AND id != ?`, j.session_id, j.branch, j.id)) continue;
     const child = jobs.launch(j, cfg);
