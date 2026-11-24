@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Pulsar backports</title>
 <link rel="stylesheet" href="app.css">
+<link rel="icon" id="favicon" href="data:,">
 </head>
 <body>
 <header class="top">
@@ -13,6 +14,7 @@
   <label class="muted small"><input type="checkbox" id="showArchived"> archived</label>
   <button id="newSession" class="ghost">New session</button>
   <span class="grow"></span>
+  <span id="bg" class="bg small" hidden></span>
   <span id="conn" class="muted"></span>
 </header>
 
@@ -74,10 +76,20 @@
 </dialog>
 
 <dialog id="cmpDialog" class="full">
-  <div class="logHead"><h2 id="cmpTitle"></h2><span class="grow"></span><label class="toggle small"><input type="checkbox" id="cmpSame"> show identical files</label><button id="cmpClose" class="ghost">Close</button></div>
+  <div class="logHead"><h2 id="cmpTitle"></h2><span class="grow"></span><label class="toggle small" title="Hunks that are the same change as master's: identical, or only the surrounding lines differ"><input type="checkbox" id="cmpSame"> show unchanged hunks</label><button id="cmpClose" class="ghost">Close</button></div>
   <div id="cmpMeta" class="small muted"></div>
   <div id="cmpReview"></div>
   <div id="cmpBody"></div>
+</dialog>
+
+<dialog id="laneCmpDialog" class="full">
+  <div class="logHead"><h2 id="laneCmpTitle"></h2><span class="grow"></span>
+    <label class="toggle small" title="Hunks that are the same change as master's: identical, or only the surrounding lines differ"><input type="checkbox" id="laneCmpSame"> show unchanged hunks</label>
+    <label class="toggle small"><input type="checkbox" id="laneCmpDiffer" checked> only picks that differ</label>
+    <label class="toggle small"><input type="checkbox" id="laneCmpRules"> only picks with rule findings</label>
+    <button id="laneCmpClose" class="ghost">Close</button></div>
+  <div id="laneCmpMeta" class="small muted"></div>
+  <div id="laneCmpBody"></div>
 </dialog>
 
 <div id="toast" class="toast" hidden></div>

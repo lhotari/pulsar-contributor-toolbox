@@ -150,7 +150,8 @@ export function pending(sid) {
             : bf ? `fails the build check (${bf.stage})` : 'needs a fix after the post-pick check'}`,
           text: [tries ? `${tries} resolve attempt(s) did not finish it.` : '', hints.length ? `Missing master commits that touched these files: ${hints.map((c) => `#${c.depends_on} (${c.decision})`).join(', ')}.` : '',
             left.length ? `Resolved without ${left.map((c) => `#${c.depends_on}`).join(', ')}, left out in review.` : '',
-            bf ? `Modules ${bf.modules.join(', ')}${bf.tests ? `, tests ${bf.tests}` : ''}; log ${bf.log}` : '',
+            bf?.stage?.startsWith('intent') ? `${bf.output}${p.detail.adaptations?.sha === p.picked_sha ? `\n\nThe resolver kept these differences: ${p.detail.adaptations.text}` : ''}\n\nCompare shows the hunks.`
+              : bf ? `Modules ${bf.modules.join(', ')}${bf.tests ? `, tests ${bf.tests}` : ''}; log ${bf.log}` : '',
             earlier.length ? `The failing lines come from earlier picks: ${earlier.map((x) => `#${x.pr} (${x.file.split('/').pop()}:${x.line})`).join(', ')}. Fix that pick, drop it, or backport what it is missing.` : ''].filter(Boolean).join(' '),
           options: [
             { id: 'resolve', label: tries ? 'Resolve with Claude again' : 'Resolve with Claude', recommended: true, input: tries ? 'Instructions for the worker (optional)' : null, optional: true, run: (text) => enqueue(sid, b, 'resolve', { pr: p.pr, instructions: text || undefined }) },
@@ -158,7 +159,9 @@ export function pending(sid) {
             { id: 'resolved', label: 'I resolved it in the worktree', run: () => lane.markResolved(sid, b, p.pr) },
             ...earlier.map((x) => ({ id: `drop:${x.pr}`, label: `Drop #${x.pr} (the failing lines come from it)`, cls: 'ghost', confirm: `Drop #${x.pr}? The lane is rebuilt without it from its commit.`,
               run: () => { settle(sid, b, `#${x.pr} dropped`); return lane.dropPick(sid, b, x.pr, `its code fails the build check of #${p.pr}`); } })),
-            bf ? { id: 'accept-build', label: 'Accept the failing check', input: 'Why it is not this pick (e.g. it fails on the branch too)', run: (text) => { if (!text) throw new Error('say why'); lane.acceptBuild(sid, b, p.pr, text); return {}; } } : null,
+            ...(bf?.rules || []).some((r) => r.level === 'fail' && !r.accepted) ? [{ id: 'accept-intent', label: 'Accept the adaptation', input: 'Why the difference from master is right for this branch (each failing rule)',
+              run: (text) => { if (!text) throw new Error('say why'); lane.acceptIntent(sid, b, p.pr, text); return {}; } }] : [],
+            bf && !bf.stage?.startsWith('intent') ? { id: 'accept-build', label: 'Accept the failing check', input: 'Why it is not this pick (e.g. it fails on the branch too)', run: (text) => { if (!text) throw new Error('say why'); lane.acceptBuild(sid, b, p.pr, text); return {}; } } : null,
             { id: 'skip', label: `Leave #${p.pr} out`, cls: 'ghost', run: () => { if (p.status === 'needs-fix') return lane.dropPick(sid, b, p.pr, 'left out: could not be fixed'); lane.skipPick(sid, b, p.pr, 'left out: conflict'); return {}; } },
           ] });
       }

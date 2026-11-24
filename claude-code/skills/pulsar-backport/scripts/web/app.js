@@ -38,7 +38,59 @@ const S = { sessions: [], sid: null, summary: null, plan: null, tab: 'plan', lan
   filter: { q: '', kind: 'all', show: 'actionable', verdict: 'any', decision: 'any', value: 'any', sort: 'order', branch: null }, open: new Set(), logJob: null, logOffset: 0 };
 try { S.sid = localStorage.getItem('bpt-session'); S.tab = localStorage.getItem('bpt-tab') || 'plan'; } catch { /* ignore */ }
 
+// ---------- feedback: a clicked button shows that it works until what it started is done ----------
+// A click marks the button busy at once (spinner, further clicks ignored). The requests its handler starts belong to
+// it; the button stays busy until they and the handler are done. Background jobs show in the header and the tab icon.
+const FG = { n: 0, btn: null };
+const ICON = {
+  idle: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.5" fill="#2f5bd3"/><path d="M5 8h6M8 5v6" stroke="#fff" stroke-width="1.8"/></svg>',
+  bg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.5" fill="#2f5bd3"/><circle cx="8" cy="8" r="3" fill="#fbf0d9"/></svg>',
+  fg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="#c9cfdb" stroke-width="2.5"/><path d="M8 2a6 6 0 0 1 6 6" fill="none" stroke="#2f5bd3" stroke-width="2.5" stroke-linecap="round"/></svg>',
+};
+let iconState = null;
+function updateIndicators() {
+  const jobs = (S.summary?.activeJobs || []);
+  const running = jobs.filter((j) => j.status === 'running').length; const queued = jobs.filter((j) => j.status === 'queued').length;
+  const waiting = jobs.filter((j) => j.status === 'waiting').length;
+  const bg = $('#bg');
+  if (bg) {
+    bg.hidden = !(running || queued || waiting);
+    bg.replaceChildren(...(running || queued ? [h('span', { class: 'spin' }), `${running} job(s) running${queued ? `, ${queued} queued` : ''}`] : []),
+      waiting ? h('span', { class: 'waiting' }, `${running || queued ? ' · ' : ''}${waiting} waiting for you`) : '');
+    bg.onclick = () => setTab('jobs');
+  }
+  const state = FG.n ? 'fg' : running || queued ? 'bg' : 'idle';
+  document.documentElement.classList.toggle('fgBusy', FG.n > 0);
+  if (state !== iconState) {
+    iconState = state;
+    const link = $('#favicon'); if (link) link.href = `data:image/svg+xml,${encodeURIComponent(ICON[state])}`;
+    document.title = `${state === 'fg' ? '⏳ ' : state === 'bg' ? '● ' : ''}Pulsar backports`;
+  }
+}
+function setBusy(btn, on) {
+  if (!btn) return;
+  btn.dataset.busy = on ? (Number(btn.dataset.busy || 0) + 1) : Math.max(0, Number(btn.dataset.busy || 0) - 1);
+  const busyNow = Number(btn.dataset.busy) > 0;
+  btn.classList.toggle('busy', busyNow); btn.setAttribute('aria-busy', busyNow ? 'true' : 'false');
+}
+/** Track a foreground promise: the button that started it stays busy, the tab icon turns into a loading icon. */
+function foreground(p, btn = FG.btn) {
+  FG.n++; setBusy(btn, true); updateIndicators();
+  return Promise.resolve(p).finally(() => { FG.n--; setBusy(btn, false); updateIndicators(); });
+}
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest?.('button, a[href="#"]'); if (!btn || btn.closest('#toast')) return;
+  if (Number(btn.dataset.busy || 0) > 0) { e.preventDefault(); e.stopImmediatePropagation(); return; }   // no double clicks
+  // Busy from the click on; released after the handlers ran, unless a request they started is still going.
+  FG.btn = btn; setBusy(btn, true);
+  setTimeout(() => { if (FG.btn === btn) FG.btn = null; setBusy(btn, false); }, 0);
+}, true);
+
 async function api(path, body) {
+  if (FG.btn) return foreground(apiCall(path, body), FG.btn);
+  return apiCall(path, body);
+}
+async function apiCall(path, body) {
   const r = await fetch(`/api/${path}`, { method: body ? 'POST' : 'GET', headers: { 'x-bpt-token': TOKEN || '', 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
   const j = await r.json().catch(() => ({ error: r.statusText }));
   if (!r.ok) throw new Error(j.error || r.statusText);
@@ -705,6 +757,7 @@ function renderPicks(branch) {
       h('td', { class: 'mono' }, short(p.picked_sha) || h('span', { class: 'muted' }, short(p.source_sha))), h('td', {}, h('div', { class: 'laneButtons' }, B)));
   });
   body.replaceChildren(h('div', { class: 'filters' }, h('span', { class: 'small muted' }, `Worktree ${d.worktree || '–'}`, d.worktree ? copyBtn(d.worktree, 'worktree path') : null, ` · local branch ${d.local_branch || '–'}`), h('span', { class: 'grow' }),
+    h('button', { class: 'primary', onclick: () => openLaneCompare(branch), title: 'Every committed pick next to its master commit, hunk by hunk, with the intent rules' }, 'Compare all with master'),
     h('button', { onclick: () => act('sync', branch) }, 'Sync with plan decisions')),
   h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, '#'), h('th', {}, 'PR'), h('th', {}, 'Status'), h('th', {}, 'Review'), h('th', {}, 'Commit'), h('th', {}, ''))), h('tbody', {}, rows)));
 }
@@ -717,22 +770,97 @@ function reviewOf(p) {
   const accepted = r.verdict === 'concern' && r.accepted;
   return { r, verdict: r.verdict, label: accepted ? 'concern accepted' : r.verdict, cls: accepted ? 'review-accepted' : `review-${r.verdict}` };
 }
-function diffPre(text) {
-  return h('pre', {}, String(text || '').split('\n').map((l) => h('span', { class: l.startsWith('@@') ? 'hunk' : l.startsWith('+') ? 'add' : l.startsWith('-') ? 'del' : '' }, l || ' ')));
+// ---------- hunk compare: each hunk of the pick next to master's; identical hunks hidden unless asked ----------
+const KIND = { identical: 'identical', context: 'same change, other context', logging: 'same change, logging adapted (slog → slf4j)', modified: 'changed in the backport', 'master-only': 'not in the backport', 'backport-only': 'only in the backport' };
+/** A hunk; in a changed one the lines far from a marked (differing) line fold into one clickable line. */
+function hunkPre(hk) {
+  const marks = new Set(hk.marks || []); const near = 3;
+  const keep = (i) => !marks.size || [...marks].some((m) => Math.abs(m - i) <= near);
+  const line = (l, i) => h('span', { class: `${l[0] === '+' ? 'add' : l[0] === '-' ? 'del' : ''}${marks.has(i) ? ' mark' : ''}`, title: marks.has(i) ? 'not on the other side' : null }, l || ' ');
+  const out = [h('span', { class: 'hunk' }, hk.header)];
+  for (let i = 0; i < hk.lines.length;) {
+    if (keep(i)) { out.push(line(hk.lines[i], i)); i++; continue; }
+    let j = i; while (j < hk.lines.length && !keep(j)) j++;
+    const hidden = hk.lines.slice(i, j).map((l, k) => line(l, i + k));
+    if (hidden.length < 3) out.push(...hidden);
+    else { const fold = h('span', { class: 'fold', title: 'Show these lines', onclick: () => fold.replaceWith(...hidden) }, `⋯ ${hidden.length} lines the same on both sides`); out.push(fold); }
+    i = j;
+  }
+  return h('pre', {}, out);
 }
-const sameDiff = (f) => f.master && f.backport && f.master.diff.replace(/^@@.*$/gm, '') === f.backport.diff.replace(/^@@.*$/gm, '');
+const countsText = (c) => Object.entries(c || {}).filter(([, n]) => n).map(([k, n]) => `${n} ${KIND[k] || k}`).join(' · ') || 'no hunks';
+const failing = (c) => (c.rules || []).filter((r) => r.level === 'fail' && !r.accepted);
+const SAME = ['identical', 'context', 'logging'];
+const differs = (c) => (c.rules || []).length > 0 || Object.entries(c.counts || {}).some(([k, n]) => n && !SAME.includes(k));
+function rulesList(c) {
+  if (!c.rules?.length) return null;
+  return h('ul', { class: 'rules' }, c.rules.map((r) => h('li', { class: r.accepted ? 'accepted' : r.level }, `${r.level === 'fail' ? 'fails' : 'check'} · ${r.rule}: `, r.message)));
+}
+/** The files of one compared pick, with the rows that are shown. */
+function hunkFiles(c, branch) {
+  return c.files.filter((f) => f.rows.length).map((f) => h('div', { class: `cmpFile ${!f.status.backport ? 'onlyMaster' : !f.status.master ? 'onlyBackport' : ''}` },
+    h('div', { class: 'cmpHead' },
+      c.onGitHub ? ghFileLink(`https://github.com/apache/pulsar/commit/${c.backportSha}`, f.path, f.path, `This file in the backport commit on GitHub (pushed with the ${branch} test branch)`)
+        : ghFileLink(`https://github.com/apache/pulsar/pull/${c.pr}/files`, f.path, f.path, 'This file\'s diff in the PR on GitHub (the backport commit is not pushed yet)'),
+      c.onGitHub ? ghFileLink(`https://github.com/apache/pulsar/pull/${c.pr}/files`, f.path, 'PR', 'This file\'s diff in the PR on GitHub', 'small') : null,
+      c.masterSha ? ghFileLink(`https://github.com/apache/pulsar/commit/${c.masterSha}`, f.path, 'master', 'This file in the master commit on GitHub', 'small') : null,
+      h('span', { class: 'muted' }, f.kind), h('span', { class: 'grow' }), h('span', { class: 'muted' }, countsText(f.counts))),
+    f.rows.map((r) => h('div', { class: `cmpRow ${r.kind}` }, h('div', { class: 'cmpKind' }, KIND[r.kind], r.similarity != null ? ` (${Math.round(r.similarity * 100)}% of the changed lines shared)` : ''),
+      h('div', { class: 'cmpCols' },
+        h('div', { class: 'cmpCol' }, h('div', { class: 'cmpLabel' }, 'master'), r.master ? hunkPre(r.master) : h('div', { class: 'cmpNone' }, 'no such hunk')),
+        h('div', { class: 'cmpCol' }, h('div', { class: 'cmpLabel' }, `backport (${branch})`), r.backport ? hunkPre(r.backport) : h('div', { class: 'cmpNone' }, 'no such hunk')))))));
+}
+/** A link to one file of a GitHub diff page (its anchor is #diff-<sha256 of the path>). */
+const anchorCache = new Map();
+function ghFileLink(base, file, text, title, cls = '') {
+  const a = h('a', { href: base, target: '_blank', rel: 'noopener', title, class: `ghFile ${cls}` }, text);
+  const set = (hash) => { a.href = `${base}#diff-${hash}`; };
+  if (anchorCache.has(file)) set(anchorCache.get(file));
+  else crypto.subtle?.digest('SHA-256', new TextEncoder().encode(file)).then((d) => {
+    const hash = [...new Uint8Array(d)].map((x) => x.toString(16).padStart(2, '0')).join(''); anchorCache.set(file, hash); set(hash);
+  }).catch(() => {});
+  return a;
+}
+// ---------- explain: a read-only Claude worker writes up why a pick is backported the way it is ----------
+const explainJob = (branch, pr) => (S.summary?.activeJobs || []).find((j) => j.type === 'explain' && j.args?.branch === branch && j.args?.pr === pr);
+/** The Explain button (or the running job) and the explanation, for one compared pick. */
+function explainBlock(branch, c) {
+  const job = explainJob(branch, c.pr); const e = c.explanation;
+  if (job) (S.explaining ||= new Set()).add(`${branch}:${c.pr}`);   // reload the view when it is done
+  const stale = e && e.sha !== c.backportSha;
+  const btn = job ? h('span', { class: 'small' }, h('span', { class: 'spin' }), `explaining (job ${job.id}, ${job.status}) `, h('a', { href: '#', onclick: (ev) => { ev.preventDefault(); openLog(job.id); } }, 'log'))
+    : h('button', { title: 'A Claude worker reads the hunks, the resolve history, the branch code and the PR, and explains in detail why the pick is backported this way (read only)',
+      onclick: async () => {
+        await act('explain', branch, { pr: c.pr });
+        (S.explaining ||= new Set()).add(`${branch}:${c.pr}`);
+        if ($('#laneCmpDialog').open) renderLaneCompare(); if ($('#cmpDialog').open) renderCompare();   // the job's spinner
+      } }, e ? 'Explain again' : 'Explain');
+  const body = e ? h('details', { class: 'explanation', open: !stale },
+    h('summary', {}, h('b', {}, 'Why it is backported this way'), h('span', { class: 'muted small' }, ` ${when(e.at)}${e.job ? ` · job ${e.job}` : ''}${stale ? ' · written for an earlier commit of the pick' : ''}`)),
+    h('div', { class: 'report', html: mdToHtml(e.text) })) : null;
+  return { btn, body };
+}
+
+async function acceptIntent(branch, c, after) {
+  const t = prompt(`Accept the differences from master in #${c.pr} on ${branch}?\n\n${failing(c).map((r) => `- ${r.rule}: ${r.message}`).join('\n')}\n\nWhy each one is right for this branch:`, '');
+  if (!t) return;
+  await act('accept-intent', branch, { pr: c.pr, reason: t }); after?.();
+}
+
 async function openCompare(branch, pr) {
   S.cmp = { branch, pr }; $('#cmpTitle').textContent = `#${pr} on ${branch}`; $('#cmpMeta').textContent = 'Loading…';
   $('#cmpReview').replaceChildren(); $('#cmpBody').replaceChildren(); $('#cmpDialog').showModal();
-  try { S.cmp.d = await api(`sessions/${S.sid}/lanes/${encodeURIComponent(branch)}/picks/${pr}/diff`); renderCompare(); }
-  catch (e) { $('#cmpMeta').textContent = e.message; }
+  try { await loadCompare(); } catch (e) { $('#cmpMeta').textContent = e.message; }
+}
+async function loadCompare() {
+  const { branch, pr } = S.cmp; const base = `sessions/${S.sid}/lanes/${encodeURIComponent(branch)}/picks/${pr}`;
+  [S.cmp.d, S.cmp.c] = await Promise.all([api(`${base}/diff`), api(`${base}/compare${$('#cmpSame').checked ? '?identical=1' : ''}`)]);
+  renderCompare();
 }
 function renderCompare() {
-  const d = S.cmp?.d; if (!d) return;
-  const showSame = $('#cmpSame').checked;
+  const d = S.cmp?.d; const cc = S.cmp?.c; if (!d || !cc) return;
   $('#cmpTitle').replaceChildren(prLink(d.pr), ' ', strip(d.title || ''), h('span', { class: 'muted small' }, ` on ${d.branch}`));
-  const onlyM = d.files.filter((f) => !f.backport).length; const onlyB = d.files.filter((f) => !f.master).length; const same = d.files.filter(sameDiff).length;
-  $('#cmpMeta').replaceChildren(`master ${short(d.masterSha)} · backport ${short(d.backportSha) || '–'} · ${d.files.length} file(s): ${same} identical, ${onlyM} not in the backport, ${onlyB} only in the backport${d.truncated ? ' · diff truncated' : ''}`);
+  $('#cmpMeta').replaceChildren(`master ${short(d.masterSha)} · backport ${short(d.backportSha) || '–'} · ${d.files.length} file(s) · hunks: ${countsText(cc.counts)}${d.truncated ? ' · diff truncated' : ''}`);
   const c = d.context || {};
   const ctx = [c.note && `Plan note: ${c.note}`, c.adapt && `Adaptation: ${c.adapt}`, c.leftOutInReview?.length && `Left out in review: ${c.leftOutInReview.map((x) => `#${x.pr}`).join(', ')}`,
     c.warnings?.length && `Warnings: ${c.warnings.join('; ')}`, c.buildCheck && `Build check: ${c.buildCheck.ok ? 'passed' : c.buildCheck.accepted ? `accepted (${c.buildCheck.accepted})` : `failed (${c.buildCheck.stage})`}${c.buildCheck.tests ? `, tests ${c.buildCheck.tests}` : ''}`,
@@ -748,21 +876,60 @@ function renderCompare() {
     d.analysis ? h('div', {}, h('b', {}, 'Compatibility: '), d.analysis.compat === 'none' ? 'no user-visible change'
       : h('span', { class: d.analysis.compat === 'breaking' ? 'bad' : '' }, `${d.analysis.compat === 'breaking' ? 'potential breaking change' : 'behavior change'}: `, ...linkPrs(d.analysis.compat_note || ''))) : null,
     ...ctx.map((x) => h('div', { class: 'small muted' }, linkPrs(x))),
+    cc.rules.length ? h('div', {}, h('b', {}, 'Intent rules'), rulesList(cc)) : null,
+    cc.adaptations ? h('div', { class: 'small' }, h('b', {}, 'Kept differences (resolver): '), prose(cc.adaptations.text)) : null,
+    cc.intentAccepted ? h('div', { class: 'small' }, h('b', {}, 'Adaptation accepted: '), cc.intentAccepted.reason) : null,
+    explainBlock(b, cc).body,
     h('div', { class: 'actions' },
+      failing(cc).length ? h('button', { onclick: () => acceptIntent(b, cc, () => $('#cmpDialog').close()) }, 'Accept the adaptation') : null,
+      explainBlock(b, cc).btn,
       r?.verdict === 'concern' && !r.accepted ? h('button', { class: 'primary', onclick: async () => { const t = prompt('Instructions for the worker (optional):', ''); if (t === null) return; await act('fix-review', b, { pr, instructions: t || undefined }); $('#cmpDialog').close(); } }, 'Fix it with Claude') : null,
       r?.verdict === 'concern' && !r.accepted ? h('button', { onclick: async () => { const t = prompt('Why is the backport right as it is?', ''); if (!t) return; await act('accept-review', b, { pr, reason: t }); $('#cmpDialog').close(); } }, 'Accept as is') : null,
       r ? h('button', { class: 'ghost', onclick: async () => { await act('review-again', b, { pr }); $('#cmpDialog').close(); } }, 'Review again') : null));
   $('#cmpReview').replaceChildren(reviewBox);
-  const files = d.files.filter((f) => showSame || !sameDiff(f));
-  $('#cmpBody').replaceChildren(...(files.length ? files.map((f) => {
-    const col = (side, label) => h('div', { class: 'cmpCol' }, h('div', { class: 'cmpLabel' }, side ? `${label} · ${side.status} +${side.added} −${side.removed}` : label),
-      side ? diffPre(side.diff) : h('div', { class: 'cmpNone' }, label === 'master' ? 'not changed by the master commit' : 'not in the backport'));
-    return h('div', { class: `cmpFile ${!f.backport ? 'onlyMaster' : !f.master ? 'onlyBackport' : ''}` },
-      h('div', { class: 'cmpHead' }, h('span', {}, f.path), h('span', { class: 'grow' }), h('span', { class: 'muted' }, !f.backport ? 'not in the backport' : !f.master ? 'only in the backport' : sameDiff(f) ? 'identical' : 'differs')),
-      h('div', { class: 'cmpCols' }, col(f.master, 'master'), col(f.backport, `backport (${b})`)));
-  }) : [h('p', { class: 'muted' }, 'Every file is identical in both; tick "show identical files" to see them.')]));
+  const files = hunkFiles(cc, b);
+  $('#cmpBody').replaceChildren(...(files.length ? files : [h('p', { class: 'muted' }, 'Every hunk is the same change as master\'s; tick "show unchanged hunks" to see them.')]));
 }
-$('#cmpSame').onchange = renderCompare;
+$('#cmpSame').onchange = () => loadCompare().catch((e) => toast(e.message, true));
+
+// ---------- the whole lane in one view ----------
+async function openLaneCompare(branch) {
+  S.laneCmp = { branch }; $('#laneCmpTitle').textContent = `All picks on ${branch} compared with master`; $('#laneCmpMeta').textContent = 'Loading…';
+  $('#laneCmpBody').replaceChildren(); $('#laneCmpDialog').showModal();
+  await loadLaneCompare();
+}
+async function loadLaneCompare() {
+  const { branch } = S.laneCmp;
+  try { S.laneCmp.d = await api(`sessions/${S.sid}/lanes/${encodeURIComponent(branch)}/compare${$('#laneCmpSame').checked ? '?identical=1' : ''}`); renderLaneCompare(); }
+  catch (e) { $('#laneCmpMeta').textContent = e.message; }
+}
+function renderLaneCompare() {
+  const d = S.laneCmp?.d; if (!d) return; const b = d.branch;
+  const all = d.picks; const fails = all.filter((c) => failing(c).length); const diff = all.filter(differs);
+  const shown = all.filter((c) => (!$('#laneCmpDiffer').checked || differs(c) || c.error) && (!$('#laneCmpRules').checked || (c.rules || []).length));
+  $('#laneCmpMeta').replaceChildren(`${all.length} committed pick(s): ${all.length - diff.length} the same change as master, ${diff.length} differ, ${fails.length} fail an intent rule · ${shown.length} shown`);
+  $('#laneCmpBody').replaceChildren(...shown.map((c) => {
+    const rv = c.review && c.review.sha === c.backportSha ? c.review : null;
+    const files = c.error ? [] : hunkFiles(c, b);
+    return h('section', { class: 'cmpPick', id: `lc-${c.pr}` },
+      h('div', { class: 'cmpPickHead' }, h('h3', {}, prLink(c.pr), ' ', strip(c.title || '')), chip(c.status, c.status),
+        rv ? chip(rv.verdict === 'concern' && rv.accepted ? 'concern accepted' : rv.verdict, `review-${rv.verdict === 'concern' && rv.accepted ? 'accepted' : rv.verdict}`) : h('span', { class: 'muted small' }, 'not reviewed'),
+        failing(c).length ? chip(`${failing(c).length} failing rule(s)`, 'conflict') : null,
+        h('span', { class: 'muted small' }, c.error || countsText(c.counts)), h('span', { class: 'grow' }),
+        failing(c).length ? h('button', { onclick: () => acceptIntent(b, c, loadLaneCompare) }, 'Accept the adaptation') : null,
+        explainBlock(b, c).btn,
+        h('button', { class: 'ghost', onclick: () => openCompare(b, c.pr) }, 'Review and both diffs')),
+      rulesList(c),
+      explainBlock(b, c).body,
+      c.adaptations ? h('div', { class: 'small' }, h('b', {}, 'Kept differences (resolver): '), prose(c.adaptations.text)) : null,
+      c.intentAccepted ? h('div', { class: 'small muted' }, `Adaptation accepted: ${c.intentAccepted.reason}`) : null,
+      ...(files.length ? files : [h('p', { class: 'muted small' }, 'Every hunk is the same change as master\'s.')]));
+  }));
+}
+$('#laneCmpSame').onchange = () => loadLaneCompare();
+$('#laneCmpDiffer').onchange = renderLaneCompare;
+$('#laneCmpRules').onchange = renderLaneCompare;
+$('#laneCmpClose').onclick = () => { $('#laneCmpDialog').close(); S.laneCmp = null; };
 $('#cmpClose').onclick = () => { $('#cmpDialog').close(); S.cmp = null; };
 
 // ---------- activity and jobs ----------
@@ -804,7 +971,10 @@ $('#replyForm').addEventListener('submit', async (e) => {
 // ---------- refresh loop ----------
 let busy = false;
 async function refresh(force = false) {
-  if (!S.sid || busy) return; busy = true;
+  if (!S.sid || busy) return;
+  // The periodic refresh does not re-render under a running click (the busy button would be replaced).
+  if (!force && FG.n) return;
+  busy = true;
   try {
     S.summary = await api(`sessions/${S.sid}`);
     $('#conn').textContent = `updated ${new Date().toLocaleTimeString()}`;
@@ -814,8 +984,19 @@ async function refresh(force = false) {
     if (S.tab === 'jobs' || S.logJob) S.jobs = await api(`sessions/${S.sid}/jobs`);
     const typing = document.activeElement && ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName) && $('#tabBody').contains(document.activeElement);
     if (!typing) renderSession();
+    // An explain job finished: show its write-up in the compare view that is open.
+    if (S.explaining?.size) {
+      for (const k of [...S.explaining]) {
+        const [b, pr] = [k.slice(0, k.lastIndexOf(':')), Number(k.slice(k.lastIndexOf(':') + 1))];
+        if (explainJob(b, pr)) continue;
+        S.explaining.delete(k);
+        if (S.laneCmp?.branch === b && $('#laneCmpDialog').open) loadLaneCompare();
+        if (S.cmp?.branch === b && S.cmp?.pr === pr && $('#cmpDialog').open) loadCompare().catch(() => {});
+        toast(`The explain job for #${pr} on ${b} finished`);
+      }
+    }
   } catch (e) { $('#conn').textContent = e.message; }
-  finally { busy = false; }
+  finally { busy = false; updateIndicators(); }
 }
 (async () => {
   if (!TOKEN) { document.body.replaceChildren(h('main', {}, h('div', { class: 'empty' }, h('h1', {}, 'Open the link printed by bpt serve'), h('p', { class: 'muted' }, 'It carries the access token after #.')))); return; }

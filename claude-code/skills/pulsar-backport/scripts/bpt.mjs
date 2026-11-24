@@ -47,12 +47,15 @@ const HELP = `bpt — apache/pulsar backport sessions (state: ${db.DB_PATH})
   pick diff <id> <branch> <pr> [--json]    the master commit and the backport, file by file, with the review context
   pick review <id> <branch> <pr> --verdict ok|adapted|concern --summary T [--concerns T]   record a diff review
   pick accept-review <id> <branch> <pr> --reason T   accept a review concern
+  pick explain <id> <branch> <pr> (--queue | --file F | --text T)   queue an explain job (read-only Claude worker), or record its Markdown write-up
   pick analysis <id> <branch> <pr> --fixes T --relevance T --reason bug|security|divergence|dependency|test|build|other --compat none|behavior|breaking [--compat-note T]
   lane build <id> <branch> <pr>   run the build check (changed modules compile, changed tests, checkstyle) for a committed pick
   lane absorb <id> <branch>       squash fixup! commits into the picks they fix and update the pick shas
   lane resync <id> <branch>       point every pick at its commit again after the lane history was rewritten outside the engine
   lane accept-build <id> <branch> <pr> --reason T   accept a failing build check that is not the pick's fault
-  lane resolved <id> <branch> <pr> [--tests A#m1+m2,B] [--result T]   after resolving; the tests that validated it
+  lane resolved <id> <branch> <pr> [--tests A#m1+m2,B] [--result T] [--adaptations T]   after resolving; the tests that validated it, and why it still differs from master where the intent rules check it
+  lane accept-intent <id> <branch> <pr> --reason T   (the user's decision) accept the differences from master that fail the intent rules
+  pick compare <id> <branch> <pr> [--identical] [--json]   the pick's hunks next to master's: identical, context, modified, master-only, backport-only, and the intent rules
   lane unblock <id> <branch> <pr>  |  lane skip|drop <id> <branch> <pr> --reason T   (drop: also a committed pick; the lane is rebuilt)
   lane add-dep <id> <branch> <pr> <dep> [--detail T]   backport <dep> before <pr>, in master order (rebuilds the lane if needed)
   lane out-of-order <id> <branch> <pr> --reason T      let a late pick go on top instead of in master order
@@ -170,7 +173,7 @@ function runEngineJob(id) {
 function sessionChangedBy(cmd, sub, pos, opt) {
   const readOnly = {
     session: ['list', 'create', 'show', 'reopen', 'next', 'archive', 'unarchive', 'delete'], plan: ['show', 'report', 'comments', ...(opt.apply ? [] : ['labels'])],
-    lane: ['show'], pick: ['diff'], report: true, decisions: pos[0] === undefined, job: true,
+    lane: ['show'], pick: ['diff', 'compare', 'explain'], report: true, decisions: pos[0] === undefined, job: true,
   }[cmd];
   if (readOnly === true || (Array.isArray(readOnly) && readOnly.includes(sub))) return null;
   if (['session', 'plan', 'dep', 'lane', 'pick', 'ci'].includes(cmd)) return pos[0] || null;
@@ -289,9 +292,15 @@ async function main() {
       const [sid, branch, pr] = [need(pos[0], 'session id'), need(pos[1], 'branch'), Number(need(pos[2], 'pr'))];
       switch (sub) {
         case 'diff': { const d = review.pickDiffs(sid, branch, pr); if (opt.json) return out(d); console.log(review.diffText(d)); return; }
+        case 'compare': { const c = review.comparePickHunks(sid, branch, pr, { identical: !!opt.identical }); if (opt.json) return out(c); console.log(review.compareText(c)); return; }
         case 'review': return out(review.record(sid, branch, pr, { verdict: need(opt.verdict, '--verdict'), summary: typeof opt.summary === 'string' ? opt.summary : null,
           concerns: typeof opt.concerns === 'string' ? opt.concerns : null, job: process.env.BPT_JOB ? Number(process.env.BPT_JOB) : null }));
         case 'accept-review': review.accept(sid, branch, pr, need(opt.reason, '--reason')); return out('ok');
+        case 'explain': {
+          if (opt.queue) return out({ job: jobs.enqueue(sid, null, 'explain', { branch, pr }) });
+          const text = typeof opt.file === 'string' ? fs.readFileSync(opt.file, 'utf8') : typeof opt.text === 'string' ? opt.text : null;
+          return out(review.recordExplanation(sid, branch, pr, need(text, '--file or --text'), process.env.BPT_JOB ? Number(process.env.BPT_JOB) : null));
+        }
         case 'analysis': return out(review.recordAnalysis(sid, branch, pr, { fixes: typeof opt.fixes === 'string' ? opt.fixes : null,
           relevance: typeof opt.relevance === 'string' ? opt.relevance : null, reason: opt.reason, compat: opt.compat,
           compatNote: typeof opt['compat-note'] === 'string' ? opt['compat-note'] : null, job: process.env.BPT_JOB ? Number(process.env.BPT_JOB) : null }));
@@ -309,7 +318,9 @@ async function main() {
         case 'absorb': return out(lane.absorbFixups(sid, branch));
         case 'resync': return out(lane.resyncPicks(sid, branch));
         case 'accept-build': lane.acceptBuild(sid, branch, Number(need(arg, 'pr')), need(opt.reason, '--reason')); return out('ok');
-        case 'resolved': return out(lane.markResolved(sid, branch, Number(need(arg, 'pr')), { tests: typeof opt.tests === 'string' ? opt.tests : null, result: typeof opt.result === 'string' ? opt.result : null }));
+        case 'resolved': return out(lane.markResolved(sid, branch, Number(need(arg, 'pr')), { tests: typeof opt.tests === 'string' ? opt.tests : null, result: typeof opt.result === 'string' ? opt.result : null,
+          adaptations: typeof opt.adaptations === 'string' ? opt.adaptations : null }));
+        case 'accept-intent': lane.acceptIntent(sid, branch, Number(need(arg, 'pr')), need(opt.reason, '--reason')); return out('ok');
         case 'unblock': return out(lane.unblock(sid, branch, Number(need(arg, 'pr'))));
         case 'skip': lane.skipPick(sid, branch, Number(need(arg, 'pr')), need(opt.reason, '--reason')); return out('ok');
         case 'drop': return out(lane.dropPick(sid, branch, Number(need(arg, 'pr')), need(opt.reason, '--reason')));

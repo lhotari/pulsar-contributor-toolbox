@@ -7,6 +7,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import * as g from './git.mjs';
+import { show, splitDiff, pairFiles } from './review.mjs';
+import { comparePick, branchProbes } from './compare.mjs';
 
 const TOML = 'gradle/libs.versions.toml';
 
@@ -105,8 +107,21 @@ export function licenseVersions(dir, module) {
  * Check one pick at the worktree's HEAD. Returns {ok, checks: [...], problems: [...]}; a dependency that the
  * branch's Maven build does not declare at all is reported (`unmanaged`) but does not fail.
  */
-export function intentCheck({ repo, master, dir }) {
+export const ruleKey = (r) => `${r.rule}:${r.file || ''}`;
+
+export function intentCheck({ repo, master, dir, picked = null, accepted = [] }) {
   const checks = []; const problems = [];
+  // The hunk rules (lib/compare.mjs): the master change's main code and its tests are in the backport as master has them.
+  let rules = [];
+  if (picked) {
+    const m = show(repo, master); const b = show(dir, picked);
+    if (m.truncated || b.truncated) rules = [{ rule: 'too-large', level: 'warn', file: null, message: 'the diff is too large to compare hunk by hunk' }];
+    else rules = comparePick(pairFiles(splitDiff(m.text), splitDiff(b.text)), branchProbes(dir, picked)).rules;
+    // A failing rule the user accepted for this pick (the adaptation is right) does not fail it again.
+    const ok = new Set(accepted);
+    rules = rules.map((r) => (r.level === 'fail' && ok.has(ruleKey(r)) ? { ...r, accepted: true } : r));
+    for (const r of rules.filter((x) => x.level === 'fail' && !x.accepted)) problems.push(`${r.rule}: ${r.message}`);
+  }
   for (const u of upgradesIn(repo, master)) {
     const maven = mavenVersions(dir, u.module);
     const lic = licenseVersions(dir, u.module);
@@ -118,5 +133,5 @@ export function intentCheck({ repo, master, dir }) {
     for (const x of licBehind) problems.push(`${x.file} lists ${u.module} ${x.version}; it must name the ${u.to} jar`);
     checks.push(c);
   }
-  return { ok: !problems.length, checks, problems };
+  return { ok: !problems.length, checks, problems, rules };
 }

@@ -69,7 +69,7 @@ function sessionSummary(sid) {
 }
 
 /** Actions that do not change a session: allowed on a finished one (reports, their files and gists). */
-const READ_ONLY_ACTIONS = ['report', 'report-open', 'report-gist'];
+const READ_ONLY_ACTIONS = ['report', 'report-open', 'report-gist', 'explain'];
 const ACTIONS = {
   discover: (sid) => ({ job: jobs.enqueue(sid, null, 'discover') }),
   triage: (sid, b, a) => ({ job: jobs.enqueue(sid, null, 'triage', { instructions: a.instructions, all: !!a.all }) }),
@@ -111,6 +111,8 @@ const ACTIONS = {
   'report-open': (sid, b) => { const file = report.reportFile(sid, b); spawn('code', [file], { detached: true, stdio: 'ignore' }).on('error', () => {}).unref(); return { file }; },
   'report-gist': (sid, b) => report.createGist(sid, b),
   'accept-review': (sid, b, a) => { review.accept(sid, b, Number(a.pr), a.reason); return {}; },
+  explain: (sid, b, a) => ({ job: jobs.enqueue(sid, null, 'explain', { branch: b, pr: Number(a.pr), instructions: a.instructions || undefined }) }),
+  'accept-intent': (sid, b, a) => { lane.acceptIntent(sid, b, Number(a.pr), a.reason); return {}; },
   'fix-review': (sid, b, a) => { const p = lane.lanePicks(sid, b).find((x) => x.pr === Number(a.pr)); return { job: jobs.enqueue(sid, b, 'resolve', { pr: p.pr, concerns: p.detail.review?.concerns, instructions: a.instructions || undefined }) }; },
   'review-again': (sid, b, a) => { const p = lane.lanePicks(sid, b).find((x) => x.pr === Number(a.pr)); db.run('UPDATE picks SET detail = json_remove(detail, \'$.review\') WHERE session_id = ? AND branch = ? AND pr = ?', sid, b, p.pr); return {}; },
   verify: (sid, b, a) => { lane.setPhase(sid, b, 'verifying'); return { job: jobs.enqueue(sid, b, 'verify', { instructions: a.instructions }) }; },
@@ -186,6 +188,8 @@ export function serve({ port = null, open = false } = {}) {
         }
         if (what === 'jobs' && m === 'GET') return send(200, db.all('SELECT id, branch, type, runner, status, args, result, created_at, started_at, finished_at FROM jobs WHERE session_id = ? ORDER BY id DESC LIMIT 100', sid).map((j) => ({ ...j, args: db.J(j.args, {}), result: db.J(j.result) })));
         if (what === 'lanes' && parts[3] && parts[4] === 'picks' && parts[5] && parts[6] === 'diff' && m === 'GET') return send(200, review.pickDiffs(sid, parts[3], Number(parts[5])));
+        if (what === 'lanes' && parts[3] && parts[4] === 'picks' && parts[5] && parts[6] === 'compare' && m === 'GET') return send(200, review.comparePickHunks(sid, parts[3], Number(parts[5]), { identical: url.searchParams.get('identical') === '1' }));
+        if (what === 'lanes' && parts[3] && parts[4] === 'compare' && m === 'GET') return send(200, { branch: parts[3], picks: review.compareLane(sid, parts[3], { identical: url.searchParams.get('identical') === '1' }) });
         if (what === 'lanes' && parts[3] && parts[4] === 'report' && m === 'GET') return send(200, { markdown: report.laneReport(sid, parts[3]) });
         if (what === 'lanes' && parts[3] && m === 'GET') return send(200, { ...db.lane(sid, parts[3]), picks: lane.lanePicks(sid, parts[3]) });
         if (what === 'decision' && m === 'POST') {

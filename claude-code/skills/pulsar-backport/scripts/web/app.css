@@ -115,6 +115,17 @@ dialog.full { width: 98vw; max-width: 98vw; height: 94vh; max-height: 94vh; }
 .cmpFile .cmpNone { padding: 10px; color: var(--muted); font-style: italic; }
 .cmpFile.onlyMaster > .cmpHead { background: var(--warn-bg); }
 .cmpFile.onlyBackport > .cmpHead { background: var(--attn-bg); }
+.cmpFile pre span.fold { color: var(--muted); background: var(--soft); cursor: pointer; font-style: italic; }
+.cmpFile pre span.mark { box-shadow: inset 3px 0 0 var(--warn); font-weight: 600; }
+.cmpFile .cmpRow + .cmpRow { border-top: 1px dashed var(--line); }
+.cmpFile .cmpRow > .cmpKind { padding: 2px 10px; font-size: 11.5px; background: var(--soft); color: var(--muted); }
+.cmpFile .cmpRow.modified > .cmpKind, .cmpFile .cmpRow.master-only > .cmpKind { color: var(--bad); }
+.cmpFile .cmpRow.backport-only > .cmpKind { color: var(--attn); }
+.cmpPick { border-top: 2px solid var(--line); margin-top: 18px; padding-top: 8px; }
+.cmpPick > .cmpPickHead { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+.cmpPick > .cmpPickHead h3 { margin: 0; font-size: 15px; }
+.rules { margin: 6px 0; padding-left: 18px; font-size: 12.5px; }
+.rules li.fail { color: var(--bad); } .rules li.warn { color: var(--warn); } .rules li.accepted { color: var(--muted); text-decoration: line-through; }
 .chip.review-ok { background: var(--ok-bg); color: var(--ok); }
 .chip.review-adapted { background: var(--info-bg); color: var(--accent); }
 .chip.review-concern { background: var(--bad-bg); color: var(--bad); }
@@ -195,3 +206,16 @@ button.copy:hover { color: var(--accent); border-color: var(--line, var(--soft))
 /* A finished session is read-only: its action buttons are hidden (the server refuses changes anyway). */
 body.finished .laneButtons button, body.finished #needed button, body.finished #needed input, body.finished #needed select { display: none; }
 .finishedNote { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+
+/* Feedback for clicks and background work */
+@keyframes spin { to { transform: rotate(360deg); } }
+.spin, button.busy::before, a.busy::before { content: ''; display: inline-block; width: 10px; height: 10px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin .7s linear infinite; vertical-align: -1px; margin-right: 6px; }
+button.busy, a.busy { opacity: .75; cursor: progress; pointer-events: auto; }
+html.fgBusy, html.fgBusy * { cursor: progress !important; }
+.bg { display: inline-flex; align-items: center; gap: 2px; padding: 3px 9px; border-radius: 999px; background: var(--info-bg); color: var(--accent); cursor: pointer; }
+.bg[hidden] { display: none; }
+.bg .waiting { color: var(--attn); }
+.cmpHead a.ghFile { color: var(--accent); } .cmpHead a.ghFile.small { font-size: 11.5px; }
+.explanation { margin: 8px 0; border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; background: var(--panel); }
+.explanation > summary { cursor: pointer; }
+.explanation .report { border: 0; padding: 0 4px; max-width: none; }

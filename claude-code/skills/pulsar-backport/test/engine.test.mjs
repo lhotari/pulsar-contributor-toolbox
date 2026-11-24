@@ -557,6 +557,16 @@ test('diff review: picks are reviewed after picking, a concern holds the squash,
   review.record(sid, B, 115, { verdict: 'concern', summary: 'drops a hunk', concerns: 'line 3 is not fixed', job: j.id });
   jobs.finish(j.id, 'done', { summary: 'reviewed' });
   assert.deepEqual(review.unreviewed(sid, B), []);
+  // Explain: a read-only worker beside the lane's jobs (no branch), one per pick; its write-up is kept on the pick.
+  const e1 = jobs.enqueue(sid, null, 'explain', { branch: B, pr: 115 });
+  assert.equal(jobs.enqueue(sid, null, 'explain', { branch: B, pr: 115 }), e1, 'one per pick');
+  assert.notEqual(jobs.enqueue(sid, null, 'explain', { branch: B, pr: 114 }), e1);
+  assert.equal(jobs.activeJob(sid, B)?.type, undefined, 'the lane is not held up');
+  const ep = jobs.workerPrompt(jobs.job(e1));
+  assert.match(ep, /read only/); assert.match(ep, /pick compare review-session branch-4\.2 115 --identical/); assert.match(ep, /pick explain review-session branch-4\.2 115 --file/);
+  review.recordExplanation(sid, B, 115, '## Summary\nLine 3 differs because …', e1);
+  assert.match(review.comparePickHunks(sid, B, 115).explanation.text, /Line 3 differs/);
+  for (const x of db.all(`SELECT id FROM jobs WHERE session_id = ? AND type = 'explain'`, sid)) jobs.finish(x.id, 'done', {});
   // The concern is a decision, and it holds the squash.
   const dec = control.list(sid).find((x) => x.key === `review:${B}:115`);
   assert.deepEqual(dec.options.map((o) => o.id), ['fix', 'accept', 'drop']);

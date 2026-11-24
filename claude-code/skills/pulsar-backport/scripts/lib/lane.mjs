@@ -10,7 +10,7 @@ import * as g from './git.mjs';
 import * as gh from './gh.mjs';
 import * as jobs from './jobs.mjs';
 import { buildCheck } from './build.mjs';
-import { intentCheck } from './intent.mjs';
+import { intentCheck, ruleKey } from './intent.mjs';
 import { remote, remoteRef, depOnBranch, saveConfig, pullInDependencies, addPrs } from './plan.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -553,10 +553,11 @@ export function buildPick(sid, branch, p, { log = console.log } = {}) {
   const { dtest } = changedTests(sid, branch, p);
   // First what needs no build: the master change is in effect on the branch (e.g. a Gradle dependency upgrade
   // made in Maven too).
-  const intent = intentCheck({ repo: cfg.repo, master: p.detail.master || p.source_sha, dir: l.worktree });
+  const intent = intentCheck({ repo: cfg.repo, master: p.detail.master || p.source_sha, dir: l.worktree, picked: p.picked_sha, accepted: p.detail.intentAccepted?.keys || [] });
+  const rules = intent.rules.length ? { rules: intent.rules } : {};
   const r = !intent.ok
-    ? { ok: false, stage: 'intent: the master change is not fully applied', modules: [], tests: '', output: intent.problems.join('\n'), intent: intent.checks, at: db.now() }
-    : { ...buildCheck({ dir: l.worktree, files, dtest, cfg, name: `build-${sid}-${branch}-${p.pr}`, log }), ...(intent.checks.length ? { intent: intent.checks } : {}) };
+    ? { ok: false, stage: 'intent: the master change is not fully applied', modules: [], tests: '', output: intent.problems.join('\n'), intent: intent.checks, ...rules, at: db.now() }
+    : { ...buildCheck({ dir: l.worktree, files, dtest, cfg, name: `build-${sid}-${branch}-${p.pr}`, log }), ...(intent.checks.length ? { intent: intent.checks } : {}), ...rules };
   const build = { ...r, head: g.rev(l.worktree, 'HEAD') };
   const fresh = picks(sid, branch).find((x) => x.pr === p.pr);
   if (r.ok) {
@@ -570,8 +571,12 @@ export function buildPick(sid, branch, p, { log = console.log } = {}) {
   const others = build.suspects.filter((x) => x.pr && x.pr !== p.pr);
   setPick(sid, branch, p.pr, { status: 'needs-fix', detail: { ...fresh.detail, build } });
   db.updateLane(sid, branch, { phase: 'needs-attention' });
-  attention(sid, branch, `#${p.pr} applied, but the build check failed (${r.stage}) in ${r.modules.join(', ')}${others.length ? `; the failing lines come from ${others.map((x) => `#${x.pr}`).join(', ')}` : ''}`);
-  queueResolve(sid, branch, p.pr);
+  // A resolver that kept differences from master and explained them (lane resolved --adaptations) hands the intent
+  // failure to the user: accept the adaptation, have it fixed, or drop the pick. It is not queued again.
+  const explained = !intent.ok && fresh.detail.adaptations && fresh.detail.adaptations.sha === p.picked_sha;
+  attention(sid, branch, explained ? `#${p.pr} differs from master where the intent check requires it not to; the resolver explained why: decide`
+    : `#${p.pr} applied, but the build check failed (${r.stage})${r.modules.length ? ` in ${r.modules.join(', ')}` : ''}${others.length ? `; the failing lines come from ${others.map((x) => `#${x.pr}`).join(', ')}` : ''}`);
+  if (!explained) queueResolve(sid, branch, p.pr);
   return build;
 }
 
@@ -653,6 +658,21 @@ export function followSource(sid, branch, pr) {
   return note;
 }
 
+/**
+ * The user accepts the differences from master that fail the intent rules of a pick (the adaptation is right for
+ * the branch). The accepted rules (rule and file) do not fail it again; the build check runs again from Maven on.
+ */
+export function acceptIntent(sid, branch, pr, reason) {
+  if (!reason) throw new Error('say why the adaptation is right');
+  const p = picks(sid, branch).find((x) => x.pr === pr);
+  const fails = (p?.detail.build?.rules || []).filter((r) => r.level === 'fail' && !r.accepted);
+  if (!fails.length) throw new Error(`#${pr} has no failing intent rule`);
+  const keys = [...new Set([...(p.detail.intentAccepted?.keys || []), ...fails.map(ruleKey)])];
+  setPick(sid, branch, pr, { status: 'picked', detail: { ...p.detail, build: undefined, intentAccepted: { keys, reason, at: db.now(), rules: fails } } });
+  db.updateLane(sid, branch, { phase: 'picking', attention: null });
+  db.event(sid, `#${pr}: adaptation accepted (${fails.map((r) => r.rule).join(', ')}): ${reason}`, { branch, level: 'warn' });
+}
+
 /** The user accepts a failing build check for a pick (a failure that is not the pick's, e.g. it fails on the branch too). */
 export function acceptBuild(sid, branch, pr, reason) {
   const p = picks(sid, branch).find((x) => x.pr === pr);
@@ -722,7 +742,7 @@ export function pickAll(sid, branch, { log = console.log, max = 1000 } = {}) {
 }
 
 /** After a human or worker resolved a conflict (or fixed a needs-fix pick) and committed. */
-export function markResolved(sid, branch, pr, { tests = null, result = null } = {}) {
+export function markResolved(sid, branch, pr, { tests = null, result = null, adaptations = null } = {}) {
   const l = db.lane(sid, branch); const p = picks(sid, branch).find((x) => x.pr === pr);
   if (!p) throw new Error(`#${pr} is not a pick of ${branch}`);
   const st = g.state(l.worktree);
@@ -739,7 +759,10 @@ export function markResolved(sid, branch, pr, { tests = null, result = null } = 
   // What validated the resolution: the tests the resolver ran and their outcome (none for a hand resolution without them).
   const validation = tests ? { tests: String(tests).split(',').map((x) => x.trim()).filter(Boolean), result: result || 'not reported', at: db.now() } : null;
   // The engine's build check runs again for a resolved pick (the next pick-all does it before picking on).
-  const detail = { ...p.detail, check, resolvedAt: db.now(), validation, build: undefined };
+  const detail = { ...p.detail, check, resolvedAt: db.now(), validation, build: undefined,
+    // Why the pick still differs from master where the intent rules check it (each kept difference, and how the
+    // test was shown to still fail without the fix). The user decides on it if the intent check fails again.
+    adaptations: adaptations ? { text: String(adaptations), sha: own || st.head, at: db.now() } : p.detail.adaptations };
   setPick(sid, branch, pr, { status: 'picked', picked_sha: own || st.head, detail });
   db.updateLane(sid, branch, { head_sha: st.head, phase: 'picking', attention: null });
   const absorbed = laneCommits(sid, branch).some((c) => c.fixup) ? absorbFixups(sid, branch) : null;
@@ -1078,8 +1101,9 @@ export function pickOnTop(sid, branch, pr, { reason = null, log = console.log } 
   const sha = g.rev(l.worktree, 'HEAD');
   setPick(sid, branch, pr, { status: 'picked', picked_sha: sha, detail: { master: item.sha, onTop } });
   const p = picks(sid, branch).find((x) => x.pr === pr);
-  const intent = intentCheck({ repo: db.session(sid).config.repo, master: item.sha, dir: l.worktree });
-  const build = intent.ok ? compileCheck(sid, branch, l, sha, p, log) : { ok: false, stage: 'intent: the master change is not fully applied', output: intent.problems.join('\n'), at: db.now() };
+  const intent = intentCheck({ repo: db.session(sid).config.repo, master: item.sha, dir: l.worktree, picked: sha, accepted: p.detail.intentAccepted?.keys || [] });
+  const build = intent.ok ? { ...compileCheck(sid, branch, l, sha, p, log), ...(intent.rules.length ? { rules: intent.rules } : {}) }
+    : { ok: false, stage: 'intent: the master change is not fully applied', output: intent.problems.join('\n'), rules: intent.rules, at: db.now() };
   setPick(sid, branch, pr, { status: build.ok ? 'picked' : 'needs-fix', detail: { ...p.detail, build } });
   db.updateLane(sid, branch, { head_sha: sha });
   db.event(sid, `#${pr} backported on top of the pushed ${branch} as ${g.short(sha)}${build.ok ? `; build check passed (${build.modules?.join(', ') || build.skipped})${build.tests ? `, tests ${build.tests}` : ''}` : `; build check FAILED (${build.stage})`}. Not pushed yet: push the fix from the UI`, { branch, level: build.ok ? 'info' : 'attention' });
