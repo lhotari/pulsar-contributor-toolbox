@@ -33,6 +33,8 @@ export function parseBranches(spec) {
  * instructions: free text the user gives every Claude worker of the session (and the triage brief).
  */
 export const SCOPES = ['both', 'range', 'labelled', 'list'];
+/** A master PR with this label is never backported by a plan (pre-filtered out, not pulled in by its release label). */
+export const SKIP_LABEL = 'skip-cherry-pick';
 /** The id to propose for a new session: "YYYY-mm-dd-backports", then "-2", "-3", ... for more sessions that day. */
 export function proposeSessionId(d = new Date()) {
   const p = (n) => String(n).padStart(2, '0');
@@ -427,14 +429,15 @@ export function pullInLabelled(sid, inRange, { log = () => {} } = {}) {
   const lanes = db.all('SELECT branch, release FROM lanes WHERE session_id = ? AND release IS NOT NULL', sid);
   const lanesOf = (pr) => lanes.filter((l) => want.get(pr).includes(`release/${l.release}`));
   const fresh = [...want.keys()].filter((pr) => lanesOf(pr).length && !db.get('SELECT 1 FROM items WHERE session_id = ? AND pr = ?', sid, pr));
+  // Labelled skip-cherry-pick: not imported either.
   if (fresh.length) {
     const r0 = remote(cfg); const masterRef = `${r0}/${cfg.source}`; const on = {};
     const onB = (b) => (on[b] ||= g.pickedOnBranch(cfg.repo, `${r0}/${b}`, masterRef));
-    const cands = fresh.filter((pr) => lanesOf(pr).every((l) => onB(l.branch).prs.has(pr)));
-    const meta = cands.length ? gh.prMeta(cands) : new Map();
-    for (const pr of cands) {
+    const meta = gh.prMeta(fresh);
+    for (const pr of fresh) {
       const labels = meta.get(pr)?.labels || [];
-      if (lanesOf(pr).every((l) => labels.includes(`cherry-picked/${l.branch}`))) want.delete(pr);
+      if (labels.includes(SKIP_LABEL)) { want.delete(pr); continue; }
+      if (lanesOf(pr).every((l) => onB(l.branch).prs.has(pr) && labels.includes(`cherry-picked/${l.branch}`))) want.delete(pr);
     }
   }
   const r = importPrs(sid, new Map([...want.keys()].map((pr) => [pr, []])), { log,
@@ -458,7 +461,7 @@ function dropBackportedLabelled(sid, { log = () => {} } = {}) {
     const labelledIn = db.J(it.stats, {}).labelledIn || []; const labels = db.J(it.labels, []);
     const mine = lanes.filter((l) => labelledIn.includes(`release/${l.release}`));
     if (!mine.length) continue;
-    const done = mine.every((l) => {
+    const done = labels.includes(SKIP_LABEL) || mine.every((l) => {
       const t = db.get('SELECT on_branch, equiv FROM targets WHERE session_id = ? AND pr = ? AND branch = ?', sid, it.pr, l.branch);
       if (!t?.on_branch) return false;
       const e = t.on_branch === 2 ? db.J(t.equiv) : null;
@@ -487,6 +490,8 @@ function upsertCommit(sid, ctx, c, order, m, round, extraStats = {}) {
   // Someone labelled it for one of the session's releases: it is evaluated whatever its title says.
   const labelled = releaseLabels.filter((x) => (m.labels || []).includes(x));
   if (labelled.length) cls.excluded = null;
+  // The PR says it is not to be cherry-picked: that wins over a release label (a listed PR or the user's include still wins).
+  if ((m.labels || []).includes(SKIP_LABEL)) cls.excluded = `labelled ${SKIP_LABEL}`;
   const stats = g.commitFiles(repo, c.sha);
   db.run(`INSERT INTO items (session_id, pr, sha, master_order, title, merged_at, kind, excluded, labels, stats, round)
           VALUES (?,?,?,?,?,?,?,?,?,?,?)

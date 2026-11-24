@@ -858,3 +858,29 @@ test('labelled PRs from before the range that are on every branch they are label
     fs.rmSync(path.join(tmp, 'graphql.json'), { force: true }); fs.rmSync(path.join(tmp, 'labelled'), { recursive: true, force: true });
   }
 });
+
+test('PRs labelled skip-cherry-pick are left out, even with a release label', () => {
+  sh(repo, 'fetch', '-q', 'origin'); sh(repo, 'checkout', '-q', '--detach', 'origin/master');
+  const f = (n) => path.join(repo, 'mod/src/main/java', n);
+  fs.writeFileSync(f('Skip.java'), lines(40, 'skip')); commit('[fix][broker] Before the range, labelled for the release and skip (#150)');
+  edit2(repo, 'Skip.java', 10, 'since'); commit('[fix][broker] Since point (#152)');
+  edit2(repo, 'Skip.java', 20, 'in range'); commit('[fix][broker] In the range, skip-cherry-pick (#153)');
+  edit2(repo, 'Skip.java', 30, 'listed'); commit('[fix][broker] Listed although skip-cherry-pick (#154)');
+  sh(repo, 'push', '-q', 'origin', 'HEAD:refs/heads/master');
+  const labels = { 150: ['release/4.2.6', 'skip-cherry-pick'], 153: ['release/4.2.6', 'skip-cherry-pick'], 154: ['skip-cherry-pick'] };
+  fs.mkdirSync(path.join(tmp, 'labelled'), { recursive: true });
+  fs.writeFileSync(path.join(tmp, 'labelled', 'release_4.2.6.json'), JSON.stringify([150, 153].map((n) => ({ number: n, title: `#${n}`, baseRefName: 'master' }))));
+  fs.writeFileSync(path.join(tmp, 'graphql.json'), JSON.stringify({ data: { repository: Object.fromEntries(Object.entries(labels).map(([n, ls]) =>
+    [`p${n}`, { number: Number(n), body: '', mergedAt: null, author: null, labels: { nodes: ls.map((name) => ({ name })) } }])) } }));
+  try {
+    const sid = 'skip-label';
+    plan.createSession({ id: sid, repo, remote: 'origin', sincePr: 152, list: '154', branches: plan.parseBranches('branch-4.2:4.2.6') });
+    const r = plan.discover(sid, { log: () => {}, blame: false });
+    assert.ok(!r.labelledPulledIn.includes(150), 'not pulled in by its release label');
+    assert.equal(db.get('SELECT 1 x FROM items WHERE session_id = ? AND pr = 150', sid), undefined);
+    assert.equal(db.get('SELECT excluded FROM items WHERE session_id = ? AND pr = 153', sid).excluded, 'labelled skip-cherry-pick');
+    assert.equal(db.get('SELECT excluded FROM items WHERE session_id = ? AND pr = 154', sid).excluded, null, 'listed by the user: kept');
+  } finally {
+    fs.rmSync(path.join(tmp, 'graphql.json'), { force: true }); fs.rmSync(path.join(tmp, 'labelled'), { recursive: true, force: true });
+  }
+});
