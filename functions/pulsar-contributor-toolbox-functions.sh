@@ -1610,6 +1610,8 @@ function ptbx_cherry_pick_check() {
 # Usage: ptbx_cherry_pick_branch_5_0 [--apply] [--check-labels[=<commit>]] [upstream_remote]
 function ptbx_cherry_pick_branch_5_0() {
   (
+    # don't page the output of git and gh commands, it would stop after each command
+    export GIT_PAGER=cat GH_PAGER=cat
     local APPLY=0
     local CHECK_LABELS=0
     local CHECK_LABELS_SINCE=""
@@ -1869,6 +1871,8 @@ function _ptbx_cherry_pick_check_labels() {
 # Usage: ptbx_cherry_pick_add_missing_release_labels [--dry-run] [<x.y.z>] [upstream_remote]
 function ptbx_cherry_pick_add_missing_release_labels() {
   (
+    # don't page the output of git and gh commands, it would stop after each command
+    export GIT_PAGER=cat GH_PAGER=cat
     local USAGE="Usage: ptbx_cherry_pick_add_missing_release_labels [--dry-run] [<x.y.z>] [upstream_remote]"
     local APPLY=1
     if [[ "$1" == "--dry-run" ]]; then
