@@ -25,7 +25,8 @@ const HELP = `bpt — apache/pulsar backport sessions (state: ${db.DB_PATH})
   session create <id> --branches branch-4.2:4.2.6,branch-4.0:4.0.15<branch-4.2 (--since-pr N | --since-sha S) [--title T] [--repo DIR] [--remote NAME] [--scope both|range|labelled]
   session create <id> --after <previous-session> [--branches ...] [--title T] [--scope both|range|labelled]
   session create <id> --branches ... --list "27424 #27500 abcdef123" [--instructions T | --instructions-file F] [--title T]   (custom: only the listed master PRs/commits, decided backport)
-  session list-edit <id> [--add "PRs/commits"] [--remove "PRs/commits"]      (a custom session; run plan discover after adding)
+      --list also works with --since-pr/--since-sha/--after: the listed PRs come on top of the plan (decided backport; older ones pulled in)
+  session list-edit <id> [--add "PRs/commits"] [--remove "PRs/commits"]      (any session; run plan discover after adding)
   session instructions <id> (--text T | --file F | --clear)                   (free-text instructions every Claude worker of the session gets)
                                                     continue after the last master commit the previous session evaluated
                                                     (scope: both = PRs after it and PRs labelled release/<version>; range; labelled only)

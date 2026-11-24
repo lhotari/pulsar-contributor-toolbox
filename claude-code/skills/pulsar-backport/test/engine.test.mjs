@@ -736,7 +736,6 @@ test('a custom session backports only the listed PRs and commits, with instructi
   const sha101 = sh(repo, 'log', '--format=%H', '--fixed-strings', '--grep=(#101)', 'origin/master');
   assert.throws(() => plan.createSession({ id: 'custom-bad', repo, remote: 'origin', list: '#103 nope', branches: plan.parseBranches('branch-4.1:4.1.9') }), /not a PR number or commit/);
   assert.throws(() => plan.createSession({ id: 'custom-bad', repo, remote: 'origin', list: '#4242', branches: plan.parseBranches('branch-4.1:4.1.9') }), /#4242 is not a PR merged/);
-  assert.throws(() => plan.createSession({ id: 'custom-bad', repo, remote: 'origin', sincePr: 100, list: '#103', branches: plan.parseBranches('branch-4.1:4.1.9') }), /custom session/);
   const s = plan.createSession({ id: sid, repo, remote: 'origin', list: `https://github.com/apache/pulsar/pull/103, ${sha101.slice(0, 10)}`,
     instructions: 'Keep the branch API unchanged.', branches: plan.parseBranches('branch-4.1:4.1.9') });
   assert.equal(s.config.scope, 'list');
@@ -769,4 +768,31 @@ test('a custom session backports only the listed PRs and commits, with instructi
   assert.equal(db.get(`SELECT decision FROM targets WHERE session_id = ? AND pr = 101`, sid).decision, 'skip');
   assert.ok(!db.get(`SELECT 1 FROM items WHERE session_id = ? AND pr IN (102, 104)`, sid), 'unlisted PRs in the range stay out');
   assert.throws(() => plan.editList(sid, { remove: '103 105' }), /at least one/);
+});
+
+test('listed PRs on top of a session with a starting point', () => {
+  const sid = 'range-plus-list';
+  const s = plan.createSession({ id: sid, repo, remote: 'origin', sincePr: 102, scope: 'range', list: '#101 105', branches: plan.parseBranches('branch-4.1:4.1.10') });
+  assert.equal(s.config.scope, 'range', 'a starting point keeps the scope');
+  assert.equal(s.config.sinceSha, sh(repo, 'log', '--format=%H', '--fixed-strings', '--grep=(#102)', 'origin/master'));
+  plan.saveConfig(sid, { diffReview: false });
+  const r = plan.discover(sid, { log: () => {}, blame: false });
+  assert.deepEqual(r.listedPulledIn, [101], 'listed before the starting point: pulled in');
+  const dec = (pr) => db.get(`SELECT decision, decision_source FROM targets WHERE session_id = ? AND pr = ?`, sid, pr);
+  assert.equal(dec(101).decision, 'backport'); assert.equal(dec(105).decision, 'backport'); assert.equal(dec(105).decision_source, 'user');
+  assert.equal(dec(103).decision, 'undecided', 'the range is evaluated as usual');
+  assert.ok(db.get(`SELECT 1 FROM items WHERE session_id = ? AND pr = 104`, sid), 'unlisted PRs in the range stay in the plan');
+  assert.match(jobs.workerPrompt(jobs.job(jobs.enqueue(sid, 'branch-4.1', 'verify', {}))), /Besides the PRs the plan found, the user listed these master PRs to backport: #101, #105/);
+  db.run(`UPDATE jobs SET status = 'cancelled' WHERE session_id = ?`, sid);
+  // Removing: in the range it goes back to the recommendation; only-listed is skipped.
+  plan.editList(sid, { remove: '105 101' });
+  assert.equal(dec(105).decision_source, 'recommended');
+  assert.equal(dec(101).decision, 'skip');
+  plan.discover(sid, { log: () => {}, blame: false });
+  assert.equal(dec(105).decision_source, 'recommended', 'not listed again by the next discover');
+  // Adding later works the same way.
+  plan.editList(sid, { add: '105' });
+  plan.discover(sid, { log: () => {}, blame: false });
+  assert.equal(dec(105).decision, 'backport');
+  assert.equal(plan.discover(sid, { log: () => {}, blame: false }).listedNotFound.length, 0);
 });

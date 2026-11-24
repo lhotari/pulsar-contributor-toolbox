@@ -35,9 +35,9 @@
       <option value="labelled">only PRs labelled release/&lt;version&gt;</option>
       <option value="list">only the PRs and commits listed below (custom session)</option>
     </select></label>
-    <label id="newListLabel" hidden>Master PRs or commits to backport
+    <label><span id="newListLabel">Also backport these master PRs or commits (optional)</span>
       <textarea name="list" rows="3" placeholder="27424 #27500 https://github.com/apache/pulsar/pull/27501 4e1dd1895ec"></textarea></label>
-    <p class="muted small" id="newListNote" hidden>PR numbers, PR links or master commit hashes, separated by spaces, commas or lines. They are decided "backport" for every lane and picked in master order; dependencies are found as in any session.</p>
+    <p class="muted small" id="newListNote">PR numbers, PR links or master commit hashes, separated by spaces, commas or lines. They are decided "backport" for every lane and picked in master order (one merged before the starting point is pulled in); dependencies are found as in any session. With "only the PRs and commits listed", they are the whole plan and no starting point is needed.</p>
     <label>Instructions for the Claude workers (optional)
       <textarea name="instructions" rows="3" placeholder="e.g. Keep the public API of branch-4.0 unchanged; adapt the tests to the branch's test helpers rather than backporting new ones."></textarea></label>
     <menu><button value="cancel" class="ghost">Cancel</button><button value="ok" class="primary">Create and discover</button></menu>

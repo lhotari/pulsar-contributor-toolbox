@@ -138,7 +138,7 @@ $('#newSession').onclick = () => {
 /** A custom session ("list"): the listed PRs instead of a starting point. */
 function newScope() {
   const f = $('#newForm').elements; const list = f.scope.value === 'list';
-  $('#newListLabel').hidden = $('#newListNote').hidden = !list;
+  $('#newListLabel').textContent = list ? 'Master PRs or commits to backport' : 'Also backport these master PRs or commits (optional)';
   f.list.required = list;
   f.after.disabled = list; f.sincePr.disabled = f.sinceSha.disabled = list || !!f.after.value;
   if (list) f.after.value = '';
@@ -163,7 +163,8 @@ $('#newForm').addEventListener('submit', async (e) => {
   if (e.submitter?.value !== 'ok') return;
   const f = Object.fromEntries(new FormData(e.target));
   if (f.after) { delete f.sincePr; f.sinceSha = e.target.elements.sinceSha.value; }
-  if (f.scope === 'list') { delete f.after; delete f.sincePr; delete f.sinceSha; } else delete f.list;
+  if (f.scope === 'list') { delete f.after; delete f.sincePr; delete f.sinceSha; }
+  if (!f.list?.trim()) delete f.list;
   try { const r = await api('sessions', f); S.sid = r.id; try { localStorage.setItem('bpt-session', r.id); } catch {} await loadSessions(); await refresh(true); toast('Session created; discovery queued'); }
   catch (err) { toast(err.message, true); }
 });
@@ -365,12 +366,13 @@ function renderCustom(s) {
   const save = (what, args, msg) => api(`sessions/${S.sid}/${what}`, args).then((r) => { box.dataset.sig = ''; box.querySelectorAll('[data-dirty]').forEach((x) => delete x.dataset.dirty); toast(msg(r)); refresh(true); return r; }).catch((e) => toast(e.message, true));
   const dirty = (e) => { e.target.dataset.dirty = '1'; };
   const out = [];
-  if (cfg.scope === 'list') {
+  if (cfg.scope === 'list' || cfg.list?.length || !ro) {
     const input = h('input', { class: 'ask', placeholder: 'PRs or commits, e.g. 27424 4e1dd1895ec', oninput: dirty, disabled: ro });
-    out.push(h('div', { class: 'customList small' }, h('b', {}, 'Listed: '), ...(cfg.list || []).flatMap((x) => [prLink(x.pr), ' ']),
+    out.push(h('div', { class: 'customList small' }, h('b', {}, cfg.scope === 'list' ? 'Listed: ' : 'Also backport: '), ...(cfg.list || []).flatMap((x) => [prLink(x.pr), ' ']),
+      cfg.list?.length ? null : h('span', { class: 'muted' }, 'none '),
       ro ? null : h('span', { class: 'askBox' }, input,
         h('button', { class: 'ghost', onclick: () => input.value.trim() && save('list', { add: input.value }, (r) => (r.added.length ? `Added ${r.added.map((p) => `#${p}`).join(', ')}; discovery queued` : 'Already listed')) }, 'Add'),
-        h('button', { class: 'ghost', onclick: () => input.value.trim() && confirm(`Remove ${input.value.trim()} from the list? Its decisions become "skip".`) && save('list', { remove: input.value }, (r) => `Removed ${r.removed.map((p) => `#${p}`).join(', ') || 'nothing'}`) }, 'Remove'))));
+        h('button', { class: 'ghost', onclick: () => input.value.trim() && confirm(`Remove ${input.value.trim()} from the list? ${cfg.scope === 'list' ? 'Its decisions become "skip".' : 'In the range it goes back to its recommendation; one that was only here because it was listed becomes "skip".'}`) && save('list', { remove: input.value }, (r) => `Removed ${r.removed.map((p) => `#${p}`).join(', ') || 'nothing'}`) }, 'Remove'))));
   }
   const ta = h('textarea', { rows: 4, oninput: dirty, disabled: ro, placeholder: 'Free-text instructions every Claude worker of this session gets: triage, resolve, verify, CI fixes, reviews and explanations.' }, cfg.instructions || '');
   out.push(h('details', { class: 'instructions small', open: !cfg.instructions && cfg.scope === 'list' ? true : undefined },

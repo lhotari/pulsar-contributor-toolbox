@@ -132,7 +132,9 @@ Judge each pick on its own; keep it short and concrete. When every listed pick i
 /** The session's free-text instructions (a custom session's purpose, or how to backport), for every Claude worker. */
 function sessionInstructions(j) {
   let cfg = {}; try { cfg = db.session(j.session_id).config; } catch {}
-  const list = cfg.scope === 'list' && cfg.list?.length ? `This is a custom backport session: the user listed the master PRs to backport (${cfg.list.map((x) => `#${x.pr}`).join(', ')}).` : '';
+  const prs = (cfg.list || []).map((x) => `#${x.pr}`).join(', ');
+  const list = !prs ? '' : cfg.scope === 'list' ? `This is a custom backport session: the user listed the master PRs to backport (${prs}).`
+    : `Besides the PRs the plan found, the user listed these master PRs to backport: ${prs}.`;
   const t = cfg.instructions ? `The user's instructions for this session (they apply to every job; a job's own instructions below take precedence where they differ):\n${cfg.instructions}` : '';
   return list || t ? `\n\n${[list, t].filter(Boolean).join('\n')}` : '';
 }
