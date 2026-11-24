@@ -65,7 +65,16 @@ function sessionSummary(sid) {
     posted: db.get(`SELECT COUNT(*) n FROM items WHERE session_id = ? AND json_extract(comment_state, '$.status') = 'posted'`, sid).n };
   let needed = [];
   try { needed = control.list(sid); } catch (e) { needed = [{ key: 'error', kind: 'error', title: 'Could not compute the open decisions', text: e.message, options: [] }]; }
-  return { ...s, lanes, decisions, verdicts, openDeps, activeJobs, review, comments, needed, deleteBlockers: plan.deleteBlockers(sid) };
+  return { ...s, lanes, decisions, verdicts, openDeps, activeJobs, review, comments, needed, deleteBlockers: plan.deleteBlockers(sid), planStamp: planStamp(sid) };
+}
+
+/** Changes whenever the plan's rows do (a triage import, a discover, a decision from the CLI): the UI reloads the plan then. */
+function planStamp(sid) {
+  const h = crypto.createHash('sha1');
+  for (const r of db.all(`SELECT pr, sha, excluded, reviewed_at, comment, comment_state, round, length(stats) ls, length(assessment) la, assessment FROM items WHERE session_id = ? ORDER BY pr`, sid)) h.update(JSON.stringify(r));
+  for (const r of db.all(`SELECT pr, branch, on_branch, verdict, lean, decision, decision_source, decision_note, recommendation, length(dryrun) ld, equiv, note, adapt FROM targets WHERE session_id = ? ORDER BY pr, branch`, sid)) h.update(JSON.stringify(r));
+  for (const r of db.all('SELECT id, status FROM deps WHERE session_id = ? ORDER BY id', sid)) h.update(`${r.id}:${r.status};`);
+  return h.digest('hex').slice(0, 16);
 }
 
 /** Actions that do not change a session: allowed on a finished one (reports, their files and gists). */

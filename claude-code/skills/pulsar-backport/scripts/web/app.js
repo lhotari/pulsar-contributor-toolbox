@@ -1037,7 +1037,7 @@ async function refresh(force = false) {
   try {
     S.summary = await api(`sessions/${S.sid}`);
     $('#conn').textContent = `updated ${new Date().toLocaleTimeString()}`;
-    if (S.tab === 'plan' || S.tab === 'all' || S.tab.startsWith('picks:')) { if (!S.plan || force) { S.plan = await api(`sessions/${S.sid}/plan`); S.planIndex = null; } }
+    if (S.tab === 'plan' || S.tab === 'all' || S.tab.startsWith('picks:')) { if (!S.plan || force || S.planStamp !== S.summary.planStamp) { S.plan = await api(`sessions/${S.sid}/plan`); S.planIndex = null; S.planStamp = S.summary.planStamp; } }
     if (S.tab.startsWith('picks:')) { const b = S.tab.slice(6); S.lanePicks[b] = await api(`sessions/${S.sid}/lanes/${encodeURIComponent(b)}`); }
     if (S.tab === 'activity') S.events = await api(`sessions/${S.sid}/events`);
     if (S.tab === 'jobs' || S.logJob) S.jobs = await api(`sessions/${S.sid}/jobs`);
