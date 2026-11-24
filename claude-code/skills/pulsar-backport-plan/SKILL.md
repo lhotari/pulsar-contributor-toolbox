@@ -53,6 +53,16 @@ node "$BPT" plan discover <id>
   - `both` (default): the PRs merged after the starting point, plus the PRs labelled `release/<version>` merged before it.
   - `range`: only the PRs after the starting point.
   - `labelled`: only the PRs labelled for the session's releases, wherever they are on master.
+- **Custom session** (a hand-picked set; the dialog's Evaluate → "only the PRs and commits listed below"):
+
+  ```bash
+  node "$BPT" session create <id> --branches 'branch-4.2,branch-4.0<branch-4.2' --list "27424 #27500 https://github.com/apache/pulsar/pull/27501 4e1dd1895ec" \
+    [--instructions "free text" | --instructions-file F] [--title T]
+  node "$BPT" session list-edit <id> [--add "PRs/commits"] [--remove "PRs/commits"]   # then plan discover
+  ```
+
+  The list takes PR numbers, PR links or master commit hashes (a commit inside a merged PR resolves to that PR; anything that is not a PR merged to master is refused). The session has no starting point: discover evaluates only the listed PRs (scope `list`, starting right before the oldest one), never pre-filters them, and decides them "backport" for every lane where they are missing (a decision the user changes stays). Dependency hints, the equivalence checks and dry runs work as in any session; the PRs in the range that are not listed stay out. Removing a PR from the list skips it (refused once it is cherry-picked; drop the pick instead). Triage is optional: it only adds the assessment.
+- **Instructions for the workers** (any session; free text, set in the New session dialog, the session header's "Instructions for the workers", or `session instructions <id> --text T | --file F | --clear`): every Claude worker of the session gets them (triage batches and import, resolve, verify, fix-ci, review, explain), after its task and before a job's own instructions, which take precedence. A custom session's workers are also told which PRs the user listed.
 - `branch:release` per target; `<branch-4.2` makes the 4.0 lane reuse the tested 4.2 cherry-picks. Order matters: lanes run in the listed order.
 - **Already on a branch via a branch-specific PR** (e.g. `[improve][meta][branch-4.2] Upgrade Oxia Java client to 0.10.4 (#27227)` for master #27226) is detected and shown as "on branch (equivalent)": identical patch-id, the branch commit or its PR description referencing the master PR or commit, the same normalized title, a newer upgrade of the same dependency on the branch, or a `cherry-picked/<branch>` label on the master PR. The user can reject a match ("Not the same", or `plan equiv <id> <pr> <branch>`); later discovers keep that.
 - `discover` lists first-parent master commits after the since-commit, marks what is already on each branch (PR number in the subject or `cherry picked from` trailer), fetches labels and PR descriptions, applies the **pre-filter**, dry-runs each in-scope PR on each branch with `git merge-tree`, and records **blame dependency hints**: in-range master commits that last changed the lines a PR modifies, missing from the branch.

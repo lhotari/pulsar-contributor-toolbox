@@ -130,10 +130,20 @@ $('#newSession').onclick = () => {
   const sel = $('#newAfter');
   sel.replaceChildren(h('option', { value: '' }, '— none: give the starting point —'),
     ...S.sessions.filter((s) => !s.archived || s.id === S.sid).map((s) => h('option', { value: s.id }, `${s.title} (${s.id})`)));
-  const els = $('#newForm').elements; els.sincePr.disabled = els.sinceSha.disabled = false;
+  const els = $('#newForm').elements; els.sincePr.disabled = els.sinceSha.disabled = false; els.after.disabled = false;
+  els.scope.value = 'both'; newScope();
   $('#newAfterNote').textContent = 'Starts after the last master commit the chosen session evaluated, with its branches (a release that is already tagged moves to the next patch version).';
   $('#newDialog').showModal();
 };
+/** A custom session ("list"): the listed PRs instead of a starting point. */
+function newScope() {
+  const f = $('#newForm').elements; const list = f.scope.value === 'list';
+  $('#newListLabel').hidden = $('#newListNote').hidden = !list;
+  f.list.required = list;
+  f.after.disabled = list; f.sincePr.disabled = f.sinceSha.disabled = list || !!f.after.value;
+  if (list) f.after.value = '';
+}
+$('#newForm').elements.scope.onchange = newScope;
 $('#newAfter').onchange = async (e) => {
   const f = $('#newForm').elements; const prev = e.target.value;
   f.sincePr.disabled = f.sinceSha.disabled = !!prev;
@@ -153,6 +163,7 @@ $('#newForm').addEventListener('submit', async (e) => {
   if (e.submitter?.value !== 'ok') return;
   const f = Object.fromEntries(new FormData(e.target));
   if (f.after) { delete f.sincePr; f.sinceSha = e.target.elements.sinceSha.value; }
+  if (f.scope === 'list') { delete f.after; delete f.sincePr; delete f.sinceSha; } else delete f.list;
   try { const r = await api('sessions', f); S.sid = r.id; try { localStorage.setItem('bpt-session', r.id); } catch {} await loadSessions(); await refresh(true); toast('Session created; discovery queued'); }
   catch (err) { toast(err.message, true); }
 });
@@ -288,7 +299,8 @@ function renderSession() {
   $('#sTitle').textContent = s.title;
   const v = (b) => Object.fromEntries(s.verdicts.filter((x) => x.branch === b).map((x) => [x.verdict, x.n]));
   const d = (b) => s.decisions.filter((x) => x.branch === b).reduce((o, x) => { o[x.decision] = (o[x.decision] || 0) + x.n; return o; }, {});
-  $('#sMeta').replaceChildren(`${s.status} · PRs after ${short(s.config.sinceSha)}${s.config.masterHead ? ` up to ${s.config.masterHead}` : ''} · discover round ${s.config.round || 0}${s.config.lastDiscover ? ` (${when(s.config.lastDiscover)})` : ''}`,
+  renderCustom(s);
+  $('#sMeta').replaceChildren(`${s.status} · ${s.config.scope === 'list' ? `custom session: ${s.config.list?.length || 0} listed PR(s)` : `PRs after ${short(s.config.sinceSha)}`}${s.config.masterHead ? ` up to ${s.config.masterHead}` : ''} · discover round ${s.config.round || 0}${s.config.lastDiscover ? ` (${when(s.config.lastDiscover)})` : ''}`,
     ...s.lanes.map((l) => { const vv = v(l.branch); const dd = d(l.branch); const mine = s.decisions.filter((x) => x.branch === l.branch && x.source === 'user').reduce((n, x) => n + x.n, 0);
       return h('div', {}, `${l.branch}: ${vv.pick || 0} pick · ${vv.maybe || 0} maybe · ${vv.untriaged || 0} untriaged — ${dd.backport || 0} backport, ${dd.undecided || 0} undecided (${mine} decided by you, the rest recommended)`); }),
     s.openDeps ? h('div', {}, chip(`${s.openDeps} open dependency hints on PRs that may go in`, 'blocked')) : '',
@@ -338,6 +350,35 @@ function renderSession() {
   $('#lanes').replaceChildren(...s.lanes.map((l) => laneCard(l, s)));
   renderTabs();
 }
+/**
+ * The session's instructions for the Claude workers (any session), and a custom session's list of PRs. Re-rendered
+ * only when they change and nothing in the block is being edited, so the periodic refresh does not eat a draft.
+ */
+function renderCustom(s) {
+  const box = $('#sCustom'); const cfg = s.config;
+  const ro = s.status === 'finished' || !!cfg.archived;
+  const sig = JSON.stringify([cfg.instructions || '', (cfg.list || []).map((x) => x.pr), ro]);
+  if (box.dataset.sig === sig && box.dataset.sid === S.sid) return;
+  if (box.dataset.sid === S.sid && box.contains(document.activeElement) && /^(TEXTAREA|INPUT)$/.test(document.activeElement.tagName)) return;
+  if (box.dataset.sid === S.sid && box.querySelector('[data-dirty]')) return;
+  box.dataset.sig = sig; box.dataset.sid = S.sid;
+  const save = (what, args, msg) => api(`sessions/${S.sid}/${what}`, args).then((r) => { box.dataset.sig = ''; box.querySelectorAll('[data-dirty]').forEach((x) => delete x.dataset.dirty); toast(msg(r)); refresh(true); return r; }).catch((e) => toast(e.message, true));
+  const dirty = (e) => { e.target.dataset.dirty = '1'; };
+  const out = [];
+  if (cfg.scope === 'list') {
+    const input = h('input', { class: 'ask', placeholder: 'PRs or commits, e.g. 27424 4e1dd1895ec', oninput: dirty, disabled: ro });
+    out.push(h('div', { class: 'customList small' }, h('b', {}, 'Listed: '), ...(cfg.list || []).flatMap((x) => [prLink(x.pr), ' ']),
+      ro ? null : h('span', { class: 'askBox' }, input,
+        h('button', { class: 'ghost', onclick: () => input.value.trim() && save('list', { add: input.value }, (r) => (r.added.length ? `Added ${r.added.map((p) => `#${p}`).join(', ')}; discovery queued` : 'Already listed')) }, 'Add'),
+        h('button', { class: 'ghost', onclick: () => input.value.trim() && confirm(`Remove ${input.value.trim()} from the list? Its decisions become "skip".`) && save('list', { remove: input.value }, (r) => `Removed ${r.removed.map((p) => `#${p}`).join(', ') || 'nothing'}`) }, 'Remove'))));
+  }
+  const ta = h('textarea', { rows: 4, oninput: dirty, disabled: ro, placeholder: 'Free-text instructions every Claude worker of this session gets: triage, resolve, verify, CI fixes, reviews and explanations.' }, cfg.instructions || '');
+  out.push(h('details', { class: 'instructions small', open: !cfg.instructions && cfg.scope === 'list' ? true : undefined },
+    h('summary', {}, h('b', {}, 'Instructions for the workers: '), cfg.instructions ? (cfg.instructions.split('\n')[0]).slice(0, 140) + (cfg.instructions.length > 140 || cfg.instructions.includes('\n') ? '…' : '') : h('span', { class: 'muted' }, 'none')),
+    ta, ro ? null : h('div', {}, h('button', { class: 'ghost', onclick: () => save('instructions', { instructions: ta.value }, (r) => (r.instructions ? 'Instructions saved; new jobs get them' : 'Instructions cleared')) }, 'Save instructions'))));
+  box.replaceChildren(...out);
+}
+
 /** Archive / unarchive, and delete for a session that never started backporting. */
 function sessionLifecycleButtons(s) {
   const out = [];

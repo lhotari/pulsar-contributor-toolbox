@@ -166,7 +166,7 @@ export function serve({ port = null, open = false } = {}) {
           const a = await body(req);
           const s = plan.createSession({ id: a.id, title: a.title || null, repo: a.repo || plan.DEFAULT_REPO,
             branches: a.branches ? plan.parseBranches(a.branches) : null, after: a.after || null, scope: a.scope || 'both',
-            sincePr: a.sincePr ? Number(a.sincePr) : null, sinceSha: a.sinceSha || null });
+            sincePr: a.sincePr ? Number(a.sincePr) : null, sinceSha: a.sinceSha || null, list: a.list || null, instructions: a.instructions || null });
           if (a.discover !== false) jobs.enqueue(s.id, null, 'discover');
           return send(200, { id: s.id });
         }
@@ -232,6 +232,13 @@ export function serve({ port = null, open = false } = {}) {
           return send(200, { ok: true, pulledIn: p.added, notOnMaster: p.missing });
         }
         if (what === 'config' && m === 'POST') return send(200, plan.saveConfig(sid, await body(req)));
+        if (what === 'instructions' && m === 'POST') { const a = await body(req); return send(200, { instructions: plan.setInstructions(sid, a.instructions) }); }
+        if (what === 'list' && m === 'POST') {
+          const a = await body(req); const r = plan.editList(sid, { add: a.add || null, remove: a.remove || null });
+          for (const l of db.all(`SELECT branch FROM lanes WHERE session_id = ? AND phase NOT IN ('not-started','done')`, sid)) lane.syncPicks(sid, l.branch);
+          if (r.added.length) r.job = jobs.enqueue(sid, null, 'discover');
+          return send(200, r);
+        }
         if (what === 'control' && m === 'GET') return send(200, control.list(sid));
         if (what === 'control' && m === 'POST') { const a = await body(req); const r = a.recommended ? control.applyRecommended(sid) : control.apply(sid, a.key, a.option, a.text); tick(); return send(200, r ?? {}); }
         if (what === 'action' && m === 'POST') {

@@ -26,13 +26,19 @@ export function parseBranches(spec) {
  *   'both' (default): every PR merged after the since-commit, and PRs labelled for the session's releases merged before it;
  *   'range': only the PRs merged after the since-commit;
  *   'labelled': only PRs labelled for the session's releases (release/<version>), wherever they are on master.
+ *   'list': a custom session: only the master PRs and commits the user listed (`list`), decided "backport" for every lane.
  * after: a previous session; the new one starts after the last master commit that session evaluated.
+ * instructions: free text the user gives every Claude worker of the session (and the triage brief).
  */
-export const SCOPES = ['both', 'range', 'labelled'];
-export function createSession({ id, title, repo = DEFAULT_REPO, branches, sincePr, sinceSha, source = 'master', remote: remoteName = null, scope = 'both', after = null }) {
+export const SCOPES = ['both', 'range', 'labelled', 'list'];
+export function createSession({ id, title, repo = DEFAULT_REPO, branches, sincePr, sinceSha, source = 'master', remote: remoteName = null, scope = 'both', after = null, list = null, instructions = null }) {
   if (!/^[a-z0-9][a-z0-9._-]{2,60}$/.test(id)) throw new Error('session id: lowercase letters, digits, . _ -');
   if (db.get('SELECT 1 FROM sessions WHERE id = ?', id)) throw new Error(`session ${id} exists`);
   if (!SCOPES.includes(scope)) throw new Error(`scope must be one of ${SCOPES.join(', ')}`);
+  const refs = parseList(list);
+  if (refs.length && scope !== 'list') { if (scope !== 'both' || sincePr || sinceSha || after) throw new Error('a list of PRs and commits makes a custom session (scope "list"): leave out the starting point'); scope = 'list'; }
+  if (scope === 'list' && !refs.length) throw new Error('a custom session needs the master PRs or commits to backport (--list)');
+  if (scope === 'list' && (sincePr || sinceSha || after)) throw new Error('a custom session has no starting point: it backports the listed PRs and commits');
   if (after) {
     const n = nextSession(after);
     if (!sinceSha && !sincePr) sinceSha = n.sinceSha;
@@ -43,10 +49,12 @@ export function createSession({ id, title, repo = DEFAULT_REPO, branches, sinceP
   }
   if (!branches?.length) throw new Error('need --branches (or --after a previous session)');
   const cfg = { repo, remote: remoteName, source, branches, sincePr: sincePr || null, sinceSha: sinceSha || null, round: 0, scope, after: after || null,
+    instructions: String(instructions || '').trim() || null,
     runner: 'headless', autopilot: false, autoPushTest: true, maxClaudeWorkers: 1, maxReruns: 3,
     permissionMode: 'auto', model: null, testBranchPattern: '{branch}-backports-{id}' };
   const r = remote(cfg);
   g.fetch(repo, r, [source]);
+  if (scope === 'list') Object.assign(cfg, resolveList(cfg, refs));
   if (!cfg.sinceSha) {
     if (!sincePr) throw new Error('need --since-pr or --since-sha');
     const sha = g.git(repo, ['log', '--first-parent', '--format=%H', `--grep=(#${sincePr})$`, `${r}/${source}`]).split('\n')[0];
@@ -62,8 +70,93 @@ export function createSession({ id, title, repo = DEFAULT_REPO, branches, sinceP
         id, b.branch, b.release, b.seq, b.reuseFrom, ts);
     }
   });
-  db.event(id, `Session created: ${branches.map((b) => b.branch).join(', ')}, ${scope === 'labelled' ? 'PRs labelled for the releases' : `PRs merged after ${g.short(cfg.sinceSha)}${scope === 'both' ? ' and PRs labelled for the releases' : ''}`}${after ? ` (continues ${after})` : ''}`);
+  if (scope === 'list') db.event(id, `Custom session created: ${branches.map((b) => b.branch).join(', ')}, backporting ${cfg.list.map((x) => `#${x.pr}`).join(', ')}${cfg.instructions ? '; with instructions for the workers' : ''}`);
+  else db.event(id, `Session created: ${branches.map((b) => b.branch).join(', ')}, ${scope === 'labelled' ? 'PRs labelled for the releases' : `PRs merged after ${g.short(cfg.sinceSha)}${scope === 'both' ? ' and PRs labelled for the releases' : ''}`}${after ? ` (continues ${after})` : ''}`);
   return db.session(id);
+}
+
+/** "123, #124 https://github.com/apache/pulsar/pull/125 abcdef1" → ["#123", "#124", "#125", "abcdef1"] (PRs as #N, commits as given). */
+export function parseList(list) {
+  if (!list) return [];
+  const toks = Array.isArray(list) ? list.map(String) : String(list).split(/[\s,;]+/);
+  const out = [];
+  for (const t0 of toks.map((x) => x.trim()).filter(Boolean)) {
+    const t = t0.replace(/[).,]+$/, '');
+    const m = t.match(/^(?:#|(?:https?:\/\/github\.com\/[^/]+\/[^/]+\/pull\/))?(\d{1,6})(?:\/.*)?$/) ;
+    const c = t.match(/^(?:https?:\/\/github\.com\/[^/]+\/[^/]+\/commit\/)?([0-9a-f]{7,40})$/i);
+    if (c && !/^\d{1,6}$/.test(t)) out.push(c[1].toLowerCase());
+    else if (m) out.push(`#${Number(m[1])}`);
+    else throw new Error(`not a PR number or commit hash: ${t0}`);
+  }
+  return [...new Set(out)];
+}
+
+/**
+ * The listed refs on the session's master: each one's merged PR and its first-parent commit, and the starting point
+ * (the parent of the oldest one) so that discover sees them all. A commit inside a merged PR's branch resolves to the PR.
+ */
+export function resolveList(cfg, refs) {
+  const repo = cfg.repo; const masterRef = `${remote(cfg)}/${cfg.source}`;
+  const byPr = (pr) => {
+    const hits = g.git(repo, ['log', '--first-parent', '--fixed-strings', `--grep=(#${pr})`, '--format=%H%x1f%s', masterRef], { allowFail: true });
+    return (hits.ok ? hits.out : '').split('\n').filter(Boolean).map((l) => l.split('\x1f')).find(([, subj]) => Number(subj.match(g.PR_RE)?.[1]) === pr)?.[0] || null;
+  };
+  const list = []; const bad = [];
+  for (const ref of refs) {
+    if (ref.startsWith('#')) {
+      const pr = Number(ref.slice(1)); const sha = byPr(pr);
+      if (sha) list.push({ ref, pr, sha }); else bad.push(`${ref} is not a PR merged to ${cfg.source}`);
+      continue;
+    }
+    const v = g.git(repo, ['rev-parse', '--verify', '-q', `${ref}^{commit}`], { allowFail: true });
+    if (!v.ok || !v.out) { bad.push(`${ref}: no such commit (fetched ${masterRef})`); continue; }
+    if (!g.git(repo, ['merge-base', '--is-ancestor', v.out, masterRef], { allowFail: true }).ok) { bad.push(`${ref} is not on ${cfg.source}`); continue; }
+    const subj = g.git(repo, ['log', '-1', '--format=%s', v.out]);
+    const pr = Number(subj.match(g.PR_RE)?.[1]) || null;
+    const sha = pr && byPr(pr);
+    if (!sha) { bad.push(`${ref} (${subj.slice(0, 80)}) is not the commit of a PR merged to ${cfg.source}`); continue; }
+    list.push({ ref, pr, sha });
+  }
+  if (bad.length) throw new Error(bad.join('; '));
+  const uniq = [...new Map(list.map((x) => [x.pr, x])).values()];
+  const dist = (sha) => Number(g.git(repo, ['rev-list', '--first-parent', '--count', `${sha}..${masterRef}`]));
+  const oldest = uniq.reduce((a, x) => (dist(x.sha) > dist(a.sha) ? x : a));
+  return { list: uniq, sinceSha: g.git(repo, ['rev-parse', `${oldest.sha}^`]) };
+}
+
+/** Add or remove listed PRs/commits of a custom session; the next discover brings new ones in (and decides them "backport"). */
+export function editList(sid, { add = null, remove = null } = {}) {
+  const s = db.session(sid); const cfg = s.config;
+  if (cfg.scope !== 'list') throw new Error(`session ${sid} is not a custom session`);
+  const drop = new Set(parseList(remove).map((x) => x.replace(/^#/, '')));
+  const picked = (x) => db.get(`SELECT 1 FROM picks WHERE session_id = ? AND pr = ? LIMIT 1`, sid, x.pr);
+  const keep = (cfg.list || []).filter((x) => !(drop.has(String(x.pr)) || drop.has(x.ref.replace(/^#/, '')) || [...drop].some((d) => /^[0-9a-f]{7,}$/.test(d) && x.sha.startsWith(d))));
+  const removed = (cfg.list || []).filter((x) => !keep.includes(x));
+  const busy = removed.filter(picked);
+  if (busy.length) throw new Error(`already cherry-picked: ${busy.map((x) => `#${x.pr}`).join(', ')}; drop the pick in its lane instead`);
+  const known = new Set(keep.map((x) => x.pr));
+  const adds = parseList(add);
+  const fresh = adds.length ? resolveList(cfg, adds).list.filter((x) => !known.has(x.pr)) : [];
+  const all = [...keep, ...fresh];
+  if (!all.length) throw new Error('a custom session needs at least one PR or commit');
+  const { sinceSha } = resolveList(cfg, all.map((x) => x.ref));
+  db.tx(() => {
+    for (const x of removed) {
+      db.run(`UPDATE items SET excluded = 'removed from the list', stats = json_set(stats, '$.include', 0, '$.listed', 0) WHERE session_id = ? AND pr = ?`, sid, x.pr);
+      db.run(`UPDATE targets SET decision = 'skip', decision_source = 'user', decision_note = 'removed from the custom list', decided_at = ? WHERE session_id = ? AND pr = ? AND on_branch = 0`, db.now(), sid, x.pr);
+    }
+    saveConfig(sid, { list: all, sinceSha });
+  });
+  if (fresh.length || removed.length) db.event(sid, `Custom list: ${fresh.length ? `added ${fresh.map((x) => `#${x.pr}`).join(', ')}` : ''}${fresh.length && removed.length ? '; ' : ''}${removed.length ? `removed ${removed.map((x) => `#${x.pr}`).join(', ')}` : ''}`);
+  return { list: all, added: fresh.map((x) => x.pr), removed: removed.map((x) => x.pr) };
+}
+
+/** The instructions every Claude worker of the session gets (null clears them). */
+export function setInstructions(sid, text) {
+  const t = String(text ?? '').trim() || null;
+  saveConfig(sid, { instructions: t });
+  db.event(sid, t ? 'Session instructions for the workers updated' : 'Session instructions cleared');
+  return t;
 }
 
 const bump = (v) => { const m = String(v || '').match(/^(\d+)\.(\d+)\.(\d+)$/); return m ? `${m[1]}.${m[2]}.${Number(m[3]) + 1}` : v; };
@@ -183,15 +276,18 @@ export function discover(sid, { log = console.log, blame = true } = {}) {
   const masterRef = `${r}/${cfg.source}`;
   const scope = cfg.scope || 'both';
   const allCommits = g.firstParentCommits(repo, cfg.sinceSha, masterRef).filter((c) => c.pr);
+  // A custom session: only the listed PRs (the range starts at the oldest one; the rest of it is not part of the plan).
+  const listed = scope === 'list' ? new Set((cfg.list || []).map((x) => x.pr)) : null;
   const position = new Map(allCommits.map((c, i) => [c.pr, i]));
   const onBranch = Object.fromEntries(branches.map((b) => [b, g.pickedOnBranch(repo, `${r}/${b}`, masterRef)]));
   const known = new Map(db.all('SELECT pr, round FROM items WHERE session_id = ?', sid).map((x) => [x.pr, x.round]));
   const round = (cfg.round || 0) + 1;
   log(`${allCommits.length} PRs on ${cfg.source} after ${g.short(cfg.sinceSha)}; fetching labels and descriptions`);
-  const meta = gh.prMeta(allCommits.map((c) => c.pr));
+  const meta = gh.prMeta((listed ? allCommits.filter((c) => listed.has(c.pr) || known.has(c.pr)) : allCommits).map((c) => c.pr));
   const releaseLabels = sessionReleaseLabels(sid);
   // 'labelled': only the PRs labelled for the session's releases (and the ones already in the plan stay).
-  const commits = scope !== 'labelled' ? allCommits : allCommits.filter((c) => known.has(c.pr)
+  const commits = listed ? allCommits.filter((c) => listed.has(c.pr) || (known.has(c.pr) && !db.J(db.get('SELECT stats FROM items WHERE session_id = ? AND pr = ?', sid, c.pr)?.stats, {}).listed))
+    : scope !== 'labelled' ? allCommits : allCommits.filter((c) => known.has(c.pr)
     || releaseLabels.some((x) => (meta.get(c.pr)?.labels || []).includes(x)));
   const bodies = path.join(sessionDir(sid), 'prbody');
   fs.mkdirSync(bodies, { recursive: true });
@@ -207,7 +303,13 @@ export function discover(sid, { log = console.log, blame = true } = {}) {
     const at = position.get(c.pr);
     if (m.body) fs.writeFileSync(path.join(bodies, `${c.pr}.md`), m.body);
     const isNew = !known.has(c.pr);
-    const cls = upsertCommit(sid, { repo, branches, onBranch, equivs, heads, newlyPicked, releaseLabels }, c, at, m, isNew ? round : known.get(c.pr));
+    const cls = upsertCommit(sid, { repo, branches, onBranch, equivs, heads, newlyPicked, releaseLabels }, c, at, m, isNew ? round : known.get(c.pr),
+      listed?.has(c.pr) ? { listed: 1, include: 1 } : {});
+    // Listed by the user: backport it to every lane where it is not yet (a decision the user changed stays).
+    if (listed?.has(c.pr)) {
+      db.run(`UPDATE targets SET decision = 'backport', decision_source = 'user', decision_note = COALESCE(decision_note, 'listed in the custom session'), decided_at = ?
+              WHERE session_id = ? AND pr = ? AND on_branch = 0 AND decision_source != 'user'`, db.now(), sid, c.pr);
+    }
     if (isNew) added++;
     dry += cls.dry;
     if (blame && !cls.excluded && branches.some((b) => !(onBranch[b].prs.has(c.pr) || onBranch[b].shas.has(c.sha)))) {
@@ -219,13 +321,14 @@ export function discover(sid, { log = console.log, blame = true } = {}) {
     }
     if (i % 50 === 49) log(`  ${i + 1}/${commits.length}`);
   }
-  const labelled = scope === 'range' ? { added: [], missing: [], failed: [] } : pullInLabelled(sid, new Set(allCommits.map((c) => c.pr)), { log });
+  const missingListed = listed ? [...listed].filter((pr) => !commits.some((c) => c.pr === pr)) : [];
+  const labelled = scope === 'range' || listed ? { added: [], missing: [], failed: [] } : pullInLabelled(sid, new Set(allCommits.map((c) => c.pr)), { log });
   const pulled = pullInDependencies(sid, { log, refresh: true });
   const headSha = g.rev(repo, masterRef);
   saveConfig(sid, { round, lastDiscover: db.now(), masterHead: g.short(headSha), masterHeadSha: headSha,
     heads: Object.fromEntries(branches.map((b) => [b, g.short(heads[b])])) });
   const summary = { round, scope, total: commits.length, onMaster: allCommits.length, added, dryRuns: dry, newlyPicked, pulledIn: pulled.added, depsNotOnMaster: pulled.missing,
-    labelledPulledIn: labelled.added, labelledNotOnMaster: labelled.missing, labelSearchFailed: labelled.failed };
+    labelledPulledIn: labelled.added, labelledNotOnMaster: labelled.missing, labelSearchFailed: labelled.failed, ...(listed ? { listed: listed.size, listedNotFound: missingListed } : {}) };
   db.event(sid, `Discover round ${round}: ${commits.length} PRs, ${added} new, ${newlyPicked.length} newly on a branch`
     + `${labelled.added.length ? `, ${labelled.added.length} release-labelled PR(s) from before the range` : ''}`, { data: summary });
   return summary;

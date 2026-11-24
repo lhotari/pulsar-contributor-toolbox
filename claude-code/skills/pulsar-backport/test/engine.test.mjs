@@ -727,3 +727,46 @@ test('triage runs one worker per batch and imports when the last one is done', (
   assert.deepEqual(a.missing, batches.slice(1).map((b) => b.args.batch));
   assert.match(jobs.workerPrompt(jobs.job(imp.id)), /wrote no verdicts/);
 });
+
+test('a custom session backports only the listed PRs and commits, with instructions for the workers', () => {
+  const sid = 'custom-list';
+  // A branch none of the earlier tests picked onto.
+  const base = sh(repo, 'log', '--format=%H', '--fixed-strings', '--grep=(#99)', 'origin/master');
+  sh(repo, 'push', '-q', 'origin', `${base}:refs/heads/branch-4.1`);
+  const sha101 = sh(repo, 'log', '--format=%H', '--fixed-strings', '--grep=(#101)', 'origin/master');
+  assert.throws(() => plan.createSession({ id: 'custom-bad', repo, remote: 'origin', list: '#103 nope', branches: plan.parseBranches('branch-4.1:4.1.9') }), /not a PR number or commit/);
+  assert.throws(() => plan.createSession({ id: 'custom-bad', repo, remote: 'origin', list: '#4242', branches: plan.parseBranches('branch-4.1:4.1.9') }), /#4242 is not a PR merged/);
+  assert.throws(() => plan.createSession({ id: 'custom-bad', repo, remote: 'origin', sincePr: 100, list: '#103', branches: plan.parseBranches('branch-4.1:4.1.9') }), /custom session/);
+  const s = plan.createSession({ id: sid, repo, remote: 'origin', list: `https://github.com/apache/pulsar/pull/103, ${sha101.slice(0, 10)}`,
+    instructions: 'Keep the branch API unchanged.', branches: plan.parseBranches('branch-4.1:4.1.9') });
+  assert.equal(s.config.scope, 'list');
+  assert.deepEqual(s.config.list.map((x) => x.pr), [103, 101]);
+  assert.equal(s.config.sinceSha, sh(repo, 'rev-parse', `${sha101}^`), 'starts right before the oldest listed commit');
+  plan.saveConfig(sid, { diffReview: false });
+  const r = plan.discover(sid, { log: () => {} });
+  assert.equal(r.total, 2); assert.deepEqual(r.listedNotFound, []);
+  const items = db.all('SELECT pr, excluded FROM items WHERE session_id = ? ORDER BY master_order', sid);
+  assert.deepEqual(items.map((x) => x.pr), [101, 103], 'only the listed PRs, in master order');
+  const t = db.all(`SELECT pr, decision, decision_source, on_branch FROM targets WHERE session_id = ? ORDER BY pr`, sid);
+  assert.ok(t.every((x) => x.decision === 'backport' && x.decision_source === 'user'), JSON.stringify(t));
+  // A decision the user changes stays on the next discover.
+  plan.setDecision(sid, 101, 'branch-4.1', 'defer');
+  plan.discover(sid, { log: () => {} });
+  assert.equal(db.get(`SELECT decision FROM targets WHERE session_id = ? AND pr = 101`, sid).decision, 'defer');
+  // Every Claude worker gets the session's instructions.
+  const id = jobs.enqueue(sid, 'branch-4.1', 'resolve', { pr: 103, instructions: 'only this job' });
+  const p = jobs.workerPrompt(jobs.job(id));
+  assert.match(p, /custom backport session: the user listed the master PRs to backport \(#103, #101\)/);
+  assert.match(p, /Keep the branch API unchanged\./); assert.match(p, /User instructions: only this job/);
+  db.run(`UPDATE jobs SET status = 'cancelled' WHERE id = ?`, id);
+  plan.setInstructions(sid, '');
+  assert.doesNotMatch(jobs.workerPrompt(jobs.job(id)), /Keep the branch API/);
+  // Edit the list: an older PR moves the starting point back; a removed one is skipped.
+  const e = plan.editList(sid, { add: '#105 103', remove: '101' });
+  assert.deepEqual(e.added, [105]); assert.deepEqual(e.removed, [101]);
+  plan.discover(sid, { log: () => {} });
+  assert.equal(db.get(`SELECT decision FROM targets WHERE session_id = ? AND pr = 105`, sid).decision, 'backport');
+  assert.equal(db.get(`SELECT decision FROM targets WHERE session_id = ? AND pr = 101`, sid).decision, 'skip');
+  assert.ok(!db.get(`SELECT 1 FROM items WHERE session_id = ? AND pr IN (102, 104)`, sid), 'unlisted PRs in the range stay out');
+  assert.throws(() => plan.editList(sid, { remove: '103 105' }), /at least one/);
+});

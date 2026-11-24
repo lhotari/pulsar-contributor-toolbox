@@ -126,7 +126,15 @@ Judge each pick on its own; keep it short and concrete. When every listed pick i
     'triage-batch': `Evaluate one triage batch yourself, in this session: read ${j.args.brief} and follow it exactly. Your batch file is ${j.args.file}; write the result to ${j.args.out}. Put helper scripts in ${j.args.dir}, never in the repo worktree or /tmp. Do not hand the work to subagents (the Agent tool): this headless session stops background subagents 10 minutes after its last turn, and the engine already runs the other batches in parallel. When the result file is written and is valid JSON in the brief's format, finish with job done ${j.id} --summary "<counts of pick/maybe/skip/already>".`,
     'triage-import': `Import the triage verdicts of round ${j.args.round}: ${(j.args.files || []).join(' ')}.${(j.args.missing || []).length ? ` These batches wrote no verdicts (their worker failed): ${j.args.missing.join(', ')}; say so in the summary, their PRs stay untriaged.` : ''} First spot-check, as the pulsar-backport-plan skill's "Triage" section step 3 says: for every pick with medium+ risk, every skip whose reason is "depends on an absent PR", and every high-severity item, verify the load-bearing claim yourself in the session's repo (job show: session.repo), read-only and without checkout: git log <remote>/<branch> --grep='(#X)', git show <remote>/<branch>:<path>. Fix the JSON where it is wrong and say so in the PR's note. Do it yourself, without subagents. Then run node ${BPT} plan import ${j.session_id} <the files> and finish with job done ${j.id} --summary "<imported counts, the corrections you made>".`,
   }[j.type] || '';
-  return `${head}\n\n${extra}${j.args.instructions ? `\n\nUser instructions: ${j.args.instructions}` : ''}`;
+  return `${head}\n\n${extra}${sessionInstructions(j)}${j.args.instructions ? `\n\nUser instructions: ${j.args.instructions}` : ''}`;
+}
+
+/** The session's free-text instructions (a custom session's purpose, or how to backport), for every Claude worker. */
+function sessionInstructions(j) {
+  let cfg = {}; try { cfg = db.session(j.session_id).config; } catch {}
+  const list = cfg.scope === 'list' && cfg.list?.length ? `This is a custom backport session: the user listed the master PRs to backport (${cfg.list.map((x) => `#${x.pr}`).join(', ')}).` : '';
+  const t = cfg.instructions ? `The user's instructions for this session (they apply to every job; a job's own instructions below take precedence where they differ):\n${cfg.instructions}` : '';
+  return list || t ? `\n\n${[list, t].filter(Boolean).join('\n')}` : '';
 }
 
 function explainPrompt(j) {

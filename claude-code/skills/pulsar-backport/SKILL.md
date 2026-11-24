@@ -72,7 +72,7 @@ Rules for the driver: never push or touch labels yourself — use the engine's c
 
 ## Worker jobs
 
-Every job starts with `node "$BPT" job show <job>` — JSON with the job, the lane (worktree, base, head, CI summary), the pick (master sha, conflicts, conflict and blame dependency hints, evaluator assessment, port note, adaptation hint), and all picks of the lane. Work **only** in the lane worktree. End with exactly one of:
+Every job starts with `node "$BPT" job show <job>` — JSON with the job, the lane (worktree, base, head, CI summary), the pick (master sha, conflicts, conflict and blame dependency hints, evaluator assessment, port note, adaptation hint), and all picks of the lane. Work **only** in the lane worktree. The prompt carries the session's instructions from the user (and, in a custom session, the PRs the user listed): follow them in every job, unless the job's own instructions say otherwise or they would break a rule here (never push, never weaken a test, never accept for the user); then say so with `job ask`. End with exactly one of:
 
 ```bash
 node "$BPT" job done <job> --summary "what you did, one or two sentences"

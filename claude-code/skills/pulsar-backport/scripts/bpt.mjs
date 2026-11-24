@@ -24,6 +24,9 @@ const HELP = `bpt — apache/pulsar backport sessions (state: ${db.DB_PATH})
   url [--open]                                      the running server's links (one per bound address, with the token)
   session create <id> --branches branch-4.2:4.2.6,branch-4.0:4.0.15<branch-4.2 (--since-pr N | --since-sha S) [--title T] [--repo DIR] [--remote NAME] [--scope both|range|labelled]
   session create <id> --after <previous-session> [--branches ...] [--title T] [--scope both|range|labelled]
+  session create <id> --branches ... --list "27424 #27500 abcdef123" [--instructions T | --instructions-file F] [--title T]   (custom: only the listed master PRs/commits, decided backport)
+  session list-edit <id> [--add "PRs/commits"] [--remove "PRs/commits"]      (a custom session; run plan discover after adding)
+  session instructions <id> (--text T | --file F | --clear)                   (free-text instructions every Claude worker of the session gets)
                                                     continue after the last master commit the previous session evaluated
                                                     (scope: both = PRs after it and PRs labelled release/<version>; range; labelled only)
   session next <previous-session>                   what --after would use: since-commit, branches (released versions bumped), title
@@ -220,8 +223,10 @@ async function main() {
         const s = plan.createSession({ id: need(pos[0], 'session id'), title: opt.title, repo: opt.repo || plan.DEFAULT_REPO,
           branches: opt.branches ? plan.parseBranches(opt.branches) : opt.after ? null : need(opt.branches, '--branches'),
           sincePr: opt['since-pr'] && Number(opt['since-pr']), sinceSha: opt['since-sha'], remote: opt.remote || null,
-          scope: opt.scope || 'both', after: opt.after || null });
-        return out({ id: s.id, sinceSha: s.config.sinceSha, scope: s.config.scope, after: s.config.after, lanes: s.config.branches });
+          scope: opt.scope || 'both', after: opt.after || null, list: typeof opt.list === 'string' ? opt.list : null,
+          instructions: typeof opt.instructions === 'string' ? opt.instructions : opt['instructions-file'] ? fs.readFileSync(opt['instructions-file'], 'utf8') : null });
+        return out({ id: s.id, sinceSha: s.config.sinceSha, scope: s.config.scope, after: s.config.after, lanes: s.config.branches,
+          ...(s.config.list ? { list: s.config.list.map((x) => ({ ref: x.ref, pr: x.pr, sha: x.sha.slice(0, 12) })) } : {}), instructions: s.config.instructions || null });
       }
       const sid = need(pos[0], 'session id');
       if (sub === 'next') return out(plan.nextSession(sid));
@@ -229,6 +234,8 @@ async function main() {
       if (sub === 'unarchive') return out(plan.archiveSession(sid, false) ? 'unarchived' : 'not archived');
       if (sub === 'delete') { plan.deleteSession(sid); return out('deleted'); }
       if (sub === 'show') return out({ ...db.session(sid), lanes: db.all('SELECT branch, release, phase, attention, test_pr_url FROM lanes WHERE session_id = ? ORDER BY seq', sid) });
+      if (sub === 'list-edit') return out(plan.editList(sid, { add: opt.add || null, remove: opt.remove || null }));
+      if (sub === 'instructions') return out({ instructions: plan.setInstructions(sid, opt.clear ? null : typeof opt.text === 'string' ? opt.text : opt.file ? fs.readFileSync(opt.file, 'utf8') : need(null, '--text, --file or --clear')) });
       if (sub === 'reopen') { plan.reopenSession(sid, need(opt.reason, '--reason')); return out('ok'); }
       if (sub === 'start-backport') { db.run(`UPDATE sessions SET status = 'backporting', updated_at = ? WHERE id = ?`, db.now(), sid); db.event(sid, 'Backporting started'); return out('ok'); }
       if (sub === 'config') {
