@@ -423,6 +423,7 @@ export function rewind(sid, branch, { drop = [], before = null, reason = '' } = 
     setPick(sid, branch, pr, { status: 'skipped', picked_sha: null, detail: { ...p.detail, reason: reason || 'dropped while backporting', dropped: true } });
     db.run(`UPDATE targets SET decision = 'skip', decision_source = 'user', decision_note = ?, decided_at = ? WHERE session_id = ? AND pr = ? AND branch = ?`,
       `dropped while backporting${reason ? `: ${reason}` : ''}`, db.now(), sid, pr, branch);
+    mirrorDecision(sid, branch, pr, 'skip', `dropped while backporting${reason ? `: ${reason}` : ''}`);
     dropped.push(pr);
   }
   const head = g.rev(dir, 'HEAD');
@@ -779,6 +780,7 @@ export function skipPick(sid, branch, pr, reason) {
   setPick(sid, branch, pr, { status: 'skipped', detail: { ...p.detail, reason } });
   db.run(`UPDATE targets SET decision = 'skip', decision_source = 'user', decision_note = ?, decided_at = ? WHERE session_id = ? AND pr = ? AND branch = ?`,
     `skipped while backporting: ${reason}`, db.now(), sid, pr, branch);
+  mirrorDecision(sid, branch, pr, 'skip', `skipped while backporting: ${reason}`);
   // Leaving out a PR added after picking finished changes nothing that was built or tested.
   if (!POST_PICK.includes(l.phase) || p.status !== 'pending') db.updateLane(sid, branch, { phase: 'picking', attention: null });
   else if (!holds(sid, branch).length) db.updateLane(sid, branch, { attention: null });
@@ -1164,7 +1166,7 @@ export function afterDone(sid, branch) {
 }
 
 /** Accept (add the dependency to the batch) or dismiss a dependency, then re-plan the affected lanes. */
-export function setDep(sid, id, status) {
+export function setDep(sid, id, status, { mirroredFrom = null } = {}) {
   const d = db.get('SELECT * FROM deps WHERE session_id = ? AND id = ?', sid, id);
   if (!d) throw new Error(`no dependency ${id}`);
   if (!['open', 'accepted', 'dismissed'].includes(status)) throw new Error('status: open | accepted | dismissed');
@@ -1172,13 +1174,63 @@ export function setDep(sid, id, status) {
   const branches = d.branch ? [d.branch] : db.all('SELECT branch FROM lanes WHERE session_id = ?', sid).map((l) => l.branch);
   for (const b of branches) {
     if (status === 'accepted') {
+      // Mirrored from the lane this one reuses: a decision the user made for this lane stays.
       db.run(`UPDATE targets SET decision = 'backport', decision_source = 'user', decision_note = COALESCE(decision_note, ?), decided_at = ?
-              WHERE session_id = ? AND pr = ? AND branch = ? AND on_branch = 0`, `dependency of #${d.pr}`, db.now(), sid, d.depends_on, b);
+              WHERE session_id = ? AND pr = ? AND branch = ? AND on_branch = 0 ${mirroredFrom ? "AND decision_source != 'user'" : ''}`,
+      `dependency of #${d.pr}${mirroredFrom ? ` (as on ${mirroredFrom})` : ''}`, db.now(), sid, d.depends_on, b);
     }
     const l = db.get('SELECT phase FROM lanes WHERE session_id = ? AND branch = ?', sid, b);
     if (l && l.phase !== 'not-started') { syncPicks(sid, b); if (status !== 'open') unblock(sid, b, d.pr); }
   }
-  db.event(sid, `Dependency #${d.pr} → #${d.depends_on} ${status}`, { branch: d.branch });
+  db.event(sid, `Dependency #${d.pr} → #${d.depends_on} ${status}${mirroredFrom ? ` (as on ${mirroredFrom})` : ''}`, { branch: d.branch });
+  if (d.branch && status !== 'open') mirrorDep(sid, id);
+}
+
+/**
+ * A decision made for a PR on one lane while backporting also holds for the lanes that reuse its picks, where the
+ * PR is in the plan, not on the branch, and the user has not decided it for that lane (the user's own decisions stay).
+ */
+function mirrorDecision(sid, branch, pr, decision, note) {
+  for (const b of reusing(sid, branch)) {
+    const r = db.run(`UPDATE targets SET decision = ?, decision_source = 'user', decision_note = ?, decided_at = ?
+                      WHERE session_id = ? AND pr = ? AND branch = ? AND on_branch = 0 AND decision_source != 'user' AND decision != ?`,
+    decision, `${note} (as on ${branch})`.slice(0, 300), db.now(), sid, pr, b, decision);
+    if (!r.changes) continue;
+    db.event(sid, `#${pr} decided "${decision}" for ${b} as on ${branch}`, { branch: b });
+    const l = db.get('SELECT phase FROM lanes WHERE session_id = ? AND branch = ?', sid, b);
+    if (l && l.phase !== 'not-started') syncPicks(sid, b);
+    mirrorDecision(sid, b, pr, decision, note);
+  }
+}
+
+/** The lanes that reuse `branch`'s picks directly (branch-4.0 for branch-4.2). */
+function reusing(sid, branch) {
+  return db.all('SELECT branch FROM lanes WHERE session_id = ? AND reuse_from = ? ORDER BY seq', sid, branch).map((l) => l.branch);
+}
+
+/**
+ * A dependency decided for one lane while backporting (e.g. #26998 needed before #25117 on branch-4.2) holds for
+ * the lanes that reuse its picks too, where the dependent PR is also going (decided "backport", not on the branch):
+ * the same dependency is recorded there with the same status, and an accepted one decides the dependency
+ * "backport" there unless the user decided it for that lane. Transitive through setDep. Returns the mirrored ids.
+ */
+export function mirrorDep(sid, id) {
+  const d = db.get('SELECT * FROM deps WHERE session_id = ? AND id = ?', sid, id);
+  if (!d?.branch || d.status === 'open') return [];
+  const out = [];
+  for (const b of reusing(sid, d.branch)) {
+    const t = db.get('SELECT on_branch, decision FROM targets WHERE session_id = ? AND pr = ? AND branch = ?', sid, d.pr, b);
+    if (!t || t.on_branch || t.decision !== 'backport') continue;
+    const dt = db.get('SELECT on_branch FROM targets WHERE session_id = ? AND pr = ? AND branch = ?', sid, d.depends_on, b);
+    if (!dt || dt.on_branch) continue;
+    db.run(`INSERT OR IGNORE INTO deps (session_id, pr, depends_on, branch, source, detail, status, phase, created_at) VALUES (?,?,?,?,?,?,?,?,?)`,
+      sid, d.pr, d.depends_on, b, d.source, `as on ${d.branch}${d.detail ? `: ${d.detail}` : ''}`, 'open', d.phase, db.now());
+    const m = db.get('SELECT id, status FROM deps WHERE session_id = ? AND pr = ? AND depends_on = ? AND branch = ? AND source = ?', sid, d.pr, d.depends_on, b, d.source);
+    if (m.status === d.status) continue;
+    setDep(sid, m.id, d.status, { mirroredFrom: d.branch });
+    out.push(m.id);
+  }
+  return out;
 }
 
 export function lanePicks(sid, branch) { return picks(sid, branch); }

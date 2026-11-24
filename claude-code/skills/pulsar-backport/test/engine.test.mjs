@@ -217,12 +217,10 @@ test('branch-4.0 lane reuses the squashed branch-4.2 commits', () => {
   const picks = lane.lanePicks(SID, 'branch-4.0');
   const p42 = Object.fromEntries(lane.lanePicks(SID, 'branch-4.2').map((p) => [p.pr, p.picked_sha]));
   for (const p of picks) { assert.ok(p.detail.reused); assert.equal(p.source_sha, p42[p.pr]); }
-  const rr = lane.pickAll(SID, 'branch-4.0', { log: () => {} });
-  assert.equal(rr.last.status, 'blocked', 'the #102 dependency is found on branch-4.0 too');
-  assert.deepEqual(rr.last.unmet.map((d) => d.depends_on), [102]);
-  // branch-4.2 accepted it, so branch-4.0 (which reuses branch-4.2's commits) follows that decision.
-  assert.match(lane.followSource(SID, 'branch-4.0', 103), /backport #102, as decided on branch-4.2/);
+  // branch-4.2 accepted the #102 dependency while backporting, so branch-4.0 (which reuses branch-4.2's commits)
+  // got the same decision then: it is not asked again.
   assert.equal(db.get(`SELECT status FROM deps WHERE session_id = ? AND pr = 103 AND depends_on = 102 AND branch = 'branch-4.0'`, SID).status, 'accepted');
+  assert.match(db.get(`SELECT decision_note FROM targets WHERE session_id = ? AND pr = 102 AND branch = 'branch-4.0'`, SID).decision_note, /as on branch-4\.2/);
   assert.equal(lane.pickAll(SID, 'branch-4.0', { log: () => {} }).last.status, 'done');
   const msg = sh(lane.worktreeDir(SID, 'branch-4.0'), 'log', '-1', '--format=%B', 'HEAD~2');
   assert.equal((msg.match(/cherry picked from commit/g) || []).length, 1, 'no second trailer');
@@ -883,4 +881,27 @@ test('PRs labelled skip-cherry-pick are left out, even with a release label', ()
   } finally {
     fs.rmSync(path.join(tmp, 'graphql.json'), { force: true }); fs.rmSync(path.join(tmp, 'labelled'), { recursive: true, force: true });
   }
+});
+
+test('a dependency accepted on branch-4.2 while backporting also holds on the branch-4.0 lane that reuses it', () => {
+  const sid = 'mirror-deps';
+  plan.createSession({ id: sid, repo, remote: 'origin', sincePr: 152, list: '154', branches: plan.parseBranches('branch-4.2:4.2.6,branch-4.0:4.0.15<branch-4.2') });
+  plan.discover(sid, { log: () => {}, blame: false });
+  const t = (pr, b) => db.get('SELECT on_branch, decision, decision_source, decision_note FROM targets WHERE session_id = ? AND pr = ? AND branch = ?', sid, pr, b);
+  assert.equal(t(154, 'branch-4.0').decision, 'backport');
+  plan.addPrs(sid, [118], { reason: 'test' });
+  assert.equal(t(118, 'branch-4.0').on_branch, 0);
+  db.run(`INSERT INTO deps (session_id, pr, depends_on, branch, source, detail, status, phase, created_at) VALUES (?,?,?,?,?,?,?,?,?)`,
+    sid, 154, 118, 'branch-4.2', 'manual', 'proposed by a worker', 'open', 'backport', db.now());
+  const id = db.get('SELECT id FROM deps WHERE session_id = ? AND branch = ?', sid, 'branch-4.2').id;
+  lane.setDep(sid, id, 'accepted');
+  assert.equal(t(118, 'branch-4.2').decision, 'backport');
+  assert.equal(t(118, 'branch-4.0').decision, 'backport', 'the same decision on the reusing lane');
+  assert.match(t(118, 'branch-4.0').decision_note, /as on branch-4\.2/);
+  const m = db.get(`SELECT status, detail FROM deps WHERE session_id = ? AND pr = 154 AND depends_on = 118 AND branch = 'branch-4.0'`, sid);
+  assert.equal(m.status, 'accepted'); assert.match(m.detail, /^as on branch-4\.2/);
+  // A decision the user made for branch-4.0 stays; a dependent that does not go to branch-4.0 mirrors nothing.
+  plan.setDecision(sid, 118, 'branch-4.0', 'skip', 'not on 4.0');
+  lane.setDep(sid, id, 'dismissed'); lane.setDep(sid, id, 'accepted');
+  assert.equal(t(118, 'branch-4.0').decision, 'skip');
 });
