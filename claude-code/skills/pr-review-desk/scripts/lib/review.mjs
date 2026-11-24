@@ -6,6 +6,7 @@ import path from 'node:path';
 import * as db from './db.mjs';
 import * as P from './prt.mjs';
 import { diffFor, refreshItem, track, draftStaleness } from './triage.mjs';
+import * as guidance from './guidance.mjs';
 
 export const EVENTS = ['COMMENT', 'REQUEST_CHANGES', 'APPROVE'];
 const SHA = /^[0-9a-f]{7,40}$/i;
@@ -106,7 +107,11 @@ export async function importFindings(repo, number, findings, { jobId = null, kin
   for (const ic of findings.issueCommentAssessments || []) {
     if (ic.reply) comments.push({ kind: 'issue', in_reply_to: ic.url, body: await L(ic.reply), source: 'ai', meta: { assessment: ic.assessment, why: ic.why } });
   }
-  const body = await L(findings.summary || '');
+  // Contributor guidance (quickCheck, Personal CI, semantic title): appended when the summary leaves an item out.
+  const g = await guidance.assess(repo, number, head, { extra: Array.isArray(findings.guidance) ? findings.guidance : [] }).catch((e) => ({ items: [], error: e.message }));
+  const ensured = guidance.ensure(await L(findings.summary || ''), g.items);
+  const body = ensured.body;
+  if (g.error) warnings.push(`Contributor guidance not checked: ${g.error}`);
   for (const text of [body, ...comments.map((c) => c.body)]) {
     const audit = P.auditPermalinks(text, { repo, sha: head });
     for (const r of audit.refs) warnings.push(`A link names a branch or tag instead of a commit: ${r.url}`);
@@ -119,6 +124,7 @@ export async function importFindings(repo, number, findings, { jobId = null, kin
     basisAt: basis,
     tier: findings.tier || null, reviewers: findings.reviewers || [], coverage: findings.coverage || null,
     dropped: findings.dropped || [], threads, gate, warnings,
+    guidance: g.items.map((x) => ({ key: x.key, why: x.why, appended: ensured.added.includes(x.key) })),
   };
   const recommended = EVENTS.includes(findings.recommendedEvent) ? findings.recommendedEvent : 'COMMENT';
 

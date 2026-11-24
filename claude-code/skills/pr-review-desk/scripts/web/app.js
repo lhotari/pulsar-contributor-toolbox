@@ -693,6 +693,8 @@ function renderReview() {
     review.recommended_why ? h('p', { class: 'small muted' }, review.recommended_why) : null,
     h('p', { class: 'small muted' }, [m.reviewers?.length ? `Draft by ${m.reviewers.join(', ')}` : null, m.coverage, m.tier ? `tier ${m.tier}` : null, m.gate?.state ? `gate ${m.gate.state}` : null].filter(Boolean).join(' · '), ' (private, never posted)'),
     warnings.length ? h('ul', { class: 'warnings' }, warnings.map((w) => h('li', {}, w))) : null,
+    m.guidance?.length ? h('p', { class: 'small' }, h('strong', {}, 'Contributor guidance in the body: '),
+      ...m.guidance.flatMap((x, i) => [i ? ' · ' : '', chip(x.key, 'warn'), ` ${x.why}${x.appended ? ' (appended by the desk)' : ''}`])) : null,
     h('h3', {}, 'Review body'), bodyBox);
   const dropped = m.dropped?.length ? h('details', { class: 'panel' }, h('summary', {}, `${m.dropped.length} dropped candidate finding(s)`),
     h('ul', { class: 'small' }, m.dropped.map((d) => h('li', {}, h('strong', {}, d.claim), ` — ${d.reason}`)))) : null;

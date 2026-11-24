@@ -49,6 +49,9 @@ export const DEFAULTS = {
   model: null,                          // model for the worker harness (null: Claude Code default)
   permissionMode: 'auto',
   syncMinutes: 15,
+  // Contributor guidance in reviews (checkstyle → quickCheck, compile failures / untested → Personal CI, first-timers →
+  // Personal CI, semantic title): "auto" turns it on for repositories named */pulsar; true or false forces it.
+  guidance: 'auto',
 };
 
 function merge(base, over) {

@@ -88,6 +88,13 @@ Start with `node "$PRD" job show <job>` (JSON: PR facts, pinned `head`, `diffFil
 7. **merge** — `node "$PRD" job merge-start <job>` (after a clear gate), resolve the conflicted files keeping both sides' intent, `git add` + `git commit --no-edit`, build/test the touched modules when allowed, `node "$PRD" job merge-ready <job>`, then `job done` with a per-file account. Never push.
 8. **ask** — answer in the summary (`job done <job> --summary-file f`); it is shown privately in the UI. Change the draft only when asked.
 
+**Contributor guidance** (apache/pulsar and other `*/pulsar` repos; repo config `guidance: true|false|"auto"`): for review and re-review jobs `ctx.guidance.items` lists what the desk detected on the pinned head, each with ready text:
+- `checkstyle`: a failed CI job's log shows checkstyle, spotless (format) or RAT (license header) errors → ask the author to run `./gradlew quickCheck` (Maven base branches: the `verify -DskipTests` check) before pushing to the PR branch;
+- `personal-ci`: a failed job's log shows javac errors (not a dependency download failure), or the worker found the PR obviously untested (`"guidance": ["personal-ci"]` in findings.json) → build and test locally and use [Personal CI](https://pulsar.apache.org/contribute/personal-ci/);
+- `first-timer`: a first-time contributor with no Personal CI mention or fork PR/run link in the description or comments → explain Personal CI (no waiting for a maintainer to approve CI runs; saves the project's CI resources);
+- `title`: the title breaks the semantic-title rules (from the base branch's `ci-semantic-pull-request.yml`) or its check failed → refer to https://pulsar.apache.org/contribute/develop-semantic-title.
+Put each into the summary after the thanks (reword to fit, keep links and commands); add an inline finding at the failing file:line from `logLines` when it is in the diff. The import appends any item the summary leaves out and the UI shows what was added. Title and first-timer notes are not repeated once they were said on the PR.
+
 `findings.json` is the pr-review contract — schema in `../pr-review-track/references/findings-schema.md`. Rules that matter here: `head` is the SHA you read (the job's pinned head); a finding that does not anchor still goes in (it arrives excluded with the reason); name code locations in prose (`Consumer.java:1015`) and the import links them at `head`; `summary` and every `body` reach a public PR.
 
 ### What posts, and how it reads
