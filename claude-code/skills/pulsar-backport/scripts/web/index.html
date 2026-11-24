@@ -21,7 +21,7 @@
 <dialog id="newDialog">
   <form method="dialog" id="newForm">
     <h2>New backport session</h2>
-    <label>Session id <input name="id" required pattern="[a-z0-9][a-z0-9._-]{2,60}" placeholder="2026-11-backports"></label>
+    <label>Session id <input name="id" required pattern="[a-z0-9][a-z0-9._-]{2,60}" placeholder="2026-11-24-backports"></label>
     <label>Continue after session <select name="after" id="newAfter"><option value="">— none: give the starting point —</option></select></label>
     <p class="muted small" id="newAfterNote">Starts after the last master commit the chosen session evaluated, with its branches (a release that is already tagged moves to the next patch version).</p>
     <label>Title <input name="title" placeholder="Backports for 4.2.6 and 4.0.15"></label>
@@ -40,7 +40,7 @@
     <p class="muted small" id="newListNote">PR numbers, PR links or master commit hashes, separated by spaces, commas or lines. They are decided "backport" for every lane and picked in master order (one merged before the starting point is pulled in); dependencies are found as in any session. With "only the PRs and commits listed", they are the whole plan and no starting point is needed.</p>
     <label>Instructions for the Claude workers (optional)
       <textarea name="instructions" rows="3" placeholder="e.g. Keep the public API of branch-4.0 unchanged; adapt the tests to the branch's test helpers rather than backporting new ones."></textarea></label>
-    <menu><button value="cancel" class="ghost">Cancel</button><button value="ok" class="primary">Create and discover</button></menu>
+    <menu><button value="cancel" class="ghost" formnovalidate>Cancel</button><button value="ok" class="primary">Create and discover</button></menu>
   </form>
 </dialog>
 

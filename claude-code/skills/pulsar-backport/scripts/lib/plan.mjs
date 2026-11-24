@@ -33,6 +33,13 @@ export function parseBranches(spec) {
  * instructions: free text the user gives every Claude worker of the session (and the triage brief).
  */
 export const SCOPES = ['both', 'range', 'labelled', 'list'];
+/** The id to propose for a new session: "YYYY-mm-dd-backports", then "-2", "-3", ... for more sessions that day. */
+export function proposeSessionId(d = new Date()) {
+  const p = (n) => String(n).padStart(2, '0');
+  const base = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-backports`;
+  let id = base; for (let i = 2; db.get('SELECT 1 FROM sessions WHERE id = ?', id); i++) id = `${base}-${i}`;
+  return id;
+}
 export function createSession({ id, title, repo = DEFAULT_REPO, branches, sincePr, sinceSha, source = 'master', remote: remoteName = null, scope = 'both', after = null, list = null, instructions = null }) {
   if (!/^[a-z0-9][a-z0-9._-]{2,60}$/.test(id)) throw new Error('session id: lowercase letters, digits, . _ -');
   if (db.get('SELECT 1 FROM sessions WHERE id = ?', id)) throw new Error(`session ${id} exists`);

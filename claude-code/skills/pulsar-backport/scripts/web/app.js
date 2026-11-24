@@ -133,8 +133,16 @@ $('#newSession').onclick = () => {
   const els = $('#newForm').elements; els.sincePr.disabled = els.sinceSha.disabled = false; els.after.disabled = false;
   els.scope.value = 'both'; newScope();
   $('#newAfterNote').textContent = 'Starts after the last master commit the chosen session evaluated, with its branches (a release that is already tagged moves to the next patch version).';
+  els.id.value = proposeId();
   $('#newDialog').showModal();
 };
+/** "YYYY-mm-dd-backports", then "-2", "-3", ... when the day already has sessions (archived ones included). */
+function proposeId() {
+  const d = new Date(); const p = (n) => String(n).padStart(2, '0');
+  const base = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-backports`;
+  let id = base; for (let i = 2; S.sessions.some((x) => x.id === id); i++) id = `${base}-${i}`;
+  return id;
+}
 /** A custom session ("list"): the listed PRs instead of a starting point. */
 function newScope() {
   const f = $('#newForm').elements; const list = f.scope.value === 'list';
@@ -151,11 +159,7 @@ $('#newAfter').onchange = async (e) => {
   try {
     const n = await api(`sessions/${encodeURIComponent(prev)}/next`);
     f.branches.value = n.branches; f.title.value = n.title; f.sincePr.value = ''; f.sinceSha.value = n.sinceSha;
-    if (!f.id.value) {
-      const base = `${new Date().toISOString().slice(0, 7)}-${n.branches.split(',').map((x) => x.split(/[:<]/)[1]).filter(Boolean).join('-')}`;
-      let id = base; for (let i = 2; S.sessions.some((x) => x.id === id); i++) id = `${base}-${i}`;
-      f.id.value = id;
-    }
+    if (!f.id.value) f.id.value = proposeId();
     $('#newAfterNote').textContent = `Starts after ${short(n.sinceSha)} ${n.sinceTitle}. ${Object.entries(n.released).map(([b, r]) => `${b}: ${r ? 'released, next patch version' : 'not released yet, same version'}`).join('; ')}.`;
   } catch (err) { toast(err.message, true); }
 };

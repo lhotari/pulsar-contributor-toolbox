@@ -22,7 +22,8 @@ const HELP = `bpt — apache/pulsar backport sessions (state: ${db.DB_PATH})
   doctor
   serve [--port 8765] [--open]                      web UI + job runner + autopilot (port and addresses: servers.yaml, see lib/listen.mjs)
   url [--open]                                      the running server's links (one per bound address, with the token)
-  session create <id> --branches branch-4.2:4.2.6,branch-4.0:4.0.15<branch-4.2 (--since-pr N | --since-sha S) [--title T] [--repo DIR] [--remote NAME] [--scope both|range|labelled]
+  session create [<id>] --branches branch-4.2:4.2.6,branch-4.0:4.0.15<branch-4.2 (--since-pr N | --since-sha S) [--title T] [--repo DIR] [--remote NAME] [--scope both|range|labelled]
+                                                    (no id: YYYY-mm-dd-backports, then -2, -3 for more sessions that day)
   session create <id> --after <previous-session> [--branches ...] [--title T] [--scope both|range|labelled]
   session create <id> --branches ... --list "27424 #27500 abcdef123" [--instructions T | --instructions-file F] [--title T]   (custom: only the listed master PRs/commits, decided backport)
       --list also works with --since-pr/--since-sha/--after: the listed PRs come on top of the plan (decided backport; older ones pulled in)
@@ -221,7 +222,7 @@ async function main() {
           .map(({ config, ...x }) => ({ ...x, archived: db.J(config, {}).archived?.at || null })).filter((x) => opt.all || !x.archived));
       }
       if (sub === 'create') {
-        const s = plan.createSession({ id: need(pos[0], 'session id'), title: opt.title, repo: opt.repo || plan.DEFAULT_REPO,
+        const s = plan.createSession({ id: pos[0] || plan.proposeSessionId(), title: opt.title, repo: opt.repo || plan.DEFAULT_REPO,
           branches: opt.branches ? plan.parseBranches(opt.branches) : opt.after ? null : need(opt.branches, '--branches'),
           sincePr: opt['since-pr'] && Number(opt['since-pr']), sinceSha: opt['since-sha'], remote: opt.remote || null,
           scope: opt.scope || 'both', after: opt.after || null, list: typeof opt.list === 'string' ? opt.list : null,

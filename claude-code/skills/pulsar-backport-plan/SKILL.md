@@ -35,6 +35,8 @@ Start it with `run_in_background` and give the user the printed link. The UI sho
 
 ## Create a plan
 
+
+Session ids: propose `YYYY-mm-dd-backports` (today's date), with `-2`, `-3`, ... when that day already has a session (`session create` without an id, and the New session dialog, pick it).
 ```bash
 node "$BPT" session create <id> --since-pr 21767 \
   --branches 'branch-4.2:4.2.6,branch-4.0:4.0.15<branch-4.2' --title "Backports for 4.2.6 and 4.0.15"
