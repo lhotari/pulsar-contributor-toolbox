@@ -261,7 +261,14 @@ function queueResolve(sid, branch, pr) {
   return tries >= 2 ? null : jobs.enqueue(sid, branch, 'resolve', { pr });
 }
 
-const METHOD_RE = /^\s*(?:(?:public|protected|private|static|final|synchronized)\s+)*[\w<>[\],\s]+?\s+(\w+)\s*\([^;]*$/;
+// A method declaration: modifiers, an optional type parameter list, a return type that starts with a letter (so an
+// indented call such as `assertEquals(a,` that continues on the next line is not taken for one), the name and `(`.
+const METHOD_RE = /^\s*(?:(?:public|protected|private|static|final|synchronized|abstract|default)\s+)*(?:<[^>]+>\s+)?[A-Za-z_$][\w$<>[\],.?\s]*?\s+(\w+)\s*\([^;]*$/;
+/** The name of the method a source line declares, or null. */
+export function declaredMethod(line) {
+  const m = String(line).match(METHOD_RE);
+  return m && !/^\s*(if|for|while|switch|catch|return|new|throw|else|yield|assert)\b/.test(line) ? m[1] : null;
+}
 /**
  * Step 6 of the pulsar-cherry-pick per-commit loop, worked out for the resolver: the test methods the commit
  * added or modified, per module, as -Dtest values. A change outside any @Test method (setup, helpers, fields)
@@ -289,10 +296,10 @@ export function changedTests(sid, branch, pick) {
       if (ln - 1 <= classAt || /^\s*(import\s|package\s|\/\/|\*|\/\*|$)/.test(src[ln - 1] ?? '')) continue;
       let name = null;
       for (let i = Math.min(ln, src.length) - 1; i >= 0; i--) {
-        const mm = src[i].match(METHOD_RE);
-        if (mm && !/^\s*(if|for|while|switch|catch|return|new)\b/.test(src[i])) {
+        const mm = declaredMethod(src[i]);
+        if (mm) {
           const annotated = src.slice(Math.max(0, i - 6), i).some((x) => /@Test\b/.test(x));
-          name = annotated ? mm[1] : null; break;
+          name = annotated ? mm : null; break;
         }
         if (/^\s*(public\s+|final\s+|abstract\s+)*class\s/.test(src[i])) break;
       }

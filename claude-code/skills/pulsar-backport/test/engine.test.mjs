@@ -924,3 +924,11 @@ test('a dependency accepted on branch-4.2 while backporting also holds on the br
   lane.setDep(sid, id, 'dismissed'); lane.setDep(sid, id, 'accepted');
   assert.equal(t(118, 'branch-4.0').decision, 'skip');
 });
+
+test('a changed line inside a test method selects that method, not a call that spans lines', () => {
+  assert.equal(lane.declaredMethod('    public void testConsumerBacklogEvictionTimeQuotaWithEmptyLedger() throws Exception {'), 'testConsumerBacklogEvictionTimeQuotaWithEmptyLedger');
+  assert.equal(lane.declaredMethod('    private static <T> List<T> helper(Map<String, T> m,'), 'helper');
+  assert.equal(lane.declaredMethod('        assertEquals(admin.namespaces().getBacklogQuotaMap("prop/ns-quota"),'), null);
+  assert.equal(lane.declaredMethod('            throw new IllegalStateException("x" +'), null);
+  assert.equal(lane.declaredMethod('        Awaitility.await().untilAsserted(() -> {'), null);
+});
