@@ -771,7 +771,7 @@ function reviewOf(p) {
   return { r, verdict: r.verdict, label: accepted ? 'concern accepted' : r.verdict, cls: accepted ? 'review-accepted' : `review-${r.verdict}` };
 }
 // ---------- hunk compare: each hunk of the pick next to master's; identical hunks hidden unless asked ----------
-const KIND = { identical: 'identical', context: 'same change, other context', logging: 'same change, logging adapted (slog → slf4j)', modified: 'changed in the backport', 'master-only': 'not in the backport', 'backport-only': 'only in the backport' };
+const KIND = { identical: 'identical', context: 'same change, other context', logging: 'same change, logging adapted (slog → slf4j)', imports: 'imports only (test)', modified: 'changed in the backport', 'master-only': 'not in the backport', 'backport-only': 'only in the backport' };
 /** A hunk; in a changed one the lines far from a marked (differing) line fold into one clickable line. */
 function hunkPre(hk) {
   const marks = new Set(hk.marks || []); const near = 3;
@@ -790,7 +790,7 @@ function hunkPre(hk) {
 }
 const countsText = (c) => Object.entries(c || {}).filter(([, n]) => n).map(([k, n]) => `${n} ${KIND[k] || k}`).join(' · ') || 'no hunks';
 const failing = (c) => (c.rules || []).filter((r) => r.level === 'fail' && !r.accepted);
-const SAME = ['identical', 'context', 'logging'];
+const SAME = ['identical', 'context', 'logging', 'imports'];
 const differs = (c) => (c.rules || []).length > 0 || Object.entries(c.counts || {}).some(([k, n]) => n && !SAME.includes(k));
 function rulesList(c) {
   if (!c.rules?.length) return null;
@@ -822,22 +822,34 @@ function ghFileLink(base, file, text, title, cls = '') {
   return a;
 }
 // ---------- explain: a read-only Claude worker writes up why a pick is backported the way it is ----------
-const explainJob = (branch, pr) => (S.summary?.activeJobs || []).find((j) => j.type === 'explain' && j.args?.branch === branch && j.args?.pr === pr);
-/** The Explain button (or the running job) and the explanation, for one compared pick. */
+const explainJobs = (branch, pr) => (S.summary?.activeJobs || []).filter((j) => j.type === 'explain' && j.args?.branch === branch && j.args?.pr === pr);
+const explainJob = (branch, pr) => explainJobs(branch, pr)[0];
+/**
+ * Explain / ask a question, for one compared pick: an optional question and the Explain button (empty: the full
+ * explanation), the running jobs, and the explanation and answers recorded so far.
+ */
 function explainBlock(branch, c) {
-  const job = explainJob(branch, c.pr); const e = c.explanation;
-  if (job) (S.explaining ||= new Set()).add(`${branch}:${c.pr}`);   // reload the view when it is done
-  const stale = e && e.sha !== c.backportSha;
-  const btn = job ? h('span', { class: 'small' }, h('span', { class: 'spin' }), `explaining (job ${job.id}, ${job.status}) `, h('a', { href: '#', onclick: (ev) => { ev.preventDefault(); openLog(job.id); } }, 'log'))
-    : h('button', { title: 'A Claude worker reads the hunks, the resolve history, the branch code and the PR, and explains in detail why the pick is backported this way (read only)',
-      onclick: async () => {
-        await act('explain', branch, { pr: c.pr });
-        (S.explaining ||= new Set()).add(`${branch}:${c.pr}`);
-        if ($('#laneCmpDialog').open) renderLaneCompare(); if ($('#cmpDialog').open) renderCompare();   // the job's spinner
-      } }, e ? 'Explain again' : 'Explain');
-  const body = e ? h('details', { class: 'explanation', open: !stale },
-    h('summary', {}, h('b', {}, 'Why it is backported this way'), h('span', { class: 'muted small' }, ` ${when(e.at)}${e.job ? ` · job ${e.job}` : ''}${stale ? ' · written for an earlier commit of the pick' : ''}`)),
-    h('div', { class: 'report', html: mdToHtml(e.text) })) : null;
+  const running = explainJobs(branch, c.pr);
+  if (running.length) (S.explaining ||= new Set()).add(`${branch}:${c.pr}`);   // reload the view when they are done
+  const list = c.explanations || [];
+  const q = h('input', { class: 'ask', type: 'text', placeholder: 'Ask a question about this backport (optional)', 'aria-label': 'Question for the explain worker',
+    onkeydown: (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); go.click(); } } });
+  const go = h('button', { title: 'A Claude worker reads the hunks, the resolve history, the branch code and the PR (read only). Empty question: it explains in detail why the pick is backported this way; otherwise it answers the question.',
+    onclick: async () => {
+      await act('explain', branch, { pr: c.pr, question: q.value.trim() || undefined });
+      (S.explaining ||= new Set()).add(`${branch}:${c.pr}`);
+      if ($('#laneCmpDialog').open) renderLaneCompare(); if ($('#cmpDialog').open) renderCompare();   // the job's spinner
+    } }, 'Explain');
+  const jobsEl = running.map((j) => h('span', { class: 'small' }, h('span', { class: 'spin' }), `${j.args.question ? `answering “${j.args.question.slice(0, 60)}${j.args.question.length > 60 ? '…' : ''}”` : 'explaining'} (job ${j.id}, ${j.status}) `,
+    h('a', { href: '#', onclick: (ev) => { ev.preventDefault(); openLog(j.id); } }, 'log')));
+  const btn = h('span', { class: 'askBox' }, q, go, ...jobsEl);
+  const body = list.length ? h('div', {}, list.map((e, i) => {
+    const stale = e.sha !== c.backportSha;
+    return h('details', { class: 'explanation', open: i === 0 && !stale },
+      h('summary', {}, h('b', {}, e.question ? `Q: ${e.question}` : 'Why it is backported this way'),
+        h('span', { class: 'muted small' }, ` ${when(e.at)}${e.job ? ` · job ${e.job}` : ''}${stale ? ' · written for an earlier commit of the pick' : ''}`)),
+      h('div', { class: 'report', html: mdToHtml(e.text) }));
+  })) : null;
   return { btn, body };
 }
 

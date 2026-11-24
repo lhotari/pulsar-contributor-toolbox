@@ -18,7 +18,7 @@
 //   commit does not touch. Allowed, but the diff review must explain it (it cannot record "ok").
 import * as g from './git.mjs';
 
-const TEST = /(^|\/)src\/test\/|(^|\/)tests?\/|(^|\/)test-[^/]*\/|Test[^/]*\.(java|kt|scala|py|go|cc|cpp|h)$|_test\.(go|py)$/;
+const TEST = /(^|\/)src\/test\/|^testmocks\/|(^|\/)tests?\/|(^|\/)test-[^/]*\/|Test[^/]*\.(java|kt|scala|py|go|cc|cpp|h)$|_test\.(go|py)$/;
 // Build and CI files differ by design between master (Gradle) and the branches (Maven); the dependency check covers
 // version upgrades.
 const BUILD = /(^|\/)(build\.gradle(\.kts)?|settings\.gradle(\.kts)?|gradle\.properties|gradlew(\.bat)?|pom\.xml)$|^(gradle|build-logic|buildSrc|\.github|\.mvn)\//;
@@ -95,7 +95,7 @@ export function compareHunks(masterDiff, backportDiff) {
 }
 
 const where = (rows) => rows.map((r) => (r.master || r.backport)).map((h) => h.header.replace(/^@@ [^@]+ @@\s*/, '').trim() || `line ${h.newStart}`).slice(0, 4).join('; ');
-export const SAME = ['identical', 'context', 'logging'];
+export const SAME = ['identical', 'context', 'logging', 'imports'];
 const strip = (h, marks) => (h ? { header: h.header, lines: h.lines, importOnly: h.importOnly, marks } : null);
 const trivial = (l) => IMPORT.test(l) || /^[+-]\s*$/.test(l);
 
@@ -125,6 +125,40 @@ function delta(r, branchHas) {
   const keepM = m.filter((i) => { const l = r.master.lines[i]; return !trivial(l) && !(l[0] === '-' && !branchHas(l.slice(1))); });
   const keepB = b.filter((i) => !trivial(r.backport.lines[i]));
   return { m, b, real: keepM.length + keepB.length, keepM, keepB, logging };
+}
+
+/**
+ * The two sides may cut the same change into hunks differently (e.g. two nearby insertions are one hunk on the
+ * branch, where shorter log statements bring them closer, and two on master): a changed line that differs in one
+ * hunk and turns up on the other side in another hunk of the same file is no difference. Rows whose differences all
+ * cancel out this way are the same change ("context").
+ */
+export function regroup(rows) {
+  const items = { m: [], b: [] };
+  for (const [ri, r] of rows.entries()) {
+    const take = (side, hk, idx) => { for (const i of idx) if (!trivial(hk.lines[i])) items[side].push({ ri, i, key: norm(hk.lines[i]) }); };
+    if (r.kind === 'modified') { take('m', r.master, r.marks.keepM); take('b', r.backport, r.marks.keepB); }
+    else if (r.kind === 'master-only') take('m', r.master, r.master.lines.map((_, i) => i).filter((i) => r.master.lines[i][0] !== ' '));
+    else if (r.kind === 'backport-only') take('b', r.backport, r.backport.lines.map((_, i) => i).filter((i) => r.backport.lines[i][0] !== ' '));
+  }
+  const pool = new Map();
+  for (const x of items.b) (pool.get(x.key) || pool.set(x.key, []).get(x.key)).push(x);
+  const cancelled = new Set();
+  for (const x of items.m) {
+    const q = pool.get(x.key); if (!q?.length || q[0].ri === x.ri) continue;   // the same line elsewhere in the file
+    const y = q.shift(); cancelled.add(`m${x.ri}:${x.i}`); cancelled.add(`b${y.ri}:${y.i}`);
+  }
+  if (!cancelled.size) return rows;
+  return rows.map((r, ri) => {
+    const left = (side) => items[side].filter((x) => x.ri === ri && !cancelled.has(`${side}${ri}:${x.i}`)).length;
+    const had = items.m.some((x) => x.ri === ri) || items.b.some((x) => x.ri === ri);
+    if (!had || left('m') || left('b')) {
+      if (r.kind !== 'modified') return r;
+      const keep = (side, idx) => idx.filter((i) => !cancelled.has(`${side}${ri}:${i}`));
+      return { ...r, marks: { ...r.marks, m: keep('m', r.marks.m), b: keep('b', r.marks.b) } };
+    }
+    return { ...r, kind: 'context', regrouped: true, marks: r.marks ? { ...r.marks, m: [], b: [] } : undefined };
+  });
 }
 
 const LOG_START = /^(?:this\.)?(?:log|LOG|logger|LOGGER)\.(trace|debug|info|warn|error)\b/;
@@ -170,7 +204,7 @@ function sameStatements(ma, lm, sm, ba, lb, sb) {
  * branch before the pick; `onBranch(path, method)` whether the branch has a test method already.
  */
 export function comparePick(files, { exists = () => true, onBranch = () => false, fileAt = () => null, identical = false } = {}) {
-  const total = { identical: 0, context: 0, logging: 0, modified: 0, 'master-only': 0, 'backport-only': 0 };
+  const total = { identical: 0, context: 0, logging: 0, imports: 0, modified: 0, 'master-only': 0, 'backport-only': 0 };
   const out = []; const rules = [];
   const fail = (rule, file, message) => rules.push({ rule, level: 'fail', file, message });
   const warn = (rule, file, message) => rules.push({ rule, level: 'warn', file, message });
@@ -181,11 +215,22 @@ export function comparePick(files, { exists = () => true, onBranch = () => false
     const lines = text == null ? null : new Set(text.split('\n').map((l) => l.trim().replace(/\s+/g, ' ')));
     const branchHas = (l) => !lines || lines.has(l.trim().replace(/\s+/g, ' '));
     // A modified pair whose differences are imports, blank lines or removals the branch has nothing for is the same change.
-    const rows = raw.map((r) => {
+    let rows = regroup(raw.map((r) => {
       if (r.kind !== 'modified') return r;
       const d = delta(r, branchHas);
       return { ...r, kind: d.real ? 'modified' : d.logging ? 'logging' : 'context', marks: d };
-    });
+    }));
+    // In tests, plain import changes (a hunk of imports only, or differing import lines) are not worth a look.
+    if (kind === 'test') {
+      rows = rows.map((r) => {
+        const onlyImports = (r.kind === 'master-only' && r.master.importOnly) || (r.kind === 'backport-only' && r.backport.importOnly)
+          || (r.kind === 'modified' && r.master.importOnly && r.backport.importOnly);
+        if (onlyImports) return { ...r, kind: 'imports' };
+        if (!r.marks) return r;
+        const keep = (hk, idx) => idx.filter((i) => !IMPORT.test(hk.lines[i]));
+        return { ...r, marks: { ...r.marks, m: keep(r.master, r.marks.m), b: keep(r.backport, r.marks.b) } };
+      });
+    }
     const counts = Object.fromEntries(Object.keys(total).map((k) => [k, rows.filter((r) => r.kind === k).length]));
     for (const [k, v] of Object.entries(counts)) total[k] += v;
     out.push({ path: f.path, kind, status: { master: f.master?.status || null, backport: f.backport?.status || null }, counts,

@@ -47,7 +47,7 @@ const HELP = `bpt — apache/pulsar backport sessions (state: ${db.DB_PATH})
   pick diff <id> <branch> <pr> [--json]    the master commit and the backport, file by file, with the review context
   pick review <id> <branch> <pr> --verdict ok|adapted|concern --summary T [--concerns T]   record a diff review
   pick accept-review <id> <branch> <pr> --reason T   accept a review concern
-  pick explain <id> <branch> <pr> (--queue | --file F | --text T)   queue an explain job (read-only Claude worker), or record its Markdown write-up
+  pick explain <id> <branch> <pr> (--queue [--question Q] | --file F | --text T)   queue an explain job (read-only Claude worker; with a question it answers that), or record its Markdown write-up
   pick analysis <id> <branch> <pr> --fixes T --relevance T --reason bug|security|divergence|dependency|test|build|other --compat none|behavior|breaking [--compat-note T]
   lane build <id> <branch> <pr>   run the build check (changed modules compile, changed tests, checkstyle) for a committed pick
   lane absorb <id> <branch>       squash fixup! commits into the picks they fix and update the pick shas
@@ -297,7 +297,7 @@ async function main() {
           concerns: typeof opt.concerns === 'string' ? opt.concerns : null, job: process.env.BPT_JOB ? Number(process.env.BPT_JOB) : null }));
         case 'accept-review': review.accept(sid, branch, pr, need(opt.reason, '--reason')); return out('ok');
         case 'explain': {
-          if (opt.queue) return out({ job: jobs.enqueue(sid, null, 'explain', { branch, pr }) });
+          if (opt.queue) return out({ job: jobs.enqueue(sid, null, 'explain', { branch, pr, question: typeof opt.question === 'string' ? opt.question : undefined }) });
           const text = typeof opt.file === 'string' ? fs.readFileSync(opt.file, 'utf8') : typeof opt.text === 'string' ? opt.text : null;
           return out(review.recordExplanation(sid, branch, pr, need(text, '--file or --text'), process.env.BPT_JOB ? Number(process.env.BPT_JOB) : null));
         }

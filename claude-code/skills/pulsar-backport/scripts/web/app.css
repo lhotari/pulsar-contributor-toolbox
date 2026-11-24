@@ -219,3 +219,5 @@ html.fgBusy, html.fgBusy * { cursor: progress !important; }
 .explanation { margin: 8px 0; border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; background: var(--panel); }
 .explanation > summary { cursor: pointer; }
 .explanation .report { border: 0; padding: 0 4px; max-width: none; }
+.askBox { display: inline-flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.askBox input.ask { width: min(360px, 60vw); }

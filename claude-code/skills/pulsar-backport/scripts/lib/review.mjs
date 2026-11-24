@@ -93,13 +93,25 @@ export function recordAnalysis(sid, branch, pr, { fixes, relevance, reason, comp
   return analysisOf(sid, branch, pr);
 }
 
-/** An explain job's write-up of why the pick is backported the way it is (for the pick's current commit). */
+/** The explanations and answers recorded for a pick, newest first. */
+export function explanationsOf(p) {
+  const d = p?.detail || {};
+  return [...(d.explanations || []), ...(d.explanation ? [d.explanation] : [])].sort((a, b) => String(b.at).localeCompare(String(a.at)));
+}
+
+/**
+ * An explain job's write-up for the pick's current commit: why it is backported the way it is, or the answer to the
+ * user's question (the job's args.question). A new explanation replaces the previous one; answers accumulate.
+ */
 export function recordExplanation(sid, branch, pr, text, job = null) {
   if (!String(text || '').trim()) throw new Error('the explanation is empty');
   const p = picks(sid, branch).find((x) => x.pr === pr);
   if (!p?.picked_sha) throw new Error(`#${pr} is not a committed pick of ${branch}`);
-  setDetail(sid, branch, pr, { ...p.detail, explanation: { text: String(text), sha: p.picked_sha, job, at: db.now() } });
-  db.event(sid, `#${pr}: explanation of the backport recorded`, { branch, job });
+  const question = job ? db.J(db.get('SELECT args FROM jobs WHERE id = ?', job)?.args, {}).question || null : null;
+  const entry = { question, text: String(text), sha: p.picked_sha, job, at: db.now() };
+  const kept = explanationsOf(p).filter((x) => question || x.question);   // a new explanation replaces the old one
+  setDetail(sid, branch, pr, { ...p.detail, explanation: undefined, explanations: [entry, ...kept] });
+  db.event(sid, question ? `#${pr}: answered "${question.slice(0, 120)}"` : `#${pr}: explanation of the backport recorded`, { branch, job });
   return { ok: true };
 }
 
@@ -185,7 +197,7 @@ export function comparePickHunks(sid, branch, pr, { identical = false } = {}) {
   const onGitHub = !!d.backportSha && [ci.final?.sha, ci.test?.sha].some((s) => s && g.isAncestor(l.worktree, d.backportSha, s));
   return { pr, branch, title: d.title, status: d.status, masterSha: d.masterSha, backportSha: d.backportSha, onGitHub, review: d.review,
     build: d.context.buildCheck, adaptations: p?.detail.adaptations || null, intentAccepted: p?.detail.intentAccepted || null,
-    explanation: p?.detail.explanation || null,
+    explanations: explanationsOf(p),
     files: c.files, counts: c.counts, rules };
 }
 

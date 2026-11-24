@@ -565,7 +565,17 @@ test('diff review: picks are reviewed after picking, a concern holds the squash,
   const ep = jobs.workerPrompt(jobs.job(e1));
   assert.match(ep, /read only/); assert.match(ep, /pick compare review-session branch-4\.2 115 --identical/); assert.match(ep, /pick explain review-session branch-4\.2 115 --file/);
   review.recordExplanation(sid, B, 115, '## Summary\nLine 3 differs because …', e1);
-  assert.match(review.comparePickHunks(sid, B, 115).explanation.text, /Line 3 differs/);
+  assert.match(review.comparePickHunks(sid, B, 115).explanations[0].text, /Line 3 differs/);
+  // Ask a question: a job per question; answers accumulate, a new explanation replaces the old one.
+  const q1 = jobs.enqueue(sid, null, 'explain', { branch: B, pr: 115, question: 'Why is line 3 kept?' });
+  assert.notEqual(q1, e1);
+  const qp = jobs.workerPrompt(jobs.job(q1));
+  assert.match(qp, /Answer the user's question[\s\S]*> Why is line 3 kept\?/); assert.doesNotMatch(qp, /\*\*Verdict\*\*/);
+  assert.match(ep, /\*\*Verdict\*\*/);
+  review.recordExplanation(sid, B, 115, 'Because the branch has no helper.', q1);
+  review.recordExplanation(sid, B, 115, '## Summary\nRewritten.', e1);
+  assert.deepEqual(review.comparePickHunks(sid, B, 115).explanations.map((x) => [x.question, x.text.split('\n').pop()]),
+    [[null, 'Rewritten.'], ['Why is line 3 kept?', 'Because the branch has no helper.']]);
   for (const x of db.all(`SELECT id FROM jobs WHERE session_id = ? AND type = 'explain'`, sid)) jobs.finish(x.id, 'done', {});
   // The concern is a decision, and it holds the squash.
   const dec = control.list(sid).find((x) => x.key === `review:${B}:115`);

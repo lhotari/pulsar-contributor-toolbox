@@ -141,3 +141,41 @@ test('slog on master and slf4j on the branch are the same change; a dropped or d
              connect();`) }]);
   assert.deepEqual(dropped.rules.map((r) => r.rule), ['main-modified'], 'a log statement left out is a difference');
 });
+
+test('the same lines cut into hunks differently on the two sides are the same change', () => {
+  const P = 'ml/src/main/java/Cursor.java';
+  const master = `@@ -10,6 +10,7 @@ class Cursor {
+             if (fatal(rc)) {
++                close(lh);
+                 log.error().attr("rc", rc)
+                         .attr("ledger", id)
+                         .log("Error reading");
+                 return;
+@@ -20,5 +21,6 @@ class Cursor {
+             } else if (rc != OK) {
++                close(lh);
+                 log.warn().attr("rc", rc)
+                         .log("Error reading");`;
+  const branch = `@@ -10,10 +10,12 @@ class Cursor {
+             if (fatal(rc)) {
++                close(lh);
+                 log.error("Error reading {} {}", rc, id);
+                 return;
+             } else if (rc != OK) {
++                close(lh);
+                 log.warn("Error reading {}", rc);`;
+  const c = comparePick([{ path: P, master: file(P, master), backport: file(P, branch) }]);
+  assert.deepEqual(c.rules, [], 'no main-dropped: both insertions are there');
+  assert.equal(c.counts['master-only'], 0);
+  const dropped = comparePick([{ path: P, master: file(P, master), backport: file(P, branch.replace(/(\} else if \(rc != OK\) \{\n)\+ +close\(lh\);\n/, '$1')) }]);
+  assert.deepEqual(dropped.rules.map((r) => r.rule), ['main-dropped'], 'one insertion really missing');
+});
+
+test('in tests, plain import changes are hidden; in main code an extra import is not a finding either', () => {
+  const imports = `@@ -20,6 +20,7 @@\n import static org.mockito.Mockito.mock;\n+import static org.mockito.Mockito.verify;\n import org.testng.annotations.Test;`;
+  const c = comparePick([{ path: TEST, master: file(TEST, testHunk(0)), backport: file(TEST, `${imports}\n${testHunk(0).replace('@@ -20,3 +20,9 @@', '@@ -40,3 +41,9 @@')}`) }]);
+  assert.deepEqual(c.rules, []);
+  assert.equal(c.counts.imports, 1);
+  assert.deepEqual(c.files[0].rows, [], 'hidden by default');
+  assert.equal(comparePick([{ path: TEST, master: file(TEST, testHunk(0)), backport: file(TEST, `${imports}\n${testHunk(0)}`) }], { identical: true }).files[0].rows.find((r) => r.kind === 'imports').backport.lines.length, 3);
+});

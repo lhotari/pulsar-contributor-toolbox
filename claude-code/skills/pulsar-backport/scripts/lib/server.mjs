@@ -111,7 +111,7 @@ const ACTIONS = {
   'report-open': (sid, b) => { const file = report.reportFile(sid, b); spawn('code', [file], { detached: true, stdio: 'ignore' }).on('error', () => {}).unref(); return { file }; },
   'report-gist': (sid, b) => report.createGist(sid, b),
   'accept-review': (sid, b, a) => { review.accept(sid, b, Number(a.pr), a.reason); return {}; },
-  explain: (sid, b, a) => ({ job: jobs.enqueue(sid, null, 'explain', { branch: b, pr: Number(a.pr), instructions: a.instructions || undefined }) }),
+  explain: (sid, b, a) => ({ job: jobs.enqueue(sid, null, 'explain', { branch: b, pr: Number(a.pr), question: String(a.question || '').trim() || undefined }) }),
   'accept-intent': (sid, b, a) => { lane.acceptIntent(sid, b, Number(a.pr), a.reason); return {}; },
   'fix-review': (sid, b, a) => { const p = lane.lanePicks(sid, b).find((x) => x.pr === Number(a.pr)); return { job: jobs.enqueue(sid, b, 'resolve', { pr: p.pr, concerns: p.detail.review?.concerns, instructions: a.instructions || undefined }) }; },
   'review-again': (sid, b, a) => { const p = lane.lanePicks(sid, b).find((x) => x.pr === Number(a.pr)); db.run('UPDATE picks SET detail = json_remove(detail, \'$.review\') WHERE session_id = ? AND branch = ? AND pr = ?', sid, b, p.pr); return {}; },

@@ -29,8 +29,9 @@ export function enqueue(sid, branch, type, args = {}) {
   // One active job per session, branch and type; triage batches are told apart by their batch.
   const dup = db.get(`SELECT id FROM jobs WHERE session_id = ? AND IFNULL(branch,'') = IFNULL(?,'') AND type = ? AND status IN ('queued','running','waiting')
                       AND IFNULL(json_extract(args, '$.batch'), '') = IFNULL(?, '')
-                      AND (type != 'explain' OR (json_extract(args, '$.branch') = ? AND json_extract(args, '$.pr') = ?))`,
-  sid, branch, type, args.batch ?? null, args.branch ?? null, args.pr ?? null);
+                      AND (type != 'explain' OR (json_extract(args, '$.branch') = ? AND json_extract(args, '$.pr') = ?
+                           AND IFNULL(json_extract(args, '$.question'), '') = IFNULL(?, '')))`,
+  sid, branch, type, args.batch ?? null, args.branch ?? null, args.pr ?? null, args.question ?? null);
   if (dup) return dup.id;
   const r = db.run('INSERT INTO jobs (session_id, branch, type, runner, args, created_at) VALUES (?,?,?,?,?,?)',
     sid, branch, type, runner, db.S(args), db.now());
@@ -130,12 +131,18 @@ Judge each pick on its own; keep it short and concrete. When every listed pick i
 
 function explainPrompt(j) {
   if (j.type !== 'explain') return '';
-  const { branch, pr } = j.args; const s = j.session_id;
+  const { branch, pr, question } = j.args; const s = j.session_id;
   const earlier = db.all(`SELECT id, type, status, result FROM jobs WHERE session_id = ? AND id != ? AND (branch = ? OR json_extract(args, '$.branch') = ?)
      AND (json_extract(args, '$.pr') = ? OR EXISTS (SELECT 1 FROM json_each(jobs.args, '$.prs') WHERE value = ?) OR type IN ('verify', 'fix-ci')) ORDER BY id`, s, j.id, branch, branch, pr, pr)
     .map((x) => `${x.id} (${x.type}, ${x.status}${db.J(x.result)?.summary ? `: ${String(db.J(x.result).summary).slice(0, 160)}` : ''})`);
-  const out = path.join(sessionDir(s), 'explain', `${branch}-${pr}.md`);
-  return `Explain in detail why pick #${pr} on ${branch} was backported the way it was. This is read only: do not change any file in the repository or the lane worktree, do not commit, do not run builds that write into the worktree. Do not hand the work to subagents.
+  const out = path.join(sessionDir(s), 'explain', `${branch}-${pr}-${j.id}.md`);
+  const task = question
+    ? `Answer the user's question about pick #${pr} on ${branch} (the backport of the master commit to that branch):\n\n> ${String(question).replace(/\n/g, '\n> ')}\n\nThis is read only:`
+    : `Explain in detail why pick #${pr} on ${branch} was backported the way it was. This is read only:`;
+  const write = question
+    ? `Then write the answer in Markdown to ${out} (create the directory), for a maintainer: the answer first, in a few sentences, then the evidence it rests on (quote the key lines, name commits and PRs as #12345, say what was checked and how). Gather only the evidence the question needs from the list above.`
+    : null;
+  return `${task} do not change any file in the repository or the lane worktree, do not commit, do not run builds that write into the worktree. Do not hand the work to subagents.
 
 Gather the evidence first:
 - node ${BPT} pick compare ${s} ${branch} ${pr} --identical: every hunk of the backport next to master's (identical, same change in other context, logging adapted, modified, master-only, backport-only) and the intent rules.
@@ -144,13 +151,13 @@ Gather the evidence first:
 - The branch's code before the pick (git -C <lane worktree> show <pick>^:<file>) and master's code before the master commit (git -C <session repo> show <master>^:<file>), to see what each side started from. Where they differ, find the master commits that made the difference and whether they are on ${branch} (git log -L, git log -S, git blame on master; the cherry-pick trailer or the PR number on the branch), and whether the plan left them out (pick diff lists them).
 - The PR itself, read only: gh pr view ${pr} -R apache/pulsar --comments.
 
-Then write the explanation in Markdown to ${out} (create the directory), for a maintainer who decides whether the backport is right:
+${write || `Then write the explanation in Markdown to ${out} (create the directory), for a maintainer who decides whether the backport is right:
 1. **Summary**: two or three sentences: what the master change does, and how the backport differs from it overall.
 2. **Differences from master**: one subsection per hunk that is not identical (group the trivial ones: imports, other context, slog → slf4j logging, in one short list). For each: what master does and what the backport does instead (quote the key lines), why: the branch's code at that point, the master commit it relies on and whether it is on ${branch}, the conflict and how it was resolved, the resolver's own notes; name commits and PRs (#12345). Say whether the difference keeps the intent of the master change and whether it is the smallest adaptation the branch needs; if master's version would have worked on the branch, say so plainly.
 3. **Tests**: are master's tests in the backport as master has them; for each changed or left-out test, what it checks now compared with master, and whether it would still fail without the fix (reason from the code; say if it was shown by a run in the job logs).
-4. **Verdict**: justified, questionable or wrong, and what to do (keep it, change a named hunk back to master's version, add a dependency, drop the pick).
+4. **Verdict**: justified, questionable or wrong, and what to do (keep it, change a named hunk back to master's version, add a dependency, drop the pick).`}
 
-Be concrete and cite evidence; when something cannot be determined, say what is missing instead of guessing. Then run node ${BPT} pick explain ${s} ${branch} ${pr} --file ${out} and finish with job done ${j.id} --summary "<the verdict in one sentence>".`;
+Be concrete and cite evidence; when something cannot be determined, say what is missing instead of guessing. Then run node ${BPT} pick explain ${s} ${branch} ${pr} --file ${out} and finish with job done ${j.id} --summary "<${question ? 'the answer' : 'the verdict'} in one sentence>".`;
 }
 
 /** Start a job's process. Returns the child, or null if the job is left for an interactive session. */
