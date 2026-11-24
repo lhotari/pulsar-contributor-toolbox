@@ -25,6 +25,17 @@ export function cancelPickJobs(sid, branch, pr, why) {
   return js.map((j) => j.id);
 }
 
+/**
+ * The user accepts a pick's adaptation (its differences from master that fail the intent rules). A worker question
+ * about that pick is answered by it: the waiting job is finished, so the decision does not stay open.
+ */
+export function acceptAdaptation(sid, branch, pr, reason) {
+  lane.acceptIntent(sid, branch, pr, reason);
+  const js = db.all(`SELECT id FROM jobs WHERE session_id = ? AND branch = ? AND status = 'waiting' AND json_extract(args, '$.pr') = ?`, sid, branch, pr);
+  for (const j of js) jobs.finish(j.id, 'done', { summary: `the user accepted the adaptation: ${reason}` });
+  return { answered: js.map((j) => j.id) };
+}
+
 export function settle(sid, branch, why, except = null) {
   const run = db.get(`SELECT id, type FROM jobs WHERE session_id = ? AND branch = ? AND status = 'running'`, sid, branch);
   if (run) throw new Error(`job ${run.id} (${run.type}) is running on ${branch}; wait for it or cancel it first`);
@@ -82,6 +93,9 @@ export function pending(sid) {
         ...props.map((p, i) => ({ id: `p${i}`, label: proposalLabel(p), recommended: i === 0, run: () => { const r = runProposal(sid, b, p, j.id); if (jobs.job(j.id).status === 'waiting') done(proposalLabel(p)); return r; } })),
         ...(rec && !props.length ? [{ id: 'recommendation', label: 'Go with the recommendation', recommended: true,
           run: () => { jobs.reply(j.id, `Go ahead with your recommendation: ${rec}`); if (b) db.updateLane(sid, b, { attention: null }); return {}; } }] : []),
+        ...(j.args.pr && b && (lane.lanePicks(sid, b).find((x) => x.pr === j.args.pr)?.detail.build?.rules || []).some((r) => r.level === 'fail' && !r.accepted)
+          ? [{ id: 'accept-intent', label: 'Accept the adaptation', input: 'Why the difference from master is right for this branch (each failing rule)',
+            run: (text) => { if (!text) throw new Error('say why'); return acceptAdaptation(sid, b, j.args.pr, text); } }] : []),
         { id: 'reply', label: 'Reply to the worker', input: 'Your answer; the worker resumes with it', recommended: !props.length && !rec, run: (text) => { if (!text) throw new Error('write a reply'); jobs.reply(j.id, text); if (b) db.updateLane(sid, b, { attention: null }); return {}; } },
         { id: 'cancel', label: 'Cancel the job', cls: 'ghost', run: () => { jobs.cancel(j.id); if (b) db.updateLane(sid, b, { attention: null }); return {}; } },
       ] });
@@ -160,7 +174,7 @@ export function pending(sid) {
             ...earlier.map((x) => ({ id: `drop:${x.pr}`, label: `Drop #${x.pr} (the failing lines come from it)`, cls: 'ghost', confirm: `Drop #${x.pr}? The lane is rebuilt without it from its commit.`,
               run: () => { settle(sid, b, `#${x.pr} dropped`); return lane.dropPick(sid, b, x.pr, `its code fails the build check of #${p.pr}`); } })),
             ...(bf?.rules || []).some((r) => r.level === 'fail' && !r.accepted) ? [{ id: 'accept-intent', label: 'Accept the adaptation', input: 'Why the difference from master is right for this branch (each failing rule)',
-              run: (text) => { if (!text) throw new Error('say why'); lane.acceptIntent(sid, b, p.pr, text); return {}; } }] : [],
+              run: (text) => { if (!text) throw new Error('say why'); return acceptAdaptation(sid, b, p.pr, text); } }] : [],
             bf && !bf.stage?.startsWith('intent') ? { id: 'accept-build', label: 'Accept the failing check', input: 'Why it is not this pick (e.g. it fails on the branch too)', run: (text) => { if (!text) throw new Error('say why'); lane.acceptBuild(sid, b, p.pr, text); return {}; } } : null,
             { id: 'skip', label: `Leave #${p.pr} out`, cls: 'ghost', run: () => { if (p.status === 'needs-fix') return lane.dropPick(sid, b, p.pr, 'left out: could not be fixed'); lane.skipPick(sid, b, p.pr, 'left out: conflict'); return {}; } },
           ] });

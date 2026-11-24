@@ -419,6 +419,25 @@ test('while backporting: late picks go in master order, drops rebuild the lane, 
   assert.deepEqual(control.cancelPickJobs(sid, B, 115, 'test'), [rj]);
   assert.equal(jobs.job(rj).status, 'cancelled');
 
+  // A worker that kept a difference from master asks; the question offers to accept the adaptation, and accepting
+  // it (here or from compare) answers the question.
+  const rule = { rule: 'test-changed', file: 'FooTest.java', level: 'fail' };
+  const failIntent = (r) => db.run(`UPDATE picks SET status = 'needs-fix', detail = json_set(detail, '$.build', json(?)) WHERE session_id = ? AND branch = ? AND pr = 115`,
+    JSON.stringify({ ok: false, stage: 'intent', output: 'test changed', rules: [r] }), sid, B);
+  failIntent(rule);
+  const aj = jobs.enqueue(sid, B, 'resolve', { pr: 115 });
+  jobs.finish(aj, 'waiting', { question: 'only you can accept the adaptation', proposals: control.parseProposals('drop:115', 115) });
+  const aq = control.list(sid).find((d) => d.key === `job:${aj}`);
+  assert.ok(aq.options.some((o) => o.id === 'accept-intent'));
+  control.apply(sid, aq.key, 'accept-intent', 'the branch needs the wait');
+  assert.equal(jobs.job(aj).status, 'done');
+  assert.equal(pick(115).status, 'picked'); assert.equal(pick(115).detail.intentAccepted.reason, 'the branch needs the wait');
+  assert.equal(control.list(sid).filter((d) => d.pr === 115).length, 0);
+  const aj2 = jobs.enqueue(sid, B, 'resolve', { pr: 115 }); jobs.finish(aj2, 'waiting', { question: 'again' });
+  failIntent({ ...rule, file: 'BarTest.java' });
+  assert.deepEqual(control.acceptAdaptation(sid, B, 115, 'from compare'), { answered: [aj2] });
+  assert.equal(jobs.job(aj2).status, 'done');
+
   // Abort: the lane is reset, its test PR closed and its branch deleted; the session is back in planning.
   const out = lane.abortBackport(sid, { cancel: (id) => jobs.cancel(id) });
   assert.deepEqual(out, { reset: [B], kept: [] });
