@@ -345,14 +345,56 @@ export function discover(sid, { log = console.log, blame = true } = {}) {
   const missingListed = listed ? [...listed].filter((pr) => !db.get('SELECT 1 FROM items WHERE session_id = ? AND pr = ?', sid, pr)) : [];
   const labelled = scope === 'range' || custom ? { added: [], missing: [], failed: [] } : pullInLabelled(sid, new Set(allCommits.map((c) => c.pr)), { log });
   const pulled = pullInDependencies(sid, { log, refresh: true });
+  const carried = carryOverSkips(sid, { log });
   const headSha = g.rev(repo, masterRef);
   saveConfig(sid, { round, lastDiscover: db.now(), masterHead: g.short(headSha), masterHeadSha: headSha,
     heads: Object.fromEntries(branches.map((b) => [b, g.short(heads[b])])) });
   const summary = { round, scope, total: commits.length, onMaster: allCommits.length, added, dryRuns: dry, newlyPicked, pulledIn: pulled.added, depsNotOnMaster: pulled.missing,
-    labelledPulledIn: labelled.added, labelledNotOnMaster: labelled.missing, labelSearchFailed: labelled.failed, ...(listed ? { listed: listed.size, listedPulledIn: listedIn.added, listedNotFound: missingListed } : {}) };
+    labelledPulledIn: labelled.added, labelledLeftOut: labelled.dropped || [], labelledNotOnMaster: labelled.missing, labelSearchFailed: labelled.failed, carriedSkips: carried, ...(listed ? { listed: listed.size, listedPulledIn: listedIn.added, listedNotFound: missingListed } : {}) };
   db.event(sid, `Discover round ${round}: ${commits.length} PRs, ${added} new, ${newlyPicked.length} newly on a branch`
     + `${labelled.added.length ? `, ${labelled.added.length} release-labelled PR(s) from before the range` : ''}`, { data: summary });
   return summary;
+}
+
+/**
+ * Skips decided by the user in an earlier session carry over: a PR that is still not on a branch (e.g. a 4.2-only fix
+ * labelled for both releases, skipped for branch-4.0) would otherwise be pulled into every new session again. The
+ * latest earlier user decision for the PR and branch counts; when it is "skip", the target is decided "skip" here too,
+ * unless this session already has a user decision or the user listed the PR. A row whose open targets are all decided
+ * this way is marked reviewed, so it stays in the plan ("All items") but not in the review list. Off with
+ * config carrySkips: false. Returns the PRs carried over.
+ */
+export function carryOverSkips(sid, { log = () => {} } = {}) {
+  if (db.session(sid).config.carrySkips === false) return [];
+  const rows = db.all(`SELECT t.pr, t.branch, (
+        SELECT json_object('sid', p.session_id, 'decision', p.decision, 'note', p.decision_note) FROM targets p JOIN sessions ps ON ps.id = p.session_id
+        WHERE p.pr = t.pr AND p.branch = t.branch AND p.session_id != t.session_id AND p.decision_source = 'user' AND p.decision IN ('skip', 'backport')
+          AND ps.rowid < (SELECT rowid FROM sessions WHERE id = t.session_id)
+        ORDER BY ps.rowid DESC LIMIT 1) prev
+      FROM targets t JOIN items i ON i.session_id = t.session_id AND i.pr = t.pr
+      WHERE t.session_id = ? AND t.on_branch = 0 AND t.decision_source != 'user' AND i.excluded IS NULL
+        AND COALESCE(json_extract(i.stats, '$.listed'), 0) != 1`, sid);
+  const carried = new Set(); const ts = db.now();
+  db.tx(() => {
+    for (const r of rows) {
+      const p = db.J(r.prev);
+      if (p?.decision !== 'skip') continue;
+      const note = `skipped in session ${p.sid}${p.note && !/^skipped in session /.test(p.note) ? `: ${p.note}` : ''}`;
+      db.run(`UPDATE targets SET decision = 'skip', decision_source = 'user', decision_note = ?, decided_at = ? WHERE session_id = ? AND pr = ? AND branch = ?`,
+        note.slice(0, 300), ts, sid, r.pr, r.branch);
+      carried.add(r.pr);
+    }
+    for (const pr of carried) {
+      const open = db.get(`SELECT COUNT(*) n FROM targets WHERE session_id = ? AND pr = ? AND on_branch = 0 AND decision_source != 'user'`, sid, pr).n;
+      if (!open) db.run('UPDATE items SET reviewed_at = COALESCE(reviewed_at, ?) WHERE session_id = ? AND pr = ?', ts, sid, pr);
+    }
+  });
+  const list = [...carried].sort((a, b) => a - b);
+  if (list.length) {
+    log(`${list.length} PR(s) keep the skip decided in an earlier session`);
+    db.event(sid, `Kept the skip decided in an earlier session for ${list.length} PR(s): ${list.map((x) => `#${x}`).join(', ')}`);
+  }
+  return list;
 }
 
 /** The release labels of the session's lanes ("release/4.2.6", ...). */
@@ -374,9 +416,58 @@ export function pullInLabelled(sid, inRange, { log = () => {} } = {}) {
     if (!list) { failed.push(label); log(`searching PRs labelled ${label} failed; labelled PRs before the range are not refreshed`); continue; }
     for (const p of list) if (!inRange.has(p.number)) (want.get(p.number) || want.set(p.number, []).get(p.number)).push(label);
   }
+  // Cherry-picked (same PR on the branch) to every lane it is labelled for, with the labels set: not imported at all.
+  const lanes = db.all('SELECT branch, release FROM lanes WHERE session_id = ? AND release IS NOT NULL', sid);
+  const lanesOf = (pr) => lanes.filter((l) => want.get(pr).includes(`release/${l.release}`));
+  const fresh = [...want.keys()].filter((pr) => lanesOf(pr).length && !db.get('SELECT 1 FROM items WHERE session_id = ? AND pr = ?', sid, pr));
+  if (fresh.length) {
+    const r0 = remote(cfg); const masterRef = `${r0}/${cfg.source}`; const on = {};
+    const onB = (b) => (on[b] ||= g.pickedOnBranch(cfg.repo, `${r0}/${b}`, masterRef));
+    const cands = fresh.filter((pr) => lanesOf(pr).every((l) => onB(l.branch).prs.has(pr)));
+    const meta = cands.length ? gh.prMeta(cands) : new Map();
+    for (const pr of cands) {
+      const labels = meta.get(pr)?.labels || [];
+      if (lanesOf(pr).every((l) => labels.includes(`cherry-picked/${l.branch}`))) want.delete(pr);
+    }
+  }
   const r = importPrs(sid, new Map([...want.keys()].map((pr) => [pr, []])), { log,
     reasonFor: (pr) => `labelled ${want.get(pr).join(', ')}`, statsFor: (pr) => ({ labelledIn: want.get(pr) }) });
-  return { ...r, failed };
+  const dropped = dropBackportedLabelled(sid, { log });
+  return { ...r, added: r.added.filter((pr) => !dropped.includes(pr)), dropped, failed };
+}
+
+/**
+ * A release-labelled PR from before the range is done when it is on the branch of every lane it is labelled for
+ * (release/4.2.6 only and cherry-picked to branch-4.2: that it is not on branch-4.0 is no question for this plan), and
+ * it already has its cherry-picked/<branch> labels. It leaves the plan, unless the user listed it, a dependency
+ * needs it, or it was picked here. Returns the PRs dropped.
+ */
+function dropBackportedLabelled(sid, { log = () => {} } = {}) {
+  const lanes = db.all('SELECT branch, release FROM lanes WHERE session_id = ? AND release IS NOT NULL', sid);
+  const items = db.all(`SELECT pr, labels, stats FROM items WHERE session_id = ? AND master_order < 0 AND json_extract(stats, '$.labelledIn') IS NOT NULL
+                        AND json_extract(stats, '$.listed') IS NULL AND json_extract(stats, '$.pulledIn') IS NULL`, sid);
+  const out = [];
+  for (const it of items) {
+    const labelledIn = db.J(it.stats, {}).labelledIn || []; const labels = db.J(it.labels, []);
+    const mine = lanes.filter((l) => labelledIn.includes(`release/${l.release}`));
+    if (!mine.length) continue;
+    const done = mine.every((l) => {
+      const t = db.get('SELECT on_branch, equiv FROM targets WHERE session_id = ? AND pr = ? AND branch = ?', sid, it.pr, l.branch);
+      if (!t?.on_branch) return false;
+      const e = t.on_branch === 2 ? db.J(t.equiv) : null;
+      return labels.includes(`cherry-picked/${l.branch}`) || (e && !LABELLING_EQUIV.includes(e.via));
+    });
+    if (!done) continue;
+    if (db.get('SELECT 1 FROM picks WHERE session_id = ? AND pr = ?', sid, it.pr)) continue;
+    if (db.get(`SELECT 1 FROM deps WHERE session_id = ? AND depends_on = ? AND status != 'dismissed' AND (source != 'blame' OR status = 'accepted')`, sid, it.pr)) continue;
+    db.tx(() => { for (const t of ['analysis', 'deps', 'targets', 'items']) db.run(`DELETE FROM ${t} WHERE session_id = ? AND pr = ?`, sid, it.pr); });
+    out.push(it.pr);
+  }
+  if (out.length) {
+    log(`${out.length} labelled PR(s) already on the branches they are labelled for: not in the plan`);
+    db.event(sid, `Left out ${out.length} release-labelled PR(s) already on every branch they are labelled for: ${out.map((x) => `#${x}`).join(', ')}`);
+  }
+  return out;
 }
 
 /**

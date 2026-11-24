@@ -796,3 +796,65 @@ test('listed PRs on top of a session with a starting point', () => {
   assert.equal(dec(105).decision, 'backport');
   assert.equal(plan.discover(sid, { log: () => {}, blame: false }).listedNotFound.length, 0);
 });
+
+test('a new session keeps the skips decided in an earlier session', () => {
+  const prev = 'range-plus-list';
+  const dec = (sid, pr) => db.get(`SELECT decision, decision_source, decision_note FROM targets WHERE session_id = ? AND pr = ? AND branch = 'branch-4.1'`, sid, pr);
+  plan.setDecision(prev, 103, 'branch-4.1', 'skip', 'not for 4.1');
+  plan.setDecision(prev, 104, 'branch-4.1', 'skip');
+  plan.setDecision(prev, 104, 'branch-4.1', 'backport');   // the latest decision counts
+  const sid = 'after-skips';
+  plan.createSession({ id: sid, repo, remote: 'origin', sincePr: 102, scope: 'range', list: '105', branches: plan.parseBranches('branch-4.1:4.1.10') });
+  plan.setDecision(prev, 105, 'branch-4.1', 'skip');
+  const r = plan.discover(sid, { log: () => {}, blame: false });
+  assert.deepEqual(r.carriedSkips, [103]);
+  assert.equal(dec(sid, 103).decision, 'skip'); assert.equal(dec(sid, 103).decision_source, 'user');
+  assert.equal(dec(sid, 103).decision_note, `skipped in session ${prev}: not for 4.1`);
+  assert.ok(db.get('SELECT reviewed_at FROM items WHERE session_id = ? AND pr = 103', sid).reviewed_at, 'decided: not in the review list');
+  assert.notEqual(dec(sid, 104).decision, 'skip');
+  assert.equal(dec(sid, 105).decision, 'backport', 'listed now: the earlier skip does not count');
+  // A decision changed in this session stays.
+  plan.setDecision(sid, 103, 'branch-4.1', 'backport');
+  assert.deepEqual(plan.discover(sid, { log: () => {}, blame: false }).carriedSkips, []);
+  assert.equal(dec(sid, 103).decision, 'backport');
+});
+
+test('labelled PRs from before the range that are on every branch they are labelled for are not in the plan', () => {
+  sh(repo, 'fetch', '-q', 'origin'); sh(repo, 'checkout', '-q', '--detach', 'origin/master');
+  const f = (n) => path.join(repo, 'mod/src/main/java', n);
+  fs.writeFileSync(f('Drop.java'), lines(40, 'drop')); const c140 = commit('[fix][broker] Labelled 4.2 only, cherry-picked (#140)');
+  edit2(repo, 'Drop.java', 10, 'both'); const c141 = commit('[fix][broker] Labelled for both, only on 4.2 (#141)');
+  edit2(repo, 'Drop.java', 20, 'later'); const c143 = commit('[fix][broker] Labelled 4.2 only, picked later (#143)');
+  edit2(repo, 'Drop.java', 30, 'since'); commit('[fix][broker] Since point (#142)');
+  sh(repo, 'push', '-q', 'origin', 'HEAD:refs/heads/master');
+  sh(repo, 'checkout', '-q', '--detach', 'origin/branch-4.2');
+  sh(repo, 'cherry-pick', '-x', c140); sh(repo, 'cherry-pick', '-x', c141);
+  sh(repo, 'push', '-q', 'origin', 'HEAD:refs/heads/branch-4.2');
+  const labels = { 140: ['release/4.2.6', 'cherry-picked/branch-4.2'], 141: ['release/4.2.6', 'release/4.0.15', 'cherry-picked/branch-4.2'], 143: ['release/4.2.6'] };
+  const fixtures = () => {
+    fs.mkdirSync(path.join(tmp, 'labelled'), { recursive: true });
+    fs.writeFileSync(path.join(tmp, 'labelled', 'release_4.2.6.json'), JSON.stringify([140, 141, 143].map((n) => ({ number: n, title: `#${n}`, baseRefName: 'master' }))));
+    fs.writeFileSync(path.join(tmp, 'labelled', 'release_4.0.15.json'), JSON.stringify([141].map((n) => ({ number: n, title: `#${n}`, baseRefName: 'master' }))));
+    fs.writeFileSync(path.join(tmp, 'graphql.json'), JSON.stringify({ data: { repository: Object.fromEntries(Object.entries(labels).map(([n, ls]) =>
+      [`p${n}`, { number: Number(n), body: '', mergedAt: null, author: null, labels: { nodes: ls.map((name) => ({ name })) } }])) } }));
+  };
+  try {
+    fixtures();
+    const sid = 'labelled-left-out';
+    plan.createSession({ id: sid, repo, remote: 'origin', sincePr: 142, branches: plan.parseBranches('branch-4.2:4.2.6,branch-4.0:4.0.15<branch-4.2') });
+    const r = plan.discover(sid, { log: () => {}, blame: false });
+    const prs = () => plan.planView(sid).items.map((i) => i.pr).filter((x) => x >= 140 && x < 150).sort();
+    assert.deepEqual(prs(), [141, 143], '#140 is done: on the only branch it is labelled for');
+    assert.ok(!r.labelledPulledIn.includes(140));
+    // #143 is cherry-picked and labelled later: the next discover takes it out.
+    sh(repo, 'checkout', '-q', '--detach', 'origin/branch-4.2'); sh(repo, 'cherry-pick', '-x', c143);
+    sh(repo, 'push', '-q', 'origin', 'HEAD:refs/heads/branch-4.2');
+    labels[143].push('cherry-picked/branch-4.2'); fixtures();
+    const r2 = plan.discover(sid, { log: () => {}, blame: false });
+    assert.deepEqual(r2.labelledLeftOut, [143]);
+    assert.deepEqual(prs(), [141], '#141 is labelled for 4.0.15 and not on branch-4.0 yet');
+    assert.equal(db.get('SELECT COUNT(*) n FROM targets WHERE session_id = ? AND pr = 143', sid).n, 0);
+  } finally {
+    fs.rmSync(path.join(tmp, 'graphql.json'), { force: true }); fs.rmSync(path.join(tmp, 'labelled'), { recursive: true, force: true });
+  }
+});
