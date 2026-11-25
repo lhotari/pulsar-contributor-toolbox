@@ -192,7 +192,7 @@ function laneButtons(l, sum) {
   const job = sum.activeJobs.find((j) => j.branch === b);
   const src = l.reuse_from && sum.lanes.find((x) => x.branch === l.reuse_from);
   switch (l.phase) {
-    case 'not-started': btn('Start lane', 'start', null, { cls: 'primary', disabled: sum.status !== 'backporting' || (src && !['ready', 'final-ci', 'final-ci-failed', 'done'].includes(src.phase)), title: src ? `Reuses ${src.branch}'s tested picks` : '' }); break;
+    case 'not-started': btn('Start lane', 'start', null, { cls: 'primary', disabled: sum.status !== 'backporting' || (src && !(sum.config.reuseAfter === 'ready' ? ['ready', 'final-ci', 'final-ci-failed', 'done'] : ['testing', 'ci-failed', 'ci-green', 'ready', 'final-ci', 'final-ci-failed', 'done']).includes(src.phase)), title: src ? `Reuses ${src.branch}'s picks (starts once ${src.branch} ${sum.config.reuseAfter === 'ready' ? 'passed test CI' : 'is in test CI'}; pushed only after ${src.branch} passed it)` : '' }); break;
     case 'picking': btn('Continue picking', 'pick-all', null, { cls: 'primary' }); break;
     case 'needs-attention': B.push(h('button', { class: 'primary', onclick: () => setTab(`picks:${b}`) }, 'Show picks')); btn('Continue picking', 'pick-all'); break;
     case 'picked': case 'verifying': btn('Verify with Claude', 'verify', null, { cls: 'primary' }); btn('Mark verified', 'mark-verified', null, { confirm: 'Mark the lane verified without a Claude build check?' }); break;
