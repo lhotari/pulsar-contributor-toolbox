@@ -226,7 +226,7 @@ export function pending(sid) {
           ] });
       }
     }
-    if (l.phase === 'ready' && !lane.holds(sid, b).length) {
+    if (l.phase === 'ready' && !lane.holds(sid, b).length && !lane.reuseHold(sid, b)) {
       add({ key: `ready:${b}`, kind: 'ready', branch: b, title: `${b} is tested and squashed`, text: l.ci.rebase ? `${b} moved since testing; the rebased batch is untested.` : `Finalize fast-forwards the local ${b} to the tested commits, pushes it and dispatches CI.`,
         options: [
           { id: 'finalize', label: `Finalize: fast-forward ${b}`, recommended: true, confirm: `Fast-forward the local ${b} to the tested commits, push it to apache/pulsar (fast-forward only) and dispatch CI?`, run: () => enqueue(sid, b, 'finalize', { allowRebase: false }) },

@@ -227,6 +227,32 @@ test('branch-4.0 lane reuses the squashed branch-4.2 commits', () => {
   assert.match(sh(lane.worktreeDir(SID, 'branch-4.0'), 'show', 'HEAD~2:mod/src/main/java/Foo.java'), /adapted/);
 });
 
+test('a reusing lane starts at the source lane\'s test CI but is not pushed before the source passed it; autoFinalize', () => {
+  assert.ok(lane.reusable({}, 'testing'), 'by default branch-4.0 starts while branch-4.2 runs test CI');
+  assert.ok(!lane.reusable({}, 'verified'));
+  assert.ok(!lane.reusable({ reuseAfter: 'ready' }, 'testing'));
+  const l40 = db.lane(SID, 'branch-4.0'); const p42 = lane.lanePicks(SID, 'branch-4.2').find((p) => p.pr === 101);
+  db.updateLane(SID, 'branch-4.0', { phase: 'ready', squashed_sha: sh(lane.worktreeDir(SID, 'branch-4.0'), 'rev-parse', 'HEAD') });
+  db.updateLane(SID, 'branch-4.2', { phase: 'ci-failed' });
+  assert.match(lane.reuseHold(SID, 'branch-4.0'), /has not passed test CI/);
+  assert.throws(() => lane.finalize(SID, 'branch-4.0'), /not yet: branch-4.2 has not passed test CI/);
+  assert.ok(autopilot.advance(SID).some((x) => x.branch === 'branch-4.0' && /waits: branch-4.2 has not passed/.test(x.note)));
+  db.updateLane(SID, 'branch-4.2', { phase: 'done' });
+  // A CI fix squashed into #101 on branch-4.2 after branch-4.0 reused it: branch-4.0 has the old version.
+  db.run(`UPDATE picks SET picked_sha = ? WHERE session_id = ? AND branch = 'branch-4.2' AND pr = 101`, 'f'.repeat(40), SID);
+  assert.match(lane.reuseHold(SID, 'branch-4.0'), /#101 changed on branch-4.2/);
+  db.run(`UPDATE picks SET picked_sha = ? WHERE session_id = ? AND branch = 'branch-4.2' AND pr = 101`, p42.picked_sha, SID);
+  assert.equal(lane.reuseHold(SID, 'branch-4.0'), null);
+  assert.ok(autopilot.advance(SID).some((x) => x.branch === 'branch-4.0' && x.note === 'ready to finalize (user action)'));
+  plan.saveConfig(SID, { autoFinalize: true });
+  assert.ok(autopilot.advance(SID).some((x) => x.branch === 'branch-4.0' && x.note === 'finalize branch-4.0 (autoFinalize)'));
+  const j = db.get(`SELECT id FROM jobs WHERE session_id = ? AND branch = 'branch-4.0' AND type = 'finalize' AND status = 'queued'`, SID);
+  assert.ok(j);
+  db.run('DELETE FROM jobs WHERE id = ?', j.id);
+  plan.saveConfig(SID, { autoFinalize: false });
+  db.updateLane(SID, 'branch-4.0', { phase: l40.phase, squashed_sha: l40.squashed_sha });
+});
+
 test('finalize refuses to push an untested rebase without confirmation', () => {
   // Someone pushes to branch-4.0 meanwhile.
   const other = path.join(tmp, 'other'); sh(tmp, 'clone', '-q', '-b', 'branch-4.0', origin, other);

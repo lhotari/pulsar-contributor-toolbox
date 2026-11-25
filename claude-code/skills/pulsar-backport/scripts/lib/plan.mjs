@@ -62,7 +62,7 @@ export function createSession({ id, title, repo = DEFAULT_REPO, branches, sinceP
   if (!branches?.length) throw new Error('need --branches (or --after a previous session)');
   const cfg = { repo, remote: remoteName, source, branches, sincePr: sincePr || null, sinceSha: sinceSha || null, round: 0, scope, after: after || null,
     instructions: String(instructions || '').trim() || null,
-    runner: 'headless', autopilot: false, autoPushTest: true, maxClaudeWorkers: 1, maxReruns: 3,
+    runner: 'headless', autopilot: false, autoPushTest: true, autoFinalize: false, maxClaudeWorkers: 1, maxReruns: 3,
     permissionMode: 'auto', model: null, testBranchPattern: '{branch}-backports-{id}' };
   const r = remote(cfg);
   g.fetch(repo, r, [source]);

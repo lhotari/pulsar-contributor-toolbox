@@ -1,5 +1,6 @@
 // The lane state machine: decides the next job for each lane. Called by the server's tick when autopilot is on,
-// and by the "Next step" button. It never pushes to a real release branch: that stays a user action (finalize).
+// and by the "Next step" button. It pushes to a real release branch only when the session has autoFinalize on
+// (finalize a tested lane, push a final-CI fix); otherwise that stays a user action.
 import * as db from './db.mjs';
 import * as jobs from './jobs.mjs';
 import * as lane from './lane.mjs';
@@ -7,7 +8,6 @@ import * as plan from './plan.mjs';
 import * as review from './review.mjs';
 
 const POLL_MS = Number(process.env.BPT_POLL_MS || 5 * 60 * 1000);
-const REUSABLE = ['ready', 'final-ci', 'final-ci-failed', 'done'];
 const REVIEWS = ['picked', 'verified', 'testing', 'ci-failed', 'ci-green'];
 
 function attemptsFor(sid, branch, type, key) {
@@ -48,7 +48,7 @@ export function advance(sid, { force = false } = {}) {
       case 'not-started': {
         if (l.reuse_from) {
           const src = lanes.find((x) => x.branch === l.reuse_from);
-          if (!src || !REUSABLE.includes(src.phase)) { say(`waits for ${l.reuse_from} to pass CI`); break; }
+          if (!src || !lane.reusable(cfg, src.phase)) { say(`waits for ${l.reuse_from} to ${cfg.reuseAfter === 'ready' ? 'pass CI' : 'reach test CI'}`); break; }
         }
         jobs.enqueue(sid, b, 'start-lane'); say('start lane'); break;
       }
@@ -93,6 +93,11 @@ export function advance(sid, { force = false } = {}) {
       case 'ci-failed': case 'final-ci-failed': {
         const kind = l.phase === 'final-ci-failed' ? 'final' : 'test';
         const sha = l.ci[kind]?.sha;
+        // autoFinalize: a fix committed on top of the pushed head goes out like the "Push fix" click.
+        if (kind === 'final' && cfg.autoFinalize && lane.pendingFinalPush(sid, b)) {
+          if (attemptsFor(sid, b, 'push-final-fix') >= (cfg.maxAutoFinalFixes ?? 2)) { say('pushed final-CI fixes twice already; waits for the user to push the next one'); break; }
+          jobs.enqueue(sid, b, 'push-final-fix'); say(`push the final-CI fix to ${b} (autoFinalize)`); break;
+        }
         if (attemptsFor(sid, b, 'fix-ci', { kind, sha }) >= 1 && !force) { say('a CI fix attempt for this commit already ran; waits for the user'); break; }
         jobs.enqueue(sid, b, 'fix-ci', { kind, sha }); say(`investigate ${kind} CI failure`); break;
       }
@@ -101,7 +106,19 @@ export function advance(sid, { force = false } = {}) {
         if (open.length) { say(`waits for the review concerns of ${open.map((x) => `#${x.pr}`).join(', ')}`); break; }
         jobs.enqueue(sid, b, 'squash'); say('squash fixups'); break;
       }
-      case 'ready': say('ready to finalize (user action)'); break;
+      case 'ready': {
+        const rh = lane.reuseHold(sid, b);
+        if (rh) { say(`waits: ${rh}`); break; }
+        if (!cfg.autoFinalize) { say('ready to finalize (user action)'); break; }
+        // The branch moved since testing: the rebased batch is untested, so pushing it stays the user's call.
+        if (l.ci.rebase) { say(`${b} moved since testing; push the rebased batch from the UI`); break; }
+        if (attemptsFor(sid, b, 'finalize') >= 1) { say('finalize did not go through; waits for the user'); break; }
+        jobs.enqueue(sid, b, 'finalize', { allowRebase: false }); say(`finalize ${b} (autoFinalize)`); break;
+      }
+      case 'done':
+        // A backport or revert added on top after the push (autoFinalize): pushed like the "Push fix" click.
+        if (cfg.autoFinalize && lane.pendingFinalPush(sid, b)) { jobs.enqueue(sid, b, 'push-final-fix'); say(`push the commits added on top to ${b} (autoFinalize)`); }
+        break;
       default: break;
     }
   }

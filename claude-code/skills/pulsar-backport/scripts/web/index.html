@@ -58,11 +58,12 @@
         <div id="sCustom"></div>
       </div>
       <div class="controls">
-        <label class="toggle" title="Run the next step automatically. Finalizing a real branch always needs your click."><input type="checkbox" id="autopilot"> Autopilot</label>
+        <label class="toggle" title="Run the next step automatically. Finalizing a real branch needs your click unless &quot;Finalize automatically&quot; is on."><input type="checkbox" id="autopilot"> Autopilot</label>
         <label class="small">Claude jobs
           <select id="runner"><option value="headless">headless claude -p</option><option value="interactive">my Claude Code session</option></select>
         </label>
         <label class="toggle"><input type="checkbox" id="autoPushTest"> Push test branches automatically</label>
+        <label class="toggle" title="With autopilot on: once a lane passed test CI and is squashed, fast-forward and push the release branch, run its final CI and push a final-CI fix, without asking. A branch that moved since testing (untested rebase) still waits for your click."><input type="checkbox" id="autoFinalize"> Finalize release branches automatically</label>
       </div>
     </div>
 

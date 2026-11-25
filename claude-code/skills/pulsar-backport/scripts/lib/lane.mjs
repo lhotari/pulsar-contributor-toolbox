@@ -16,7 +16,11 @@ import { remote, remoteRef, depOnBranch, saveConfig, pullInDependencies, addPrs 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const PHASES = ['not-started', 'picking', 'needs-attention', 'picked', 'verifying', 'verified', 'testing', 'ci-failed',
   'ci-green', 'ready', 'final-ci', 'final-ci-failed', 'done'];
-const REUSABLE = ['ready', 'final-ci', 'final-ci-failed', 'done'];
+// A reusing lane (branch-4.0 ← branch-4.2) starts once its source lane's commits are pushed for test CI (session
+// config reuseAfter: 'testing', the default), or only after the source passed CI and is squashed (reuseAfter: 'ready').
+// A source lane rewritten later (a CI fix squashed into a pick) tells the user to reset the reusing lane.
+export const reusable = (cfg, phase) => (cfg.reuseAfter === 'ready' ? ['ready', 'final-ci', 'final-ci-failed', 'done']
+  : ['testing', 'ci-failed', 'ci-green', 'ready', 'final-ci', 'final-ci-failed', 'done']).includes(phase);
 /** Picking finished; a pick added now waits for a decision instead of being applied on top. */
 export const POST_PICK = ['picked', 'verifying', 'verified', 'testing', 'ci-failed', 'ci-green', 'ready'];
 /** Pushed to the real branch: the batch can no longer be rebuilt. */
@@ -49,13 +53,28 @@ const attention = (sid, branch, text, level = 'attention') => {
   if (text) db.event(sid, text, { branch, level });
 };
 
+/**
+ * Why a reusing lane may not be pushed to its release branch yet, or null. Its source lane must have passed test CI
+ * (ready or later), and every commit it reused must still be the source lane's commit for that PR: a source pick
+ * rewritten later (a CI fix squashed into it) means this lane carries the old version.
+ */
+export function reuseHold(sid, branch) {
+  const l = db.lane(sid, branch);
+  if (!l.reuse_from) return null;
+  const src = db.lane(sid, l.reuse_from);
+  if (!['ready', 'final-ci', 'final-ci-failed', 'done'].includes(src.phase)) return `${l.reuse_from} has not passed test CI yet (phase ${src.phase})`;
+  const cur = new Map(picks(sid, l.reuse_from).filter((p) => p.status === 'picked').map((p) => [p.pr, p.picked_sha]));
+  const stale = picks(sid, branch).filter((p) => p.detail.reused && p.status === 'picked' && cur.has(p.pr) && cur.get(p.pr) !== p.source_sha).map((p) => `#${p.pr}`);
+  return stale.length ? `${stale.join(', ')} changed on ${l.reuse_from} after ${branch} reused ${stale.length > 1 ? 'them' : 'it'}; reset ${branch} (or fix it there) first` : null;
+}
+
 /** Create the lane worktree and its pick list. */
 export function startLane(sid, branch, { log = console.log } = {}) {
   const s = db.session(sid); const cfg = s.config; const l = db.lane(sid, branch);
   if (l.phase !== 'not-started') return l;
   if (l.reuse_from) {
     const src = db.lane(sid, l.reuse_from);
-    if (!REUSABLE.includes(src.phase)) throw new Error(`${branch} reuses ${l.reuse_from}, which is not ready (phase ${src.phase})`);
+    if (!reusable(cfg, src.phase)) throw new Error(`${branch} reuses ${l.reuse_from}, which is not far enough yet (phase ${src.phase})`);
   }
   g.fetch(cfg.repo, remote(cfg), [branch]);
   const base = g.rev(cfg.repo, remoteRef(cfg, branch));
@@ -995,6 +1014,8 @@ export function finalize(sid, branch, { allowRebase = false } = {}) {
   if (l.phase !== 'ready') throw new Error(`lane is ${l.phase}; finalize needs "ready"`);
   const open = holds(sid, branch);
   if (open.length) throw new Error(`decisions are open for ${open.map((x) => `#${x.pr}`).join(', ')}; settle them under Decisions needed first`);
+  const rh = reuseHold(sid, branch);
+  if (rh) throw new Error(`not yet: ${rh}`);
   g.fetch(cfg.repo, r, [branch]);
   const target = g.rev(cfg.repo, `${r}/${branch}`);
   let head = l.squashed_sha;
@@ -1141,6 +1162,21 @@ export function revertOnTop(sid, branch, pr, { reason, log = console.log } = {})
   db.updateLane(sid, branch, { head_sha: sha });
   db.event(sid, `#${pr} reverted on top of the pushed ${branch} as ${g.short(sha)} (${reason})${build.ok ? '; compiles' : `; build check FAILED (${build.stage})`}. Not pushed yet: push the fix from the UI`, { branch, level: build.ok ? 'warn' : 'attention' });
   return { pr, sha, build: revert.build };
+}
+
+/**
+ * Commits in the lane worktree on top of the pushed head that pushFinalFix would push (a final-CI fix, a backport
+ * or revert added on top), or null when there are none or one of them did not pass its build check.
+ */
+export function pendingFinalPush(sid, branch) {
+  const l = db.lane(sid, branch);
+  if (!PUSHED.includes(l.phase) || !l.final_sha || !l.worktree || !fs.existsSync(l.worktree)) return null;
+  const head = g.rev(l.worktree, 'HEAD');
+  if (head === l.final_sha || !g.isAncestor(l.worktree, l.final_sha, head)) return null;
+  if (unpushedOnTop(sid, branch).some((x) => !x.ok)) return null;
+  const st = g.state(l.worktree);
+  if (st.dirty || st.rebasing || st.cherryPicking) return null;
+  return head;
 }
 
 /** Backports and reverts made on top of the pushed lane that are not pushed yet: [{pr, kind, sha, ok}]. */

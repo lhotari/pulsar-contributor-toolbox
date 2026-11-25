@@ -1,6 +1,6 @@
 ---
 name: pulsar-backport
-description: Execute an apache/pulsar backport plan from the bpt session database — cherry-pick the decided PRs onto branch-4.2 in master commit order, catch dependencies that planning missed, push a test branch to apache/pulsar and take its dispatched CI to green (never through a PR), then reuse the tested picks for branch-4.0, and finally fast-forward the real branches when the user clicks Finalize in the local web UI. Use when asked to run/continue/resume backporting, process backport jobs, fix a backport's CI, or act as a bpt worker (prompts that start "You are a headless worker for the pulsar-backport skill"). Planning is the pulsar-backport-plan skill.
+description: Execute an apache/pulsar backport plan from the bpt session database — cherry-pick the decided PRs onto branch-4.2 in master commit order, catch dependencies that planning missed, push a test branch to apache/pulsar and take its dispatched CI to green (never through a PR), then reuse the picks for branch-4.0 (started while branch-4.2's test CI runs), and finally fast-forward the real branches when the user clicks Finalize in the local web UI. Use when asked to run/continue/resume backporting, process backport jobs, fix a backport's CI, or act as a bpt worker (prompts that start "You are a headless worker for the pulsar-backport skill"). Planning is the pulsar-backport-plan skill.
 argument-hint: "drive <session-id> | worker | status <session-id> | ui"
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, Agent, Skill, Monitor
 ---
@@ -19,17 +19,17 @@ node "$BPT" doctor
 |---|---|
 | **`bpt` engine** | worktrees, cherry-picks in order, dependency gate, check-pick scan, pushes (test branches only, never forced), CI dispatch on the test branch, CI polling, rerun, squash, the final fast-forward, labels |
 | **Claude Code workers** (headless `claude -p`, or you) | judgement jobs: resolve a conflict, make a pick compile, verify the lane builds, diagnose CI failures and fix them |
-| **The user**, in the web UI | decisions, dependency accept/dismiss, starting backporting, and **Finalize** — the only path that pushes to a real release branch |
+| **The user**, in the web UI | decisions, dependency accept/dismiss, starting backporting, and **Finalize** — the only path that pushes to a real release branch (or the session's **Finalize release branches automatically** setting, `autoFinalize`, which lets autopilot do it) |
 
 No Anthropic API key is involved: workers run on the user's Claude Code login. `bpt serve` launches them with `claude -p --permission-mode auto`, with `git push`, `gh pr create/edit/merge/comment/close`, `gh issue` and `gh label` denied. Set the session's "Claude jobs" selector to **my Claude Code session** to have the interactive session process them instead (see *Driving from this session*).
 
 ## Lane state machine
 
-One lane per target branch, in plan order. A lane with `reuse_from` (branch-4.0 ← branch-4.2) starts only after its source lane is tested and squashed, and cherry-picks the source lane's final commits (without adding a second `cherry picked from` trailer).
+One lane per target branch, in plan order. A lane with `reuse_from` (branch-4.0 ← branch-4.2) starts as soon as its source lane is pushed for test CI (session config `reuseAfter: 'testing'`, the default; `'ready'` waits until the source lane passed CI and is squashed), and cherry-picks the source lane's commits (without adding a second `cherry picked from` trailer). Both lanes then run their CI in parallel. If the source lane is rewritten later (a CI fix squashed into a pick, a rebuild), the reusing lane keeps the earlier commits and an attention event says to reset it or fix it there separately. Nothing of the reusing lane goes to its release branch before the source lane has passed test CI, and not while a commit it reused has since changed on the source lane (Finalize refuses, autopilot waits).
 
 ```
 not-started → picking ⇄ needs-attention → picked → verifying → verified → testing ⇄ ci-failed
-            → ci-green → (squash) → ready → [user: Finalize] → final-ci ⇄ final-ci-failed → done
+            → ci-green → (squash) → ready → [user: Finalize, or autopilot with autoFinalize] → final-ci ⇄ final-ci-failed → done
 ```
 
 - **picking**: `pick-all` cherry-picks pending PRs in master order with `-x` in the lane worktree `~/workspace-pulsar/pulsar-cherry-picking/worktrees/<session>/<branch>` (local branch `bpt/<session>/<branch>`). Before each pick it re-runs blame analysis against the lane: an in-range master commit that the PR builds on and that is neither on the branch nor earlier in the batch is a **dependency found while backporting**. If the pick then conflicts — or the dependency came from the evaluator or a person — the pick is **blocked** and the user decides in the UI (Accept adds the dependency to the batch ahead of it; Dismiss proceeds). A clean pick on top of a blame hint only records a warning; the build check catches the rest. A dependency the user **left out in review** (decision "skip" set or accepted by the user) never blocks and is not asked about again: the pick goes in without it (a conflict is resolved without it), with a warning.
@@ -47,6 +47,7 @@ not-started → picking ⇄ needs-attention → picked → verifying → verifie
 - **ci-failed**: a Claude job investigates (investigate-ci skill). Flaky or pre-existing → `bpt ci rerun` (limited by `maxReruns`, default 3). Caused by a pick → `fixup!` commit for that pick, then `lane phase … verified`; the engine squashes the fix into the pick and pushes the rewritten lane as a new test round (new branch and PR, no force-push).
 - **ci-green → ready**: autosquash folds any fixups left into their picks (usually none: they were squashed in when made) and asserts the tree is byte-identical to the tested tree.
 - **Finalize** (user click): the local release branch is fast-forwarded to the squashed commits (with `git merge --ff-only` in the worktree that has it checked out, if any; that worktree must be clean) and that branch is pushed to apache/pulsar, then `workflow_dispatch` of Pulsar CI, Flaky, Go and Python function workflows (Pulsar CI has no push trigger). If someone pushed to the branch meanwhile, the batch is rebased and the UI asks before pushing that untested combination.
+- **autoFinalize** (session setting, off by default; the UI toggle asks once): autopilot finalizes a `ready` lane itself, pushes a final-CI fix committed on top (at most `maxAutoFinalFixes`, default 2, per lane) and the backports/reverts added on top of a done lane, so a session runs to done and finished without clicks. It still stops at open decisions, at a branch that moved since testing (the untested rebase needs "Push rebased"), at a finalize that did not go through, and everywhere autopilot stops anyway.
 - **final-ci-failed**: rerun for flakes; a real fix goes on top as a new commit and the user pushes it from the UI ("Push fix").
 - **done**: `cherry-picked/<branch>` and `release/<version>` labels on every picked PR, test branch deleted. When **every** lane is done, autopilot posts the PR comments queued during planning (e.g. "needs a separate backport" on a skipped PR); a failed post is retried on the next post-comments run, a posted one never twice.
 - **finished** (session): once every lane is done, no job is queued or running and every queued PR comment is posted, autopilot marks the session **finished**. A finished session is read-only: the server, the CLI commands that write, the job queue and autopilot refuse every change. The plan, picks, diffs and reports stay readable, and the reports can still be downloaded, opened in VS Code and published as secret gists. A comment whose post failed keeps the session open until it is posted or cleared. The escape hatch is CLI only: `bpt session reopen <id> --reason T` makes it editable again, with autopilot off.
@@ -68,7 +69,7 @@ node "$BPT" job claim --session <id> --wait 1200        # blocks until a job is 
 
 Run the claim in the background (or under Monitor) and handle each job exactly as the *Worker jobs* section says; loop until the user stops you. `node "$BPT" advance <id> --force` performs one autopilot step without the server. Report outcomes, not play-by-play.
 
-Rules for the driver: never push or touch labels yourself — use the engine's commands, and only for test branches unless the user clicked Finalize (or explicitly told you to finalize in chat). Never force-push. Never `git stash` in a lane worktree (the stash stack is shared across worktrees).
+Rules for the driver: never push or touch labels yourself — use the engine's commands, and only for test branches unless the user clicked Finalize, turned on autoFinalize, or explicitly told you to finalize in chat. Never force-push. Never `git stash` in a lane worktree (the stash stack is shared across worktrees).
 
 ## Worker jobs
 

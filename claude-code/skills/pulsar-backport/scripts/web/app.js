@@ -310,11 +310,11 @@ function renderSession() {
       return h('div', {}, `${l.branch}: ${vv.pick || 0} pick · ${vv.maybe || 0} maybe · ${vv.untriaged || 0} untriaged — ${dd.backport || 0} backport, ${dd.undecided || 0} undecided (${mine} decided by you, the rest recommended)`); }),
     s.openDeps ? h('div', {}, chip(`${s.openDeps} open dependency hints on PRs that may go in`, 'blocked')) : '',
     s.comments?.pending || s.comments?.posted ? h('div', {}, `PR comments: ${s.comments.pending} queued (posted when every branch is done), ${s.comments.posted} posted`) : '');
-  $('#autopilot').checked = !!s.config.autopilot; $('#runner').value = s.config.runner || 'headless'; $('#autoPushTest').checked = s.config.autoPushTest !== false;
+  $('#autopilot').checked = !!s.config.autopilot; $('#runner').value = s.config.runner || 'headless'; $('#autoPushTest').checked = s.config.autoPushTest !== false; $('#autoFinalize').checked = !!s.config.autoFinalize;
   // A finished session is read-only: no actions, only its reports (the Report tab: download, VS Code, gist).
   const finished = s.status === 'finished'; const archived = !!s.config.archived;
   document.body.classList.toggle('finished', finished || archived);
-  for (const id of ['#autopilot', '#runner', '#autoPushTest']) $(id).disabled = finished || archived;
+  for (const id of ['#autopilot', '#runner', '#autoPushTest', '#autoFinalize']) $(id).disabled = finished || archived;
   const lifecycle = sessionLifecycleButtons(s);
   if (archived) {
     $('#sessionActions').replaceChildren(h('div', { class: 'finishedNote' }, chip('archived', ''),
@@ -406,6 +406,10 @@ async function setConfig(patch) { try { await api(`sessions/${S.sid}/config`, pa
 $('#autopilot').onchange = (e) => setConfig({ autopilot: e.target.checked });
 $('#runner').onchange = (e) => setConfig({ runner: e.target.value });
 $('#autoPushTest').onchange = (e) => setConfig({ autoPushTest: e.target.checked });
+$('#autoFinalize').onchange = (e) => {
+  if (e.target.checked && !confirm(`Let autopilot push the tested batches to the real release branches of apache/pulsar (fast-forward only), run final CI, push final-CI fixes and label the PRs, without asking?`)) { e.target.checked = false; return; }
+  setConfig({ autoFinalize: e.target.checked });
+};
 
 async function showLabels() {
   const lp = await api(`sessions/${S.sid}/labels`);
