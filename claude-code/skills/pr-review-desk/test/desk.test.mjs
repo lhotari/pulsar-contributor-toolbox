@@ -302,3 +302,58 @@ test('merge conflicts: merge the base branch, the worker resolves, the engine ch
   assert.equal(spawnSync('git', ['--git-dir', up, 'rev-parse', 'refs/heads/feature'], { encoding: 'utf8' }).stdout.trim(), m.mergeSha);
   await assert.rejects(merge.push(id, { urlFor: () => up }), /already pushed/);
 });
+
+test('a change to the PR: several threads and instructions in one batch, checked, reviewed, pushed, threads replied and resolved', async () => {
+  const change = await import('../scripts/lib/change.mjs');
+  const sh = (cwd, ...a) => { const r = spawnSync('git', ['-C', cwd, ...a], { encoding: 'utf8' }); if (r.status !== 0) throw new Error(`git ${a.join(' ')}: ${r.stderr}`); return r.stdout.trim(); };
+  const up = path.join(TMP, 'up8.git'); const co = path.join(TMP, 'co8');
+  spawnSync('git', ['init', '--bare', '-q', up]); spawnSync('git', ['init', '-q', co]);
+  sh(co, 'config', 'user.email', 't@example.com'); sh(co, 'config', 'user.name', 'T'); sh(co, 'remote', 'add', 'origin', up);
+  sh(co, 'checkout', '-q', '-b', 'main');
+  fs.writeFileSync(path.join(co, 'a.txt'), 'one\n'); sh(co, 'add', '.'); sh(co, 'commit', '-qm', 'base'); sh(co, 'push', '-q', 'origin', 'main');
+  sh(co, 'checkout', '-q', '-b', 'pr'); fs.writeFileSync(path.join(co, 'a.txt'), 'one\ntwo\n'); sh(co, 'commit', '-qam', 'pr change');
+  const head = sh(co, 'rev-parse', 'HEAD'); sh(co, 'push', '-q', 'origin', 'pr:refs/pull/8/head', 'pr:refs/heads/feature');
+  sh(co, 'checkout', '-q', 'main');
+  db.run(`UPDATE repos SET checkout = ?, remote = 'origin' WHERE slug = 'o/r'`, co);
+  setGh((g) => { g.prs[8] = { number: 8, title: '[fix][broker] Someone else\'s PR', author: 'author8', association: 'CONTRIBUTOR', head, updatedAt: '2026-11-20T00:00:00Z', diff: diff1, fork: true, canModify: false,
+    threads: [{ id: 'T8a', path: 'a.txt', comments: [{ id: 81, author: 'me', body: 'rename two to 2' }] }, { id: 'T8b', path: 'a.txt', comments: [{ id: 82, author: 'other', body: 'add three' }] }] }; });
+  await triage.track('o/r', 8); await triage.scan('o/r', 8);
+  await assert.rejects(change.pushable('o/r', 8), /not allowed edits from maintainers/);
+  setGh((g) => { g.prs[8].canModify = true; });
+  await change.pushable('o/r', 8);
+  const id = jobs.enqueue('o/r', 8, 'change', { threadIds: ['T8a', 'T8b'], instructions: 'Also add a trailing line "end"' });
+  assert.match(jobs.workerPrompt(jobs.job(id)), /change-ready/);
+  assert.deepEqual((await jobs.context(id)).changeThreads.map((t) => t.id), ['T8a', 'T8b']);
+  assert.throws(() => change.start(id), /security gate is not "clear"/);
+  db.run(`UPDATE items SET gate = 'clear', gate_sha = ? WHERE repo = 'o/r' AND number = 8`, head);
+  const wt = change.start(id).worktree;
+  assert.throws(() => change.ready(id), /no commits on top/);
+  fs.writeFileSync(path.join(wt, 'a.txt'), 'one\n2\n'); sh(wt, 'commit', '-qam', 'Rename two to 2');
+  fs.writeFileSync(path.join(wt, 'a.txt'), 'one\n2\nthree\n'); sh(wt, 'commit', '-qam', 'Add three');
+  fs.writeFileSync(path.join(wt, 'a.txt'), 'one\n2\nthree\nend\n');
+  assert.throws(() => change.ready(id), /uncommitted changes/);
+  sh(wt, 'commit', '-qam', 'Add the end line');
+  const c = change.ready(id, { replies: [{ threadId: 'T8a', reply: 'Renamed in {commits}.', resolve: true }] });
+  assert.deepEqual(c.commits.map((x) => x.subject), ['Rename two to 2', 'Add three', 'Add the end line']);
+  assert.deepEqual(c.replies.map((r) => [r.threadId, r.reply, r.resolve]), [['T8a', 'Renamed in {commits}.', true], ['T8b', 'Addressed in {commits}.', true]]);
+  assert.match(c.diff, /\+end/);
+  jobs.finish(id, 'done', { summary: 'three commits' });
+  assert.ok(fs.existsSync(wt), 'the worktree stays for the human to review or edit');
+  assert.equal(jobs.job(id).result.change.sha, c.sha);
+  // Edited after the check: the push refuses until it is checked again.
+  fs.writeFileSync(path.join(wt, 'b.txt'), 'x\n'); sh(wt, 'add', 'b.txt'); sh(wt, 'commit', '-qm', 'unchecked');
+  await assert.rejects(change.push(id, { urlFor: () => up }), /not checked/);
+  sh(wt, 'reset', '-q', '--hard', c.sha);
+  await assert.rejects(change.push(id, { urlFor: () => up, replies: [{ ...c.replies[0], reply: 'Fixes CVE-2026-1234 in {commits}.' }] }), (e) => e.code === 'LINT');
+  const r = await change.push(id, { urlFor: () => up, replies: [c.replies[0], { ...c.replies[1], resolve: false, reply: 'Added in {commits}; leaving it open for you to check.' }] });
+  assert.equal(r.pushed, c.sha);
+  assert.equal(spawnSync('git', ['--git-dir', up, 'rev-parse', 'refs/heads/feature'], { encoding: 'utf8' }).stdout.trim(), c.sha);
+  const g = gh();
+  const mine = g.replies.filter((x) => [81, 82].includes(x.to));
+  assert.equal(mine.length, 2);
+  assert.match(mine[0].body, new RegExp(`^Renamed in https://github.com/o/r/commit/${c.commits[0].sha}, .*${c.commits[2].sha}\\.$`));
+  assert.ok(g.resolved.includes('T8a') && !g.resolved.includes('T8b'));
+  assert.ok(!fs.existsSync(wt), 'the worktree is removed after the push');
+  await assert.rejects(change.push(id, { urlFor: () => up }), /already pushed/);
+  assert.ok(ci.updatedByMe('o/r', 8, head, c.sha), 'my commits are not new work by the author');
+});

@@ -13,6 +13,7 @@ import * as jobs from './lib/jobs.mjs';
 import * as autopilot from './lib/autopilot.mjs';
 import * as threads from './lib/threads.mjs';
 import * as merge from './lib/merge.mjs';
+import * as change from './lib/change.mjs';
 import { addRepo, here, parsePrRef } from './lib/repos.mjs';
 import { scanSummary } from './lib/scan.mjs';
 import { serve, token } from './lib/server.mjs';
@@ -91,6 +92,7 @@ Worker commands (inside a job):
   job show <id> | job claim [--wait SEC] | job done <id> --summary "…" | job fail <id> --reason "…"
   job ask <id> --question "…" | job worktree <id> | job list | job log <id> | job cancel <id>
   job merge-start <id> | job merge-ready <id>   merge jobs: start the base-branch merge; check and pin the merge commit
+  job change-start <id> | job change-ready <id> [--replies f.json]   change jobs: worktree at the pinned head; check and pin the commits on top
   gate <job> clear|suspicious|inconclusive --evidence "…"
   review import <job> --findings FILE      draft from pr-review findings.json
   review body <job> --body-file FILE       replace the draft's summary (revise jobs)
@@ -259,6 +261,11 @@ async function main() {
       if (sub === 'worktree') return out(jobs.worktree(Number(p._[0])));
       if (sub === 'merge-start') return out(merge.start(Number(p._[0])));
       if (sub === 'merge-ready') { const r = merge.ready(Number(p._[0])); return out({ mergeSha: r.mergeSha, base: r.base, baseRef: r.baseRef, stat: r.stat }); }
+      if (sub === 'change-start') return out(change.start(Number(p._[0])));
+      if (sub === 'change-ready') {
+        const r = change.ready(Number(p._[0]), { replies: p.replies ? JSON.parse(fs.readFileSync(p.replies, 'utf8')) : null });
+        return out({ sha: r.sha, commits: r.commits.map((c) => `${c.sha.slice(0, 10)} ${c.subject}`), stat: r.stat, threads: r.replies.length });
+      }
       if (sub === 'log') return out(jobs.readLog(Number(p._[0])).lines.map((l) => `${l.kind}: ${l.text}`).join('\n'));
       if (sub === 'cancel') { jobs.cancel(Number(p._[0])); return out('cancelled'); }
       if (sub === 'claim') {

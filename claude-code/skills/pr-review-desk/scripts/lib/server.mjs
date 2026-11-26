@@ -17,6 +17,7 @@ import * as autopilot from './autopilot.mjs';
 import * as ci from './ci.mjs';
 import * as threads from './threads.mjs';
 import * as merge from './merge.mjs';
+import * as change from './change.mjs';
 import * as P from './prt.mjs';
 import { scanSummary } from './scan.mjs';
 import { followUpReasons, draftStaleness } from './triage.mjs';
@@ -79,7 +80,7 @@ function prView(repo, number) {
     pr: { ...pr, body: pr.body }, item: { ...it, scanSummary: scanSummary(it.scan) },
     review: cur ? { ...cur, comments: db.comments(cur.id), lints: review.outgoing(cur.id), stale: draftStaleness(cur, pr) } : null,
     rounds: rounds.map((r) => ({ id: r.id, kind: r.kind, status: r.status, head_sha: r.head_sha, event: r.event, created_at: r.created_at, submitted_at: r.submitted_at, gh_url: r.gh_url })),
-    jobs: db.all('SELECT id, type, status, args, result, created_at, finished_at, head_sha FROM jobs WHERE repo = ? AND number = ? ORDER BY id DESC LIMIT 20', repo, number)
+    jobs: db.all('SELECT id, type, status, args, result, created_at, finished_at, head_sha, worktree FROM jobs WHERE repo = ? AND number = ? ORDER BY id DESC LIMIT 20', repo, number)
       .map((j) => ({ ...j, args: db.J(j.args, {}), result: db.J(j.result) })),
     events: db.all('SELECT * FROM events WHERE repo = ? AND number = ? ORDER BY id DESC LIMIT 60', repo, number),
     execAllowed: jobs.execAllowed(repo, number, pr.head_sha),
@@ -190,6 +191,34 @@ const ACTIONS = {
     return { job: jobs.enqueue(a.repo, n, 'merge', { instructions: a.instructions || null }) };
   },
   'merge-push': async (a) => merge.push(Number(a.job)),
+  // A change to the PR addressing threads (several at once) and/or free-text instructions: commits on top of the head.
+  // manual: the engine only creates the worktree; the human commits there and clicks "Check commits".
+  'change-prepare': async (a) => {
+    const n = Number(a.number); const it = db.item(a.repo, n); const pr = db.pr(a.repo, n);
+    if (!db.repo(a.repo).checkout) throw new Error(`no local checkout configured for ${a.repo} (Rules & repos)`);
+    if (!(it.gate === 'clear' && it.gate_sha === pr.head_sha)) throw new Error(`the security gate is "${it.gate || 'unscanned'}" for this head: clear it (after checking the diff) before anything from the PR is checked out`);
+    const threadIds = (a.threadIds || []).filter(Boolean); const instructions = (a.instructions || '').trim();
+    if (!threadIds.length && !instructions) throw new Error('pick at least one thread or write what to change');
+    const open = new Set(threads.openThreads(a.repo, n).map((t) => t.id));
+    const gone = threadIds.filter((t) => !open.has(t)); if (gone.length) throw new Error(`${gone.length} of the chosen threads are not open any more; sync the PR`);
+    const busy = db.get(`SELECT id FROM jobs WHERE repo = ? AND number = ? AND type = 'change' AND status IN ('queued','running','waiting')`, a.repo, n);
+    if (busy) throw new Error(`change job ${busy.id} is still open for #${n}: finish, push or discard it first`);
+    await change.pushable(a.repo, n);
+    const id = jobs.enqueue(a.repo, n, 'change', { threadIds, instructions: instructions || null, manual: !!a.manual });
+    if (a.manual) {
+      const s = change.start(id);
+      db.run(`UPDATE jobs SET status = 'waiting', claimed_by = 'human', started_at = ?, result = json_set(COALESCE(result, '{}'), '$.question', ?) WHERE id = ?`, db.now(),
+        `Commit your change in ${s.worktree} (on top of ${pr.head_sha.slice(0, 10)}), then click "Check commits". Or reply here to have Claude do it.`, id);
+    }
+    return { job: id };
+  },
+  'change-check': (a) => change.ready(Number(a.job)),
+  'change-replies': (a) => {
+    const j = jobs.job(Number(a.job)); if (!j.result?.change) throw new Error('nothing checked yet');
+    db.run(`UPDATE jobs SET result = json_set(result, '$.change.replies', json(?)) WHERE id = ?`, db.S(a.replies || []), j.id); return {};
+  },
+  'change-push': async (a) => change.push(Number(a.job), { replies: a.replies || null, ack: a.ack || [] }),
+  'change-discard': (a) => change.discard(Number(a.job)),
   'update-branch': async (a) => {
     const n = Number(a.number); const it = db.item(a.repo, n); const pr = db.pr(a.repo, n);
     if (['flagged', 'suspicious'].includes(it.gate) && it.gate_sha === pr.head_sha) throw new Error(`the security gate is "${it.gate}"`);
@@ -277,7 +306,7 @@ export function serve({ port = null, open = false } = {}) {
         const a = await readBody(req); const fn = ACTIONS[a.action];
         if (!fn) return send(400, { error: `unknown action ${a.action}` });
         const key = a.review ? `r${a.review}` : a.id ? `c${a.id}` : a.number ? `${a.repo}#${a.number}` : null;
-        const writes = ['stage', 'submit', 'sync-staged', 'discard', 'comment-update', 'comment-remove', 'threads-apply', 'ci-approve', 'merge-push', 'update-branch'].includes(a.action);
+        const writes = ['stage', 'submit', 'sync-staged', 'discard', 'comment-update', 'comment-remove', 'threads-apply', 'ci-approve', 'merge-push', 'update-branch', 'change-push'].includes(a.action);
         if (writes && key) {
           if (locks.get(key)) return send(409, { error: 'another GitHub action on this review is still running' });
           locks.set(key, true);

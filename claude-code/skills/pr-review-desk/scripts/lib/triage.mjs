@@ -198,7 +198,8 @@ export function refreshItem(repo, number, { raw = null, me = null, engaged = nul
       s.score, db.S(s.reasons), db.S(s.flags), s.category, s.component, repo, number);
     item = db.item(repo, number);
   }
-  const job = db.get(`SELECT * FROM jobs WHERE repo = ? AND number = ? AND status IN ('queued','running','waiting') ORDER BY id LIMIT 1`, repo, number);
+  // A change being prepared is not a review: the PR stays in its lane (the PR page shows the change).
+  const job = db.get(`SELECT * FROM jobs WHERE repo = ? AND number = ? AND status IN ('queued','running','waiting') AND type != 'change' ORDER BY id LIMIT 1`, repo, number);
   const lane = laneOf({ pr, item, review: db.currentReview(repo, number), job });
   if (lane !== item.lane) {
     db.run('UPDATE items SET lane = ?, updated_at = ? WHERE repo = ? AND number = ?', lane, db.now(), repo, number);

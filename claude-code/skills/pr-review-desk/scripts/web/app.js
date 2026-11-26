@@ -572,7 +572,8 @@ function renderBranch(bad) {
         h('details', {}, h('summary', {}, 'Combined diff of the merge'), h('pre', { class: 'small', style: 'max-height:420px;overflow:auto' }, m.combinedDiff || '(empty: no manual resolution)')),
         h('div', { class: 'actions', style: 'margin-top:6px' }, h('button', { class: 'small primary', disabled: mj.status !== 'done' ? true : null, onclick: push }, 'Push merge to the PR branch'))]
         : h('p', { class: 'muted' }, `A merge made for ${m.head.slice(0, 10)} is out of date: the head moved.`)) : null,
-    h('div', { class: 'actions', style: 'margin-top:8px' }, resolve, update));
+    h('div', { class: 'actions', style: 'margin-top:8px' }, resolve, update,
+      h('button', { class: 'small ghost', title: 'Commits of your own on top of the PR head (addressing threads and/or your instructions), reviewed here and pushed to the PR branch', onclick: () => { S.tab = 'threads'; renderPr(); } }, 'Prepare a change…')));
 }
 
 async function gateDecision(gate) {
@@ -962,6 +963,104 @@ function issueForm(t) {
       } }, 'Create issue and resolve'), h('button', { class: 'small ghost', onclick: close }, 'Cancel'))));
 }
 
+// --- a change to the PR: commits on top of its head that address threads (any number) and/or free-text instructions ---
+function changeSel() {
+  const k = `${S.pr.pr.repo}#${S.pr.pr.number}`;
+  if (S.chgFor !== k) { S.chgFor = k; S.chg = new Set(); S.chgText = ''; }
+  return S.chg;
+}
+function changeBox(t) {
+  const sel = changeSel();
+  const cb = h('input', { type: 'checkbox', checked: sel.has(t.id) ? true : null, onchange: (e) => { if (e.target.checked) sel.add(t.id); else sel.delete(t.id); renderPr(); } });
+  return h('label', { class: 'small', title: 'Address this thread in a change you push to the PR branch (several threads can go in one batch)' }, cb, ' address in a change');
+}
+function diffPre(text) {
+  return h('div', { class: 'diff' }, h('div', { class: 'diffBody', style: 'max-height:520px;overflow:auto' },
+    String(text || '').split('\n').map((l) => h('div', { class: `ln ${l.startsWith('+') && !l.startsWith('+++') ? 'add' : l.startsWith('-') && !l.startsWith('---') ? 'del' : l.startsWith('@@') ? 'hunk' : ''}` }, l || ' '))));
+}
+function renderChange() {
+  const { pr } = S.pr; const sel = changeSel();
+  const cj = S.pr.jobs.find((j) => j.type === 'change' && !j.result?.discarded && !(j.status === 'cancelled' && !j.result?.change));
+  const live = cj && !cj.result?.pushed && !['failed', 'cancelled'].includes(cj.status) ? cj : null;
+  const open = new Map((S.pr.openThreads || []).map((t) => [t.id, t]));
+  const blocked = !S.pr.execAllowed ? 'The security gate is not clear for this head: clear it (after checking the diff) before anything from the PR is checked out.' : null;
+  const form = () => {
+    const ta = h('textarea', { rows: 3, placeholder: 'What else to change (optional when threads are ticked): e.g. "Rename the flag to fooEnabled and update the docs"', oninput: (e) => { S.chgText = e.target.value; } });
+    ta.value = S.chgText || '';
+    const go = (manual) => async () => {
+      const threadIds = [...sel].filter((id) => open.has(id));
+      if (!threadIds.length && !ta.value.trim()) return toast('Tick at least one thread below, or write what to change', true);
+      await run(manual ? 'Worktree ready' : 'Queued', () => action('change-prepare', { repo: pr.repo, number: pr.number, threadIds, instructions: ta.value, manual }));
+      S.chg = new Set(); S.chgText = ''; reloadPr();
+    };
+    return [h('p', { class: 'small muted' }, `New commits on top of the PR head, pushed to the PR branch as you after you review them. ${sel.size ? `${sel.size} thread(s) ticked.` : 'Tick the threads to address below.'}`),
+      ta, h('div', { class: 'actions', style: 'margin-top:6px' },
+        h('button', { class: 'small primary', disabled: blocked ? true : null, title: blocked || 'Claude makes the commits in a worktree of the PR head, builds and tests them, and proposes the thread replies', onclick: go(false) }, 'Prepare with Claude'),
+        h('button', { class: 'small', disabled: blocked ? true : null, title: blocked || 'Only the worktree is created; you commit there yourself, then "Check commits"', onclick: go(true) }, 'I\'ll make it in a worktree')),
+      blocked ? h('p', { class: 'small muted' }, blocked) : null];
+  };
+  if (!live) {
+    const last = cj?.result?.pushed ? h('p', { class: 'small' }, chip('pushed', 'ok'), ` ${cj.result.change?.commits?.length || ''} commit(s) to ${cj.result.pushed.to} ${ago(cj.result.pushed.at)}`,
+      (cj.result.threadResults || []).length ? ` · ${(cj.result.threadResults || []).filter((x) => x.resolved).length} thread(s) resolved` : '') : cj?.status === 'failed' ? h('p', { class: 'small' }, chip('change failed', 'bad'), ` ${cj.result?.error || ''} `, h('button', { class: 'small ghost', onclick: () => openLog(cj.id) }, 'Log')) : null;
+    return h('div', { class: 'panel' }, h('h2', {}, 'Prepare a change'), last, ...form());
+  }
+  const c = live.result?.change; const stale = c && c.head !== pr.head_sha;
+  const running = ['queued', 'running'].includes(live.status);
+  const replies = (c?.replies || []).map((r) => ({ ...r }));
+  const save = () => action('change-replies', { job: live.id, replies }).catch((e) => toast(e.message, true));
+  const replyRows = replies.map((r) => {
+    const ta = h('textarea', { rows: 2, onchange: (e) => { r.reply = e.target.value; save(); } }); ta.value = r.reply || '';
+    return h('div', { class: 'card' }, h('div', { class: 'cardHead' }, h('span', { class: 'loc' }, `${r.path}:${r.line ?? ''}`), r.reviewer ? chip(r.reviewer === S.state?.login ? 'your thread' : `${r.reviewer}'s thread`, 'info') : null,
+      h('span', { class: 'grow' }), r.url ? ext(r.url, 'GitHub ↗') : null),
+    h('div', { class: 'cardBody' }, ta, h('div', { class: 'actions small' },
+      h('label', {}, h('input', { type: 'checkbox', checked: r.post !== false ? true : null, onchange: (e) => { r.post = e.target.checked; save(); } }), ' post'),
+      h('label', {}, h('input', { type: 'checkbox', checked: r.resolve ? true : null, onchange: (e) => { r.resolve = e.target.checked; save(); } }), ' resolve the thread'),
+      h('span', { class: 'muted' }, '{commits} becomes links to the pushed commits'))));
+  });
+  const push = async () => {
+    const posting = replies.filter((r) => r.post !== false && (r.reply?.trim() || r.resolve));
+    if (!confirm(`Push ${c.commits.length} commit(s) to the PR branch of #${pr.number} as you?\n\n${c.commits.map((x) => `${x.sha.slice(0, 10)} ${x.subject}`).join('\n')}\n${c.stat}\n\nA fast-forward of ${c.head.slice(0, 10)}. Then ${posting.length} thread(s): ${posting.filter((r) => r.reply?.trim()).length} reply, ${posting.filter((r) => r.resolve).length} resolve.`)) return;
+    const go = (ack) => action('change-push', { job: live.id, replies, ack });
+    let res;
+    try { res = await go([]); } catch (e) {
+      if (e.code !== 'LINT') { toast(e.message, true); return; }
+      if (!confirm(`${e.message}\n\nPush and post anyway?`)) return;
+      const ack = [...(e.lint?.security?.length ? ['security'] : []), ...(e.lint?.tooling || []).map((x) => x.label)];
+      try { res = await go(ack); } catch (e2) { toast(e2.message, true); return; }
+    }
+    const bad = (res.threads || []).filter((x) => x.status === 'failed');
+    toast(`Pushed ${res.pushed.slice(0, 10)} to ${res.to}${bad.length ? `; ${bad.length} thread(s) failed: ${bad.map((x) => x.error).join('; ')}` : ''}`, bad.length > 0);
+    reloadPr();
+  };
+  const ask = h('textarea', { rows: 2, placeholder: 'Ask Claude to change something in these commits (it continues in the same worktree)' });
+  const threadsOf = (live.args.threadIds || []).map((id) => open.get(id)).filter(Boolean);
+  return h('div', { class: 'panel' }, h('h2', {}, 'Prepared change'),
+    h('div', { class: 'small' }, chip(`change ${live.status}`, live.status), ' ', h('button', { class: 'small ghost', onclick: () => openLog(live.id) }, 'Log'),
+      running ? h('button', { class: 'small ghost', onclick: () => run('Cancelled', () => action('cancel-job', { job: live.id })).then(reloadPr) }, 'Cancel') : null,
+      ` · ${threadsOf.length} thread(s)${live.args.instructions ? ' + instructions' : ''}`),
+    live.args.instructions ? h('div', { class: 'small muted' }, 'Instructions: ', live.args.instructions) : null,
+    live.worktree ? h('div', { class: 'small', style: 'margin-top:4px' }, 'Worktree: ', h('code', {}, live.worktree), ' ',
+      h('button', { class: 'small ghost', onclick: () => action('open-editor', { path: live.worktree }) }, 'Open in VS Code'),
+      h('button', { class: 'small ghost', onclick: () => navigator.clipboard?.writeText(live.worktree).then(() => toast('Copied')) }, 'Copy path')) : null,
+    live.status === 'waiting' && live.result?.question ? h('p', { class: 'small' }, live.result.question) : null,
+    live.result?.summary ? h('details', {}, h('summary', {}, 'What Claude did'), md(live.result.summary)) : null,
+    stale ? h('p', { class: 'small' }, chip('out of date', 'bad'), ` The PR head moved to ${pr.head_sha.slice(0, 10)} since this change was made on ${c.head.slice(0, 10)}: discard it and prepare it again.`) : null,
+    c ? [h('h3', {}, `${c.commits.length} commit(s) · ${c.stat}`),
+      h('ul', { class: 'small mono' }, c.commits.map((x) => h('li', {}, `${x.sha.slice(0, 10)} ${x.subject} `, h('span', { class: 'muted' }, x.author)))),
+      h('details', { open: true }, h('summary', {}, `Diff on top of the PR head${c.diffTruncated ? ' (truncated)' : ''}`), diffPre(c.diff)),
+      replies.length ? [h('h3', {}, 'Thread replies (posted after the push)'), ...replyRows] : null]
+      : h('p', { class: 'small muted' }, running ? 'Claude is preparing the commits…' : 'No commits checked yet.'),
+    h('div', { class: 'actions', style: 'margin-top:8px' },
+      h('button', { class: 'small', disabled: running || !live.worktree ? true : null, title: 'Check the commits in the worktree (on top of the head, no merge commit, clean tree) and show them here; run it again after editing them', onclick: () => run('Checked', () => action('change-check', { job: live.id })).then(reloadPr) }, 'Check commits'),
+      h('button', { class: 'small primary', disabled: !c || running || stale ? true : null, onclick: push }, c ? `Push ${c.commits.length} commit(s) to the PR branch` : 'Push to the PR branch'),
+      h('span', { class: 'grow' }),
+      h('button', { class: 'small ghost', disabled: running ? true : null, onclick: () => { if (confirm('Discard this change (its worktree and commits)?')) run('Discarded', () => action('change-discard', { job: live.id })).then(reloadPr); } }, 'Discard')),
+    !running ? h('div', { class: 'editRow', style: 'margin-top:8px' }, ask, h('button', { class: 'small', onclick: async () => {
+      if (!ask.value.trim()) return;
+      await run('Sent; Claude continues', () => action('reply-job', { job: live.id, text: ask.value })); reloadPr();
+    } }, 'Ask Claude')) : null);
+}
+
 function renderThreads() {
   const { pr } = S.pr;
   const a = pr.analysis || {};
@@ -995,18 +1094,19 @@ function renderThreads() {
         S.pr.threadActions?.some((r) => ['proposed', 'failed'].includes(r.status)) ? 'Re-check threads with Claude' : 'Settle threads with Claude')),
     h('p', { class: 'small muted' }, 'Claude checks each open thread against the code and proposes: resolve (addressed or obsolete), nudge the author, a follow-up issue, or leave it to you.')) : null,
     renderThreadPlan(),
+    renderChange(),
     h('h3', {}, `Your threads (${mine.length})`),
     mine.length ? mine.map((t) => h('div', { class: 'card' }, h('div', { class: 'cardHead' }, chip(t.state, t.state === 'awaiting-my-reply' ? 'attn' : t.isResolved ? 'ok' : ''), h('span', { class: 'loc' }, `${t.path}:${t.line ?? ''}`),
       t.isOutdated ? chip('outdated') : null, h('span', { class: 'grow' }), t.url ? ext(t.url, 'GitHub ↗') : null),
     h('div', { class: 'cardBody' }, t.myLastComment ? h('div', { class: 'small muted' }, 'You:', md(t.myLastComment.body)) : null,
       t.lastComment && t.lastComment.author !== S.state?.login ? h('div', { class: 'small' }, `${t.lastComment.author}:`, md(t.lastComment.body)) : null,
-      !t.isResolved ? reply(t) : null, !t.isResolved ? quick(t) : null, S.issueFor === t.id && full.has(t.id) ? issueForm(full.get(t.id)) : null))) : h('p', { class: 'muted' }, 'None.'),
+      !t.isResolved ? reply(t) : null, !t.isResolved ? quick(t) : null, !t.isResolved && full.has(t.id) ? changeBox(t) : null, S.issueFor === t.id && full.has(t.id) ? issueForm(full.get(t.id)) : null))) : h('p', { class: 'muted' }, 'None.'),
     h('h3', {}, `Other open threads (${others.length})`),
     others.map((t) => h('div', { class: 'card' }, h('div', { class: 'cardHead' }, h('span', { class: 'loc' }, `${t.path}:${t.line ?? ''}`), t.reviewer ? chip(t.reviewer, 'info') : null,
       t.isOutdated ? chip('outdated') : null, h('span', { class: 'grow' }), t.url ? ext(t.url, 'GitHub ↗') : null),
     h('div', { class: 'cardBody' }, t.comments[0] ? h('div', { class: 'small' }, `${t.comments[0].author}:`, md(firstLine(t.comments[0].body).slice(0, 400))) : null,
       t.comments.length > 1 ? h('div', { class: 'small muted' }, `${t.comments.at(-1).author} (latest):`, md(firstLine(t.comments.at(-1).body).slice(0, 300))) : null,
-      quick(t), S.issueFor === t.id ? issueForm(t) : null))));
+      quick(t), changeBox(t), S.issueFor === t.id ? issueForm(t) : null))));
 }
 
 // --- jobs, activity, settings ---

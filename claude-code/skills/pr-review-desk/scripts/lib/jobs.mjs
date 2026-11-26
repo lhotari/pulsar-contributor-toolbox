@@ -16,7 +16,7 @@ import * as guidance from './guidance.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const PRD = path.resolve(HERE, '..', 'prd.mjs');
 export const SKILLS = path.resolve(HERE, '..', '..', '..');
-export const TYPES = ['review', 're-review', 'revise', 'ask', 'threads', 'merge'];
+export const TYPES = ['review', 're-review', 'revise', 'ask', 'threads', 'merge', 'change'];
 const ACTIVE = `('queued','running','waiting')`;
 
 const GH_WRITES = ['Bash(gh pr review *)', 'Bash(gh pr comment *)', 'Bash(gh pr edit *)', 'Bash(gh pr merge *)', 'Bash(gh pr close *)',
@@ -102,16 +102,21 @@ export function finish(id, status, result) {
   const j = job(id);
   // A merge job's checked commit (and its push) outlive the worker's report.
   if (j.result?.merge) result = { ...(result || {}), merge: j.result.merge, ...(j.result.pushed ? { pushed: j.result.pushed } : {}) };
+  // So does a change job's: its checked commits, the push, and the worktree (kept for the human to review or edit).
+  if (j.result?.change || j.result?.pushed || j.result?.discarded) {
+    const keep = Object.fromEntries(['change', 'pushed', 'threadResults', 'discarded'].filter((k) => j.result[k] !== undefined).map((k) => [k, j.result[k]]));
+    result = { ...(result || {}), ...keep };
+  }
   db.run('UPDATE jobs SET status = ?, result = ?, finished_at = ?, pid = NULL WHERE id = ?', status, db.S(result ?? null), db.now(), id);
   const msg = result?.summary || result?.error || result?.question || '';
   db.event(j.repo, j.number, `${j.type} of #${j.number} ${status}${msg ? `: ${String(msg).slice(0, 500)}` : ''}`,
     { job: id, level: status === 'failed' ? 'error' : status === 'waiting' ? 'attention' : 'info' });
-  if (status !== 'running') cleanupWorktree(j);
+  if (status !== 'running' && (j.type !== 'change' || ['cancelled', 'failed'].includes(status))) cleanupWorktree(j);
   refreshItem(j.repo, j.number);
 }
 
-function cleanupWorktree(j) {
-  if (!j.worktree || !fs.existsSync(j.worktree)) return;
+export function cleanupWorktree(j, { force = false } = {}) {
+  if (!j.worktree || !fs.existsSync(j.worktree)) { if (force && j.worktree) db.run('UPDATE jobs SET worktree = NULL WHERE id = ?', j.id); return; }
   const r = db.repo(j.repo);
   const res = spawnSync('git', ['-C', r.checkout, 'worktree', 'remove', '--force', j.worktree], { encoding: 'utf8' });
   if (res.status === 0) {
@@ -174,6 +179,12 @@ export async function context(id) {
     ctx.threadPlanOut = path.join(j.dir, 'threads.json');
     ctx.reviewDecision = pr.review_decision || null;
   }
+  if (j.type === 'change') {
+    // The threads to address (whole conversations) and where to put the proposed replies.
+    ctx.changeThreads = openThreads(j.repo, j.number).filter((t) => (j.args.threadIds || []).includes(t.id));
+    ctx.repliesOut = path.join(j.dir, 'replies.json');
+    ctx.change = j.result?.change ? { sha: j.result.change.sha, commits: j.result.change.commits } : null;
+  }
   if (['review', 're-review'].includes(j.type)) {
     // Contributor guidance the desk detected on this head (CI logs, title, first-timer): the summary must carry it.
     const g = await guidance.assess(j.repo, j.number, j.head_sha).catch((e) => ({ items: [], error: e.message }));
@@ -211,6 +222,14 @@ Evidence is checkable (SHA, file:line, test). Replies and issues are public: no 
 3. When the gate allows execution, compile the modules the conflicted files belong to (and run their closest tests when fast); report what you ran.
 4. node ${PRD} job merge-ready ${j.id} — the engine checks the merge commit (parents = pinned head + fetched base, clean tree, no conflict markers) and pins it.
 5. job done ${j.id} --summary: per conflicted file, what each side changed and how you combined them, and the build/test result. The human pushes it from the UI; you never push.`,
+    change: `Prepare a change to this PR as new commits on top of its pinned head, for the user to review and push to the PR branch themselves. Address every thread in ctx.changeThreads (read the whole conversation: do what was asked, or what the reviewer and author agreed on) and the user's instructions below, in one batch.
+1. node ${PRD} job change-start ${j.id} — creates the worktree at the pinned head (the security gate must be clear). Work only in that worktree; when ctx.change is set, the worktree already has your earlier commits: continue on top of them per the user's follow-up.
+2. Make the changes the way the repository does them (its CLAUDE.md / AGENTS.md conventions, code style, tests for behaviour changes). Keep the PR's intent; do not refactor beyond what was asked.
+3. Commit on top of the head: one commit per concern (a thread, or one instruction), with a clear message in the repository's style (no PR number). Never amend, rebase, squash or reset the PR's own commits, never merge, never push.
+4. Build the touched modules and run their closest tests; report the commands and the results. Fix what fails.
+5. Write ${j.dir}/replies.json as [{"threadId", "reply", "resolve"}] for every thread in ctx.changeThreads: a short public reply saying what the commits changed ({commits} becomes links to the pushed commits), resolve true when the commits settle the point; no pipeline mechanics, no vulnerability disclosure.
+6. node ${PRD} job change-ready ${j.id} --replies ${j.dir}/replies.json — the engine checks the commits (on top of the head, no merge commit, clean tree, no conflict markers) and pins them.
+7. job done ${j.id} --summary: per thread and per instruction, what changed (commit, file:line) and the build/test results. The user reviews the diff, edits the replies and pushes from the UI.${j.args.reply ? `\n\nThe user's follow-up: ${j.args.reply}` : ''}`,
     ask: `Answer the user's question about this review in a private note (never posted): node ${PRD} job done ${j.id} --summary "<the answer>" (longer answers: --summary-file <f>). Change the draft only if the user asked for it.`,
   }[j.type];
   return `${head}\n\n${extra}${j.args.instructions ? `\n\nUser instructions: ${j.args.instructions}` : ''}`;
