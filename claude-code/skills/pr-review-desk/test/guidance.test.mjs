@@ -74,6 +74,28 @@ test('Personal CI signs and the guidance texts', () => {
   assert.ok(t[0].text.includes(g.LINKS.semanticTitle)); assert.deepEqual(g.items({ ...base, titleProblem: 'x', said: { title: true } }), []);
 });
 
+test('accountability: replies about Personal CI that the fork does not back', async () => {
+  const none = { repo: 'bob/pulsar', prs: 0, runs: 0 };
+  assert.match(g.unbackedPersonalCi({ author: 'bob', authorTexts: ["I'll get a Personal CI run going in my fork once this head is merged"], fork: none }), /mention Personal CI, but bob\/pulsar has no pull requests/);
+  assert.match(g.unbackedPersonalCi({ author: 'bob', authorTexts: ['Thanks, fixed'], askedForPersonalCi: true, fork: none }), /was pointed at Personal CI/);
+  assert.equal(g.unbackedPersonalCi({ author: 'bob', authorTexts: ['Personal CI is running'], fork: { ...none, runs: 3 } }), null, 'the fork has runs');
+  assert.equal(g.unbackedPersonalCi({ author: 'bob', authorTexts: ['Thanks, fixed'], fork: none }), null, 'nothing about Personal CI');
+  assert.equal(g.unbackedPersonalCi({ author: 'bob', authorTexts: ['Personal CI later'], fork: { ...none, prs: null } }), null, 'unknown: not claimed');
+  const fake = (pulls, runs) => ({ rest: async (m, p) => (p.includes('/pulls') ? pulls : runs) });
+  assert.deepEqual(await g.forkActivity('apache/pulsar', 'bob', { gh: fake([], { total_count: 0 }) }), { repo: 'bob/pulsar', prs: 0, runs: 0 });
+  assert.deepEqual(await g.forkActivity('apache/pulsar', 'bob', { gh: { rest: async () => { throw new Error('HTTP 404: Not Found'); } } }), { repo: 'bob/pulsar', prs: 0, runs: 0, missing: true });
+  assert.equal(await g.forkActivity('apache/pulsar', 'bob', { gh: { rest: async () => { throw new Error('HTTP 502'); } } }), null);
+  const base = { gradle: true, firstTimer: false, personalCiSigns: false, titleProblem: null, ci: { failed: [] }, said: {} };
+  const acc = g.items({ ...base, accountability: 'the author\'s replies mention Personal CI, but bob/pulsar has no pull requests and no workflow runs', fork: none });
+  assert.equal(acc[0].key, 'accountability');
+  assert.ok(acc[0].text.startsWith('Looking at https://github.com/bob/pulsar/pulls, it appears you haven\'t tried using [Personal CI]'));
+  assert.ok(acc[0].text.includes(g.AI_POLICY_QUOTE)); assert.ok(acc[0].text.includes(g.LINKS.aiPolicy));
+  assert.deepEqual(g.items({ ...base, accountability: 'x', fork: none, said: { accountability: true } }), [], 'quoted on the PR already');
+  const req = g.items({ ...base, said: { accountability: true } }, ['accountability']);
+  assert.equal(req[0].key, 'accountability', 'the reviewer asks again with new evidence'); assert.ok(req[0].text.startsWith('Please make sure'));
+  assert.deepEqual(g.ensure(`Thanks.\n\n${req[0].text}`, req).added, [], 'the quote is the marker');
+});
+
 test('ensure appends only what the body leaves out', () => {
   const list = g.items({ gradle: true, firstTimer: true, personalCiSigns: false, titleProblem: 'it does not start with `[type]`', ci: { checkstyle: { job: 'B', url: 'u' } }, said: {} });
   const r = g.ensure(`Thanks for the PR! Please run \`./gradlew quickCheck\` before pushing.`, list);

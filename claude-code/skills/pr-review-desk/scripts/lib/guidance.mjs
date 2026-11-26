@@ -1,6 +1,6 @@
 // Contributor guidance for a review: deterministic signals the desk detects on the PR (CI failing on checkstyle or
 // license/format checks, a compile failure, a title that breaks the semantic-title rules, a first-time contributor
-// with no sign of Personal CI) and the paragraph each one adds to the review. The worker is told to work them into
+// with no sign of Personal CI, an author whose replies show the change is not theirs to account for) and the paragraph each one adds to the review. The worker is told to work them into
 // the summary; the import appends any it left out, so the guidance never depends on the model remembering it.
 // Apache Pulsar conventions; on for repositories named */pulsar unless the repo config says otherwise.
 import { spawnSync } from 'node:child_process';
@@ -12,7 +12,15 @@ import * as P from './prt.mjs';
 export const LINKS = {
   personalCi: 'https://pulsar.apache.org/contribute/personal-ci/',
   semanticTitle: 'https://pulsar.apache.org/contribute/develop-semantic-title',
+  aiPolicy: 'https://github.com/apache/pulsar/blob/master/AGENTS.md#licensing-and-provenance-read-first',
 };
+
+// AGENTS.md, "Licensing and provenance": the ASF generative AI policy as Pulsar states it. Quoted verbatim in reviews.
+export const AI_POLICY_QUOTE = `> - **A human is in the loop and is accountable.** Every pull request and every security report must be
+>   submitted by a human contributor who has reviewed and verified the change and takes responsibility
+>   for it. Fully autonomous agents (e.g. OpenClaw-style bots) opening PRs or filing reports on their own
+>   are not acceptable — the AI assists, the human is accountable.`;
+const AI_POLICY_MARKER = 'is in the loop and is accountable';
 
 // .github/workflows/ci-semantic-pull-request.yml on apache/pulsar master; read from the checkout when it has one.
 export const TITLE_RULES = {
@@ -58,6 +66,32 @@ export function titleRules(repo, base) {
 export function personalCiSigns(author, texts) {
   const fork = author ? new RegExp(`github\\.com/${author.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/[\\w.-]+/(pull|actions)/`, 'i') : null;
   return texts.filter((t) => /personal[- ]ci/i.test(t || '') || (fork && fork.test(t || ''))).length > 0;
+}
+
+/**
+ * What the author's fork shows of Personal CI: {repo, prs, runs} (counts; null when it could not be read).
+ * A fork with no PR and no workflow run at all means Personal CI was never tried, whatever the replies say.
+ */
+export async function forkActivity(repo, author, { gh = P } = {}) {
+  if (!author) return null;
+  const fork = `${author}/${repo.split('/')[1]}`;
+  try {
+    const prs = await gh.rest('GET', `repos/${fork}/pulls?state=all&per_page=1`);
+    const runs = await gh.rest('GET', `repos/${fork}/actions/runs?per_page=1`);
+    return { repo: fork, prs: Array.isArray(prs) ? prs.length : null, runs: typeof runs?.total_count === 'number' ? runs.total_count : null };
+  } catch (e) { return /404|Not Found/i.test(e.message) ? { repo: fork, prs: 0, runs: 0, missing: true } : null; }
+}
+
+/**
+ * The author's replies talk about Personal CI (a promise, an excuse) or answer a reviewer who pointed at it, while
+ * their fork shows it was never tried: the replies are not backed by what the author did.
+ */
+export function unbackedPersonalCi({ author, authorTexts = [], askedForPersonalCi = false, fork = null }) {
+  if (!author || !fork || fork.prs === null || fork.runs === null || fork.prs > 0 || fork.runs > 0) return null;
+  const mentions = authorTexts.some((t) => /personal[- ]ci/i.test(t || ''));
+  if (mentions) return `the author's replies mention Personal CI, but ${fork.repo} has no pull requests and no workflow runs`;
+  if (askedForPersonalCi && authorTexts.length) return `the author was pointed at Personal CI and replied, but ${fork.repo} has no pull requests and no workflow runs`;
+  return null;
 }
 
 const stripTs = (l) => l.replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z\s?/, '').replace(/\x1b\[[0-9;]*m/g, '');
@@ -148,13 +182,26 @@ export async function assess(repo, number, sha, { extra = [], gh = P, refresh = 
     const texts = [pr?.body || raw?.body || '', ...(raw?.comments?.nodes || []).map((c) => c.body), ...(raw?.reviews?.nodes || []).map((r) => r.body),
       ...(raw?.reviewThreads?.nodes || []).flatMap((t) => (t.comments?.nodes || []).map((c) => c.body))];
     const ci = await ciFailures(repo, sha, { gh });
+    // What the author wrote after opening the PR (comments, reviews, thread replies), and whether a reviewer pointed
+    // them at Personal CI before that: checked against what their fork shows.
+    const author = pr?.author;
+    const by = (c) => c?.author?.login === author;
+    const authored = [...(raw?.comments?.nodes || []), ...(raw?.reviews?.nodes || []), ...(raw?.reviewThreads?.nodes || []).flatMap((t) => t.comments?.nodes || [])];
+    const authorTexts = authored.filter(by).map((c) => c.body || '');
+    const askedForPersonalCi = authored.some((c) => !by(c) && (c.body || '').includes(LINKS.personalCi));
+    const mentionsCi = personalCiSigns(author, texts) || askedForPersonalCi;
+    const fork = mentionsCi && authorTexts.length ? await forkActivity(repo, author, { gh }) : null;
     signals = {
       at: db.now(), base: pr?.base_ref, gradle: usesGradle(repo, pr?.base_ref || 'master'),
-      firstTimer: ['FIRST_TIME_CONTRIBUTOR', 'FIRST_TIMER'].includes(pr?.association), personalCiSigns: personalCiSigns(pr?.author, texts),
+      firstTimer: ['FIRST_TIME_CONTRIBUTOR', 'FIRST_TIMER'].includes(pr?.association),
+      // Saying "Personal CI" is not a sign of using it when the fork shows it was never tried.
+      personalCiSigns: personalCiSigns(author, texts) && !(fork && fork.prs === 0 && fork.runs === 0),
+      fork, author, accountability: unbackedPersonalCi({ author, authorTexts, askedForPersonalCi, fork }),
       title: pr?.title || '', titleProblem: titleProblem(pr?.title, titleRules(repo, pr?.base_ref || 'master')) || (ci.titleCheck ? 'the "Check pull request title" check fails' : null),
       ci,
       // Said on the PR already (by anyone, e.g. an earlier review): the title and first-timer notes are not repeated.
-      said: { title: texts.some((t) => (t || '').includes(LINKS.semanticTitle)), personalCi: texts.slice(1).some((t) => (t || '').includes(LINKS.personalCi)) },
+      said: { title: texts.some((t) => (t || '').includes(LINKS.semanticTitle)), personalCi: texts.slice(1).some((t) => (t || '').includes(LINKS.personalCi)),
+        accountability: texts.slice(1).some((t) => (t || '').includes(AI_POLICY_MARKER)) },
     };
     if (!ci.pending) db.meta(key, JSON.stringify(signals));
   }
@@ -167,6 +214,17 @@ function rawPr(repo, number) {
 
 export function items(s, extra = []) {
   const out = [];
+  // A human is in the loop and is accountable. Detected (replies about Personal CI the fork does not back) or asked
+  // for by the reviewer ("guidance": ["accountability"], with the evidence in the review). Detected once per PR: not
+  // repeated after the policy was quoted on it; the reviewer's request is, since it comes with new evidence.
+  const asked = extra.includes('accountability');
+  if (asked || (s.accountability && !s.said?.accountability)) {
+    const evidence = s.accountability && s.fork?.repo
+      ? `Looking at https://github.com/${s.fork.repo}/pulls, it appears you haven't tried using [Personal CI](${LINKS.personalCi}) yet. `
+      : '';
+    out.push({ key: 'accountability', marker: AI_POLICY_MARKER, why: s.accountability || 'the review found that the replies are not backed by the changes or by what the author did',
+      text: `${evidence}Please make sure that your contributions follow the ASF generative AI policy that is referenced [in AGENTS.md](${LINKS.aiPolicy}):\n\n${AI_POLICY_QUOTE}` });
+  }
   const quick = s.gradle ? '`./gradlew quickCheck`' : '`mvn -ntp -T 1C -DskipSourceReleaseAssembly=true -DskipBuildDistribution=true -Dspotbugs.skip=true verify -DskipTests`';
   if (s.ci?.checkstyle) {
     out.push({ key: 'checkstyle', marker: s.gradle ? 'quickCheck' : 'checkstyle', why: `${s.ci.checkstyle.job} fails on checkstyle, license headers or formatting`, lines: s.ci.checkstyle.lines,
