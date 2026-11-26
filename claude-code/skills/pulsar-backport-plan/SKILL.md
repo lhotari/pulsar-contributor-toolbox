@@ -29,6 +29,7 @@ node "$BPT" doctor
 
 ```bash
 node "$BPT" serve --open        # prints http://127.0.0.1:8765/#<token>; keep it running in the background
+                                # the UI header has "Stop server"; running workers keep going and report when it is back
 ```
 
 Start it with `run_in_background` and give the user the printed link. The UI shows the plan with filters (new this round, open dependency hints, verdict, decision), per-PR evidence, dry-run results, and decision selectors per branch; it also runs the backport lanes (see pulsar-backport). Tell the user to make decisions there; you can also set them with `plan decide` when the user tells you in chat.

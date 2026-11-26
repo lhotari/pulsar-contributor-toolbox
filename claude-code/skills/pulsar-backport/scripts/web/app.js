@@ -1032,9 +1032,20 @@ $('#replyForm').addEventListener('submit', async (e) => {
 });
 
 // ---------- refresh loop ----------
+$('#stopServer').onclick = async () => {
+  let info = { running: [] }; try { info = await apiCall('server'); } catch { /* ask anyway */ }
+  const r = info.running || [];
+  const jobsNote = r.length ? `\n\n${r.length} job(s) running (${r.map((j) => `#${j.id} ${j.type}${j.branch ? ` on ${j.branch}` : ''}`).join(', ')}) keep running and report back; queued jobs and autopilot wait until the server is started again.` : '\n\nNo job is running.';
+  if (!confirm(`Stop the bpt server?${jobsNote}`)) return;
+  try { await apiCall('server/stop', {}); } catch (e) { toast(e.message, true); return; }
+  S.stopped = true;
+  document.body.replaceChildren(h('main', {}, h('div', { class: 'empty' }, h('h1', {}, 'The bpt server is stopped'),
+    h('p', {}, 'Start it again with ', h('code', {}, 'node <pulsar-backport skill>/scripts/bpt.mjs serve'), ' (or ask Claude Code), then reload this page.'))));
+};
+
 let busy = false;
 async function refresh(force = false) {
-  if (!S.sid || busy) return;
+  if (!S.sid || busy || S.stopped) return;
   // The periodic refresh does not re-render under a running click (the busy button would be replaced).
   if (!force && FG.n) return;
   busy = true;

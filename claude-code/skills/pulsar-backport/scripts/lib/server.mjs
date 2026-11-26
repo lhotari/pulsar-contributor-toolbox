@@ -259,6 +259,16 @@ export function serve({ port = null, open = false } = {}) {
           return send(200, r ?? {});
         }
       }
+      // The "Stop server" button. Workers already running keep going (they report through the CLI) and the next
+      // `bpt serve` picks their jobs up; queued jobs wait for it.
+      if (parts[0] === 'server' && !parts[1] && m === 'GET') {
+        return send(200, { pid: process.pid, running: db.all(`SELECT id, session_id, branch, type FROM jobs WHERE status = 'running'`) });
+      }
+      if (parts[0] === 'server' && parts[1] === 'stop' && m === 'POST') {
+        send(200, { stopping: process.pid });
+        setTimeout(() => { console.log('stopped from the UI'); stop(); }, 200);
+        return;
+      }
       if (parts[0] === 'jobs' && parts[1]) {
         const id = Number(parts[1]);
         if (parts[2] === 'log' && m === 'GET') return send(200, jobs.readLog(id, Number(url.searchParams.get('offset') || 0)));
@@ -271,7 +281,7 @@ export function serve({ port = null, open = false } = {}) {
       send(404, { error: 'no such endpoint' });
     } catch (e) { send(400, { error: e.message }); }
   };
-  let ticking = false;
+  let ticking = false; let stop = () => process.exit(0);
   function tick() {
     if (ticking) return; ticking = true;
     try {
@@ -290,7 +300,7 @@ export function serve({ port = null, open = false } = {}) {
     if (open) spawn('open', [links[0]], { detached: true, stdio: 'ignore' }).on('error', () => {}).unref();
     tick();
   });
-  const stop = () => { server.close(); process.exit(0); };
+  stop = () => { server.close(); process.exit(0); };
   process.on('SIGINT', stop); process.on('SIGTERM', stop);
   return server;
 }
