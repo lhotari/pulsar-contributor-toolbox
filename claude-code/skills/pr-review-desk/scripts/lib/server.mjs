@@ -188,9 +188,20 @@ const ACTIONS = {
     const n = Number(a.number); const it = db.item(a.repo, n); const pr = db.pr(a.repo, n);
     if (['flagged', 'suspicious'].includes(it.gate) && it.gate_sha === pr.head_sha) throw new Error(`the security gate is "${it.gate}": no checkout for this head`);
     if (!db.repo(a.repo).checkout) throw new Error(`no local checkout configured for ${a.repo} (Rules & repos)`);
-    return { job: jobs.enqueue(a.repo, n, 'merge', { instructions: a.instructions || null }) };
+    const busy = db.get(`SELECT id FROM jobs WHERE repo = ? AND number = ? AND type = 'merge' AND status IN ('queued','running','waiting')`, a.repo, n);
+    if (busy) throw new Error(`merge job ${busy.id} is still open for #${n}`);
+    // A re-merge with the latest base keeps the earlier resolution where the base did not change the file again.
+    const pj = a.prev ? jobs.job(Number(a.prev)) : null; const pm = pj?.result?.merge;
+    const prev = pm && pm.head === pr.head_sha ? { job: pj.id, mergeSha: pm.mergeSha, base: pm.base, head: pm.head } : null;
+    return { job: jobs.enqueue(a.repo, n, 'merge', { instructions: a.instructions || null, prev }) };
   },
-  'merge-push': async (a) => merge.push(Number(a.job)),
+  // After my push GitHub starts the workflows a little later, and holds them for approval (fork PRs): watch the new
+  // head for a few minutes and approve what appears, as after "Update branch".
+  'merge-push': async (a) => {
+    const j = jobs.job(Number(a.job)); const r = await merge.push(j.id, { ack: a.ack || [] });
+    ci.followUp(j.repo, j.number, j.result.merge.head, { onDone: () => triage.track(j.repo, j.number).catch(() => {}) }).catch(() => {});
+    return { ...r, approvingRuns: true };
+  },
   // A change to the PR addressing threads (several at once) and/or free-text instructions: commits on top of the head.
   // manual: the engine only creates the worktree; the human commits there and clicks "Check commits".
   'change-prepare': async (a) => {
@@ -217,7 +228,11 @@ const ACTIONS = {
     const j = jobs.job(Number(a.job)); if (!j.result?.change) throw new Error('nothing checked yet');
     db.run(`UPDATE jobs SET result = json_set(result, '$.change.replies', json(?)) WHERE id = ?`, db.S(a.replies || []), j.id); return {};
   },
-  'change-push': async (a) => change.push(Number(a.job), { replies: a.replies || null, ack: a.ack || [] }),
+  'change-push': async (a) => {
+    const j = jobs.job(Number(a.job)); const r = await change.push(j.id, { replies: a.replies || null, ack: a.ack || [] });
+    ci.followUp(j.repo, j.number, j.result.change.head, { onDone: () => triage.track(j.repo, j.number).catch(() => {}) }).catch(() => {});
+    return { ...r, approvingRuns: true };
+  },
   'change-discard': (a) => change.discard(Number(a.job)),
   'update-branch': async (a) => {
     const n = Number(a.number); const it = db.item(a.repo, n); const pr = db.pr(a.repo, n);

@@ -545,29 +545,58 @@ function renderSide() {
   return out;
 }
 
-/** Merge conflicts: merge the PR's base branch into it (Claude resolves; you push), or GitHub's "Update branch" when it merges cleanly. */
+/** The PR's base branch as GitHub has it now and how far behind it the head is (loaded lazily, once per head). */
+const branchInfo = new Map();
+function baseInfo(pr) {
+  const key = `${pr.repo}#${pr.number}@${pr.head_sha}`;
+  if (!branchInfo.has(key)) {
+    branchInfo.set(key, null);
+    api(`ci?repo=${encodeURIComponent(pr.repo)}&number=${pr.number}`).then((c) => { branchInfo.set(key, c); if (onPrRoute(pr.repo, pr.number)) renderPr(); })
+      .catch(() => branchInfo.set(key, { error: true }));
+  }
+  return branchInfo.get(key);
+}
+
+/** Merge the PR's latest base branch into it (Claude resolves any conflicts; you push), or GitHub's "Update branch" when it merges cleanly. */
 function renderBranch(bad) {
   const { pr, jobs } = S.pr;
   const state = pr.analysis?.mergeable || 'UNKNOWN';
+  const info = baseInfo(pr);
+  const base = info?.base || pr.base_ref;
+  const behind = info && !info.error ? info.behindBy : null;
   const mj = jobs.find((j) => j.type === 'merge');
   const active = mj && ['queued', 'running', 'waiting'].includes(mj.status) ? mj : null;
   const m = mj?.result?.merge; const pushed = mj?.result?.pushed;
   const fresh = m && m.head === pr.head_sha && !pushed;
-  const resolve = h('button', { class: state === 'CONFLICTING' ? 'small primary' : 'small', disabled: bad || active ? true : null,
-    title: bad ? 'Security hold: no checkout for this head' : `Claude merges ${pr.base_ref} into a checkout of the PR head and resolves the conflicts; you check and push the merge commit`,
-    onclick: () => run('Queued', () => action('resolve-conflicts', { repo: pr.repo, number: pr.number })).then(reloadPr) }, `Resolve conflicts (merge ${pr.base_ref})`);
-  const update = h('button', { class: 'small ghost', disabled: bad || state === 'CONFLICTING' ? true : null, title: 'GitHub\'s "Update branch": merges the base into the PR branch when there is no conflict',
-    onclick: () => { if (confirm(`Merge ${pr.base_ref} into #${pr.number} on GitHub ("Update branch")? Workflow runs it starts are approved as they appear.`)) run('Update requested', () => action('update-branch', { repo: pr.repo, number: pr.number })).then(reloadPr); } }, 'Update branch');
+  const conflicting = state === 'CONFLICTING';
+  const queueMerge = (prev) => run('Queued', () => action('resolve-conflicts', { repo: pr.repo, number: pr.number, prev: prev || undefined })).then(reloadPr);
+  const resolve = h('button', { class: (conflicting || behind > 0) && !fresh ? 'small primary' : 'small', disabled: bad || active ? true : null,
+    title: bad ? 'Security hold: no checkout for this head' : `The engine re-reads the PR's base on GitHub (${base}), fetches its latest commit from the upstream remote and merges it into a checkout of the PR head; Claude resolves any conflicts; you check and push the merge commit`,
+    onclick: () => queueMerge(null) }, conflicting ? `Resolve conflicts (merge latest ${base})` : `Merge latest ${base}`);
+  const update = h('button', { class: 'small ghost', disabled: bad || conflicting || behind === 0 ? true : null, title: 'GitHub\'s "Update branch": merges the base into the PR branch when there is no conflict',
+    onclick: () => { if (confirm(`Merge ${base} into #${pr.number} on GitHub ("Update branch")? Workflow runs it starts are approved as they appear.`)) run('Update requested', () => action('update-branch', { repo: pr.repo, number: pr.number })).then(reloadPr); } }, 'Update branch');
   const push = async () => {
-    if (!confirm(`Push merge commit ${m.mergeSha.slice(0, 10)} (${pr.base_ref} merged into ${m.head.slice(0, 10)}) to the PR branch?\n\n${m.stat || ''}\n\nIt is a fast-forward of the PR head, pushed as you; check the combined diff first.`)) return;
-    await run('Pushed', () => action('merge-push', { job: mj.id })); reloadPr();
+    const mb = m.baseRef || base;
+    if (!confirm(`Push merge commit ${m.mergeSha.slice(0, 10)} (${mb} ${m.base.slice(0, 10)} merged into ${m.head.slice(0, 10)}) to the PR branch?\n\n${m.stat || ''}\n\nThe latest ${mb} is fetched again first. It is a fast-forward of the PR head, pushed as you; check the combined diff first.`)) return;
+    try { await action('merge-push', { job: mj.id }); toast('Pushed; approving the workflow runs it starts (Activity)'); } catch (e) {
+      if (e.code === 'BASE_MOVED') {
+        if (confirm(`${e.message}.\n\nMerge the latest ${mb} again before pushing? (Recommended: CI then runs on the latest base. Files ${mb} did not change again keep this resolution.)\n\nCancel to choose whether to push this merge anyway.`)) await queueMerge(mj.id);
+        else if (confirm(`Push the merge of the older ${mb} (${m.base.slice(0, 10)}) anyway?`)) await run('Pushed; approving the workflow runs it starts (Activity)', () => action('merge-push', { job: mj.id, ack: ['base-moved'] }));
+      } else toast(e.message, true);
+    }
+    reloadPr();
   };
+  const behindText = info?.error ? 'could not read the base from GitHub' : behind == null ? 'checking…' : behind === 0 ? `up to date with ${base}` : `${behind} commit(s) behind ${base}`;
   return h('div', { class: 'panel' }, h('h2', {}, 'Branch'),
-    h('div', { class: 'kv' }, h('span', { class: 'muted' }, 'base'), h('span', { class: 'mono small' }, pr.base_ref),
-      h('span', { class: 'muted' }, 'mergeable'), h('span', {}, chip(state.toLowerCase(), state === 'CONFLICTING' ? 'bad' : state === 'MERGEABLE' ? 'ok' : ''))),
+    h('div', { class: 'kv' }, h('span', { class: 'muted' }, 'base'), h('span', { class: 'mono small' }, base, info?.base && info.base !== pr.base_ref ? ` (was ${pr.base_ref})` : ''),
+      h('span', { class: 'muted' }, 'mergeable'), h('span', {}, chip(state.toLowerCase(), conflicting ? 'bad' : state === 'MERGEABLE' ? 'ok' : '')),
+      h('span', { class: 'muted' }, 'behind'), h('span', { class: 'small' }, chip(behindText, behind > 0 ? 'warn' : behind === 0 ? 'ok' : ''))),
+    !active && !fresh && !bad && (conflicting || behind > 0) ? h('p', { class: 'small' }, conflicting
+      ? `#${pr.number} conflicts with ${base}. Merge the latest ${base} into it: Claude resolves the conflicts, you check the merge and push it.`
+      : `#${pr.number} is ${behind} commit(s) behind ${base}. Merge the latest ${base} into it so CI runs on the current base.`) : null,
     active ? h('div', { class: 'small' }, chip(`merge ${active.status}`, active.status), ' ', h('button', { class: 'small ghost', onclick: () => openLog(active.id) }, 'Log')) : null,
     m ? h('div', { class: 'small', style: 'margin-top:6px' }, pushed ? [chip('pushed', 'ok'), ` ${m.mergeSha.slice(0, 10)} to ${pushed.to} ${ago(pushed.at)}`]
-      : fresh ? [h('p', {}, `Merge commit ${m.mergeSha.slice(0, 10)} is ready (${m.stat || 'no stat'}).`),
+      : fresh ? [h('p', {}, `Merge commit ${m.mergeSha.slice(0, 10)} of ${m.baseRef || base} ${m.base.slice(0, 10)} is ready (${m.stat || 'no stat'}).`),
         mj.result?.summary ? h('details', {}, h('summary', {}, 'How the conflicts were resolved'), md(mj.result.summary)) : null,
         h('details', {}, h('summary', {}, 'Combined diff of the merge'), h('pre', { class: 'small', style: 'max-height:420px;overflow:auto' }, m.combinedDiff || '(empty: no manual resolution)')),
         h('div', { class: 'actions', style: 'margin-top:6px' }, h('button', { class: 'small primary', disabled: mj.status !== 'done' ? true : null, onclick: push }, 'Push merge to the PR branch'))]

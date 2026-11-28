@@ -286,9 +286,9 @@ test('merge conflicts: merge the base branch, the worker resolves, the engine ch
   await triage.track('o/r', 6); await triage.scan('o/r', 6);
   assert.equal(db.pr('o/r', 6).analysis.mergeable, 'CONFLICTING');
   const id = jobs.enqueue('o/r', 6, 'merge', {});
-  assert.throws(() => merge.start(id), /security gate is not "clear"/);
+  await assert.rejects(merge.start(id), /security gate is not "clear"/);
   db.run(`UPDATE items SET gate = 'clear', gate_sha = ? WHERE repo = 'o/r' AND number = 6`, head);
-  const s = merge.start(id);
+  const s = await merge.start(id);
   assert.deepEqual(s.conflicts, ['a.txt']); assert.equal(s.base, base);
   const wt = jobs.job(id).worktree;
   assert.throws(() => merge.ready(id), /still in progress/);
@@ -297,10 +297,25 @@ test('merge conflicts: merge the base branch, the worker resolves, the engine ch
   assert.equal(sh(wt, 'rev-list', '--parents', '-n', '1', 'HEAD').split(' ').length, 3);
   jobs.finish(id, 'done', { summary: 'kept both lines' });
   assert.equal(jobs.job(id).result.merge.mergeSha, m.mergeSha);   // the worker's report does not drop the checked commit
-  const r = await merge.push(id, { urlFor: () => up });
-  assert.equal(r.pushed, m.mergeSha);
-  assert.equal(spawnSync('git', ['--git-dir', up, 'rev-parse', 'refs/heads/feature'], { encoding: 'utf8' }).stdout.trim(), m.mergeSha);
-  await assert.rejects(merge.push(id, { urlFor: () => up }), /already pushed/);
+  // The base moved while the merge waited: the push fetches it again and refuses until a re-merge (or an ack).
+  fs.writeFileSync(path.join(co, 'b.txt'), 'new on main\n'); sh(co, 'add', 'b.txt'); sh(co, 'commit', '-qm', 'more on main'); sh(co, 'push', '-q', 'origin', 'main');
+  const base2 = sh(co, 'rev-parse', 'HEAD');
+  await assert.rejects(merge.push(id, { urlFor: () => up }), (e) => e.code === 'BASE_MOVED' && /1 new commit/.test(e.message));
+  // Re-merge with the latest base: a.txt was not changed by main again, so its earlier resolution is reused.
+  const id2 = jobs.enqueue('o/r', 6, 'merge', { prev: { job: id, mergeSha: m.mergeSha, base: m.base, head } });
+  const s2 = await merge.start(id2);
+  assert.equal(s2.base, base2); assert.deepEqual(s2.reused, ['a.txt']); assert.deepEqual(s2.conflicts, []); assert.equal(s2.committed, true);
+  const m2 = merge.ready(id2);
+  assert.equal(fs.readFileSync(path.join(jobs.job(id2).worktree, 'a.txt'), 'utf8'), 'one from the PR and main\n');
+  jobs.finish(id2, 'done', { summary: 'reused' });
+  // A retargeted PR: the merge of the old base is refused.
+  setGh((g) => { g.prs[6].base = 'branch-x'; });
+  await assert.rejects(merge.push(id2, { urlFor: () => up }), (e) => e.code === 'BASE_CHANGED');
+  setGh((g) => { g.prs[6].base = 'main'; });
+  const r = await merge.push(id2, { urlFor: () => up });
+  assert.equal(r.pushed, m2.mergeSha);
+  assert.equal(spawnSync('git', ['--git-dir', up, 'rev-parse', 'refs/heads/feature'], { encoding: 'utf8' }).stdout.trim(), m2.mergeSha);
+  await assert.rejects(merge.push(id2, { urlFor: () => up }), /already pushed/);
 });
 
 test('a change to the PR: several threads and instructions in one batch, checked, reviewed, pushed, threads replied and resolved', async () => {

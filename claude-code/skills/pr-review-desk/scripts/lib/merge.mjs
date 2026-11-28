@@ -13,21 +13,55 @@ const git = (dir, args, opts = {}) => spawnSync('git', ['-C', dir, ...args], { e
 const mergeRef = (j) => `refs/pr-desk/${j.number}/merge-${j.id}`;
 const baseRef = (j) => `refs/pr-desk/${j.number}/base-${j.id}`;
 
-/** Fetch the base branch from the upstream remote and start `git merge` in the job's worktree. */
-export function start(id) {
+const latestRef = (n) => `refs/pr-desk/${n}/base-latest`;
+
+/**
+ * The PR's base branch as GitHub has it now (a PR can be retargeted, and the base is not always master),
+ * fetched fresh from the upstream remote. Never trusts the synced copy: a merge is always made with the latest base.
+ */
+export async function fetchBase(repo, number, live = null) {
+  const r = db.repo(repo);
+  if (!r?.checkout) throw new Error(`no local checkout configured for ${repo} (Rules & repos)`);
+  const pr = live || await P.rest('GET', `repos/${repo}/pulls/${number}`);
+  const ref = pr.base.ref;
+  if (db.pr(repo, number) && db.pr(repo, number).base_ref !== ref) {
+    db.run('UPDATE prs SET base_ref = ? WHERE repo = ? AND number = ?', ref, repo, number);
+    db.event(repo, number, `#${number}: the base branch is now ${ref}`);
+  }
+  const f = git(r.checkout, ['fetch', '--no-tags', '--force', r.remote || 'origin', `refs/heads/${ref}:${latestRef(number)}`]);
+  if (f.status !== 0) throw new Error(`fetching ${ref} from ${r.remote || 'origin'} failed: ${f.stderr.trim()}`);
+  return { ref, sha: git(r.checkout, ['rev-parse', latestRef(number)]).stdout.trim(), pr };
+}
+
+/**
+ * Fetch the latest base branch and start `git merge` in the job's worktree. A re-merge (args.prev: an earlier
+ * merge of the same head) reuses that resolution for each conflicted file the base has not touched since.
+ */
+export async function start(id) {
   const j = job(id);
   if (j.type !== 'merge') throw new Error(`job ${id} is a ${j.type} job`);
-  const pr = db.pr(j.repo, j.number); const r = db.repo(j.repo);
+  const r = db.repo(j.repo);
   const wt = worktree(id);   // refuses unless the security gate is clear for the pinned head
-  const f = git(r.checkout, ['fetch', '--no-tags', '--force', r.remote || 'origin', `refs/heads/${pr.base_ref}:${baseRef(j)}`]);
-  if (f.status !== 0) throw new Error(`fetching ${pr.base_ref} failed: ${f.stderr.trim()}`);
-  const base = git(r.checkout, ['rev-parse', baseRef(j)]).stdout.trim();
-  if (git(wt, ['merge-base', '--is-ancestor', base, 'HEAD']).status === 0) return { base, baseRef: pr.base_ref, upToDate: true, conflicts: [] };
-  const m = git(wt, ['merge', '--no-ff', '--no-edit', '-m', `Merge branch '${pr.base_ref}' of https://github.com/${j.repo} into the PR branch`, base]);
-  const conflicts = git(wt, ['diff', '--name-only', '--diff-filter=U']).stdout.split('\n').filter(Boolean);
-  db.event(j.repo, j.number, `#${j.number}: merging ${pr.base_ref} (${base.slice(0, 10)}) into ${j.head_sha.slice(0, 10)}: ${conflicts.length ? `${conflicts.length} conflicted file(s)` : m.status === 0 ? 'merged cleanly' : 'merge failed'}`, { job: id });
-  if (m.status !== 0 && !conflicts.length) throw new Error(`git merge failed: ${(m.stderr || m.stdout).trim().slice(0, 800)}`);
-  return { worktree: wt, base, baseRef: pr.base_ref, conflicts, committed: m.status === 0 };
+  const { ref, sha: base } = await fetchBase(j.repo, j.number);
+  git(r.checkout, ['update-ref', baseRef(j), base]);
+  db.run(`UPDATE jobs SET result = json_set(COALESCE(result, '{}'), '$.mergeBase', json(?)) WHERE id = ?`, db.S({ ref, sha: base, at: db.now() }), id);
+  if (git(wt, ['merge-base', '--is-ancestor', base, 'HEAD']).status === 0) return { base, baseRef: ref, upToDate: true, conflicts: [] };
+  const m = git(wt, ['merge', '--no-ff', '--no-edit', '-m', `Merge branch '${ref}' of https://github.com/${j.repo} into the PR branch`, base]);
+  let conflicts = git(wt, ['diff', '--name-only', '--diff-filter=U']).stdout.split('\n').filter(Boolean);
+  const reused = [];
+  const prev = j.args?.prev;
+  if (conflicts.length && prev?.mergeSha && prev.head === j.head_sha && git(wt, ['cat-file', '-e', `${prev.mergeSha}^{commit}`]).status === 0) {
+    for (const f of conflicts) {
+      if (git(wt, ['diff', '--quiet', prev.base, base, '--', f]).status !== 0) continue;   // the base changed it again: resolve anew
+      if (git(wt, ['checkout', prev.mergeSha, '--', f]).status === 0 && git(wt, ['add', '--', f]).status === 0) reused.push(f);
+    }
+    conflicts = conflicts.filter((f) => !reused.includes(f));
+  }
+  let committed = m.status === 0;
+  if (!committed && !conflicts.length && reused.length) committed = git(wt, ['commit', '--no-edit']).status === 0;
+  db.event(j.repo, j.number, `#${j.number}: merging ${ref} (${base.slice(0, 10)}) into ${j.head_sha.slice(0, 10)}: ${conflicts.length ? `${conflicts.length} conflicted file(s)` : committed ? 'merged cleanly' : 'merge failed'}${reused.length ? `; reused the earlier resolution of ${reused.length} file(s)` : ''}`, { job: id });
+  if (m.status !== 0 && !conflicts.length && !reused.length) throw new Error(`git merge failed: ${(m.stderr || m.stdout).trim().slice(0, 800)}`);
+  return { worktree: wt, base, baseRef: ref, conflicts, reused, committed };
 }
 
 /** Check the worker's result and pin it: a merge commit of (pinned head, fetched base), clean tree, no markers left. */
@@ -52,13 +86,13 @@ export function ready(id) {
   const touched = git(wt, ['diff', '--stat', `${parents[1]}...${sha}`]).stdout.trim().split('\n').slice(-1)[0] || '';
   const cc = git(wt, ['show', '--cc', '--format=', sha]).stdout;
   git(r.checkout, ['update-ref', mergeRef(j), sha]);
-  const res = { mergeSha: sha, base, baseRef: db.pr(j.repo, j.number).base_ref, head: j.head_sha, ref: mergeRef(j), combinedDiff: cc.slice(0, 60_000), stat: touched };
+  const res = { mergeSha: sha, base, baseRef: j.result?.mergeBase?.ref || db.pr(j.repo, j.number).base_ref, head: j.head_sha, ref: mergeRef(j), combinedDiff: cc.slice(0, 60_000), stat: touched };
   db.run(`UPDATE jobs SET result = json_set(COALESCE(result, '{}'), '$.merge', json(?)) WHERE id = ?`, db.S(res), id);
   return res;
 }
 
 /** The human's click: push the pinned merge commit to the PR's head branch. Fast-forward only. */
-export async function push(id, { urlFor = (full) => `https://github.com/${full}.git` } = {}) {
+export async function push(id, { urlFor = (full) => `https://github.com/${full}.git`, ack = [] } = {}) {
   const j = job(id); const r = db.repo(j.repo);
   const m = j.result?.merge;
   if (!m?.mergeSha) throw new Error('this job has no checked merge commit');
@@ -66,6 +100,13 @@ export async function push(id, { urlFor = (full) => `https://github.com/${full}.
   const pr = await P.rest('GET', `repos/${j.repo}/pulls/${j.number}`);
   if (pr.state !== 'open') throw new Error(`#${j.number} is ${pr.state}`);
   if (pr.head.sha !== m.head) throw new Error(`the PR head moved to ${pr.head.sha.slice(0, 10)} since the merge was made on ${m.head.slice(0, 10)}; resolve again`);
+  if (pr.base.ref !== m.baseRef) throw Object.assign(new Error(`the PR now targets ${pr.base.ref}, not ${m.baseRef}: merge ${pr.base.ref} again`), { code: 'BASE_CHANGED' });
+  // The base may have moved while the merge waited for review: fetch it again and offer a re-merge.
+  const latest = await fetchBase(j.repo, j.number, pr);
+  if (git(r.checkout, ['merge-base', '--is-ancestor', latest.sha, m.mergeSha]).status !== 0 && !ack.includes('base-moved')) {
+    const n = Number(git(r.checkout, ['rev-list', '--count', `${m.mergeSha}..${latest.sha}`]).stdout.trim()) || 0;
+    throw Object.assign(new Error(`${m.baseRef} has ${n} new commit(s) since this merge (${m.base.slice(0, 10)} → ${latest.sha.slice(0, 10)})`), { code: 'BASE_MOVED', behind: n, latest: latest.sha });
+  }
   const sameRepo = pr.head.repo?.full_name === pr.base.repo.full_name;
   if (!sameRepo && !pr.maintainer_can_modify) throw new Error('the author has not allowed edits from maintainers on this PR; ask them to merge the base branch, or to enable "Allow edits from maintainers"');
   if (!pr.head.repo) throw new Error('the head repository was deleted');

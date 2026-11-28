@@ -259,7 +259,7 @@ async function main() {
       if (sub === 'list') return out(db.all(`SELECT id, repo, number, type, status, claimed_by, created_at FROM jobs ORDER BY id DESC LIMIT 30`));
       if (sub === 'show') return out(await jobs.context(Number(p._[0])));
       if (sub === 'worktree') return out(jobs.worktree(Number(p._[0])));
-      if (sub === 'merge-start') return out(merge.start(Number(p._[0])));
+      if (sub === 'merge-start') return out(await merge.start(Number(p._[0])));
       if (sub === 'merge-ready') { const r = merge.ready(Number(p._[0])); return out({ mergeSha: r.mergeSha, base: r.base, baseRef: r.baseRef, stat: r.stat }); }
       if (sub === 'change-start') return out(change.start(Number(p._[0])));
       if (sub === 'change-ready') {

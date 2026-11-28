@@ -61,7 +61,7 @@ export function ready(id, { replies = null } = {}) {
     .map((l) => { const [c, parents, author, subject] = l.split('\t'); return { sha: c, merge: parents.split(' ').length > 1, author, subject }; });
   if (!commits.length) throw new Error('no commits on top of the PR head yet');
   const merges = commits.filter((c) => c.merge);
-  if (merges.length) throw new Error(`merge commit(s) ${merges.map((c) => c.sha.slice(0, 10)).join(', ')}: a change is plain commits on top of the head (to merge the base branch, use "Resolve conflicts")`);
+  if (merges.length) throw new Error(`merge commit(s) ${merges.map((c) => c.sha.slice(0, 10)).join(', ')}: a change is plain commits on top of the head (to merge the latest base branch, use "Merge <base>" in the Branch panel)`);
   const changed = git(wt, ['diff', '--name-only', j.head_sha, sha]).stdout.split('\n').filter(Boolean);
   const markers = changed.length ? git(wt, ['grep', '-n', '-I', '-E', '^(<<<<<<<|>>>>>>>)( |$)', sha, '--', ...changed]).stdout.trim() : '';
   if (markers) throw new Error(`conflict markers left:\n${markers.slice(0, 600)}`);

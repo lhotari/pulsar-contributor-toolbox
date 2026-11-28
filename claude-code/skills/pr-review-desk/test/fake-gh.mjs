@@ -7,7 +7,8 @@ const file = process.env.FAKE_GH_STATE;
 const st = JSON.parse(fs.readFileSync(file, 'utf8'));
 const args = process.argv.slice(2);
 let stdin = ''; try { stdin = fs.readFileSync(0, 'utf8'); } catch { /* none */ }
-const save = () => fs.writeFileSync(file, JSON.stringify(st, null, 1));
+// Atomic: gh calls run concurrently (Promise.all); a torn write would break the next reader.
+const save = () => { const t = `${file}.${process.pid}`; fs.writeFileSync(t, JSON.stringify(st, null, 1)); fs.renameSync(t, file); };
 const ok = (o) => { process.stdout.write(typeof o === 'string' ? o : JSON.stringify(o)); save(); process.exit(0); };
 const fail = (m, code = 1) => { process.stderr.write(m); save(); process.exit(code); };
 st.calls = st.calls || []; st.calls.push(args.join(' ').slice(0, 300));
@@ -16,7 +17,7 @@ for (let i = 0; i < args.length; i++) if (args[i] === '-f' || args[i] === '-F') 
 const q = vars.query || '';
 const pr = (n) => st.prs[n];
 const core = (p) => ({ id: `PR_${p.number}`, number: p.number, title: p.title, url: `https://github.com/o/r/pull/${p.number}`, state: 'OPEN', isDraft: false, merged: false,
-  createdAt: '2026-11-01T00:00:00Z', updatedAt: p.updatedAt, additions: 3, deletions: 0, changedFiles: 1, headRefOid: p.head, baseRefName: 'main',
+  createdAt: '2026-11-01T00:00:00Z', updatedAt: p.updatedAt, additions: 3, deletions: 0, changedFiles: 1, headRefOid: p.head, baseRefName: p.base || 'main',
   authorAssociation: p.association, reviewDecision: p.reviewDecision || null, mergeable: p.mergeable || 'MERGEABLE', author: { login: p.author }, labels: { nodes: [] },
   commits: { nodes: [{ commit: { oid: p.head, statusCheckRollup: { state: 'SUCCESS' } } }] }, reviews: { nodes: [] }, latestOpinionatedReviews: { nodes: [] },
   reviewThreads: { nodes: (p.threads || []).map((t) => ({ isOutdated: false, line: 2, diffSide: 'RIGHT', resolvedBy: null, ...t, isResolved: (st.resolved || []).includes(t.id) || !!t.isResolved,
@@ -82,7 +83,7 @@ if (args[0] === 'api') {
   let m;
   if ((m = /pulls\/(\d+)$/.exec(path)) && method === 'GET') {
     const p = pr(Number(m[1]));
-    ok({ number: p.number, state: 'open', head: { sha: p.head, ref: 'feature', repo: { full_name: p.fork ? 'f/r' : 'o/r' } }, base: { ref: 'main', repo: { full_name: 'o/r' } }, maintainer_can_modify: !!p.canModify });
+    ok({ number: p.number, state: 'open', head: { sha: p.head, ref: 'feature', repo: { full_name: p.fork ? 'f/r' : 'o/r' } }, base: { ref: p.base || 'main', repo: { full_name: 'o/r' } }, maintainer_can_modify: !!p.canModify });
   }
   if ((m = /pulls\/(\d+)\/update-branch$/.exec(path)) && method === 'PUT') {
     const p = pr(Number(m[1]));
@@ -99,7 +100,7 @@ if (args[0] === 'api') {
     st.approved = [...(st.approved || []), Number(m[1])]; ok({});
   }
   if ((m = /commits\/([0-9a-f]{40})$/.exec(path))) ok({ commit: { committer: { date: byHead(m[1])?.commitDate || '2026-11-01T00:00:00Z' } } });
-  if ((m = /compare\/main\.\.\.([0-9a-f]{40})/.exec(path))) ok({ behind_by: byHead(m[1])?.behind ?? 0 });
+  if ((m = /compare\/[^/]+\.\.\.([0-9a-f]{40})/.exec(path))) ok({ behind_by: byHead(m[1])?.behind ?? 0 });
   fail(`fake-gh: unknown api ${method} ${path}`);
 }
 fail(`fake-gh: unknown command ${args.join(' ')}`);
